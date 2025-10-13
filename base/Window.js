@@ -1,11 +1,11 @@
 import { Point } from './Point.js';
 import { Vector } from './Vector.js';
 export class Window {
-    constructor(width, height, xlength, ylength, vector, name) {
-        this.name = name;
+    constructor(width, height, xlength, ylength, vector) {
         this.width = width;
         this.height = height;
-        this.DPI = width / xlength;
+        this.DPIx = width / xlength;
+        this.DPIy = height / ylength;
         this.direction = vector;
         this.vx = null;
         this.vy = null;
@@ -43,7 +43,7 @@ export class Window {
         // const disOfPointToNormal = Math.sqrt(cpd2 - disOfPointToPlane * disOfPointToPlane);
     }
 
-    calculateAPoint (head, eyeD, direction, point) {
+    calculateAPoint (head, eyeD, direction, point, light) {
         const hpdx = point.x - head.x;
         const hpdy = point.y - head.y;
         const hpdz = point.z - head.z;
@@ -55,28 +55,47 @@ export class Window {
 
         const disOfPointProjToHeadPlaneYaxis = this.vx.projL(hpdx, hpdy, hpdz);
         const x = (xlength / 2) + this.disOfPointProjToPlaneYaxis + disOfPointProjToHeadPlaneYaxis * rate;
+
+        const yScreen = Math.round(y * this.DPIy);
+        const xScreen = Math.round(x * this.DPIx);
+        point.xM = xScreen;
+        point.yM = yScreen;
+
+        const x_grid = Math.round(xScreen / this.gridsize);
+        const y_grid = Math.round(yScreen / this.gridsize);
+        const targetList = this.grid[x_grid][y_grid];
+        point.dis = disOfPointToHeadPlane;
+        let insertIndex = 0;
+        while (insertIndex < targetList.length && targetList[insertIndex].dis >= point.dis) {
+            insertIndex++;
+        }
+        targetList.splice(insertIndex, 0, point);
         if (eyeD) {
             const dis = (eyeD / 2) * rate;
             const xL = x - dis;
             const xR = x + dis;
-            const yScreen = Math.round(y * this.DPI);
-            const xLScreen = Math.round(xL * this.DPI);
-            const xRScreen = Math.round(xR * this.DPI);
+            const yLScreen = Math.round(y * this.DPIy);
+            const xLScreen = Math.round(xL * this.DPIx);
+            const xRScreen = Math.round(xR * this.DPIx);
+            point.xL = xLScreen;
+            point.yL = yLScreen;
+            point.xR = xRScreen;
+            point.yR = yLScreen;
+            point.light = (-hpdx * point.rx + -hpdy * point.ry + -hpdz * point.rz) / (hpdx * hpdx + hpdy * hpdy + hpdz * hpdz);
             //point.links.set(this.name, new Link(xLScreen, yScreen, xRScreen, yScreen, disOfPointToHeadPlane));
-        } else {
-            const yScreen = Math.round(y * this.DPI);
-            const xScreen = Math.round(x * this.DPI);
-            point.x0 = xScreen;
-            point.y0 = yScreen;
-            const x_grid = Math.round(xScreen / this.gridsize);
-            const y_grid = Math.round(yScreen / this.gridsize);
-            const targetList = this.grid[x_grid][y_grid];
-            point.setDis(dis);
-            let insertIndex = 0;
-            while (insertIndex < targetList.length && targetList[insertIndex].dis >= point.dis) {
-                insertIndex++;
+        }
+        if (light) {
+            if (point.nx != 0 && point.ny != 0 && point.nz != 0) {
+                const dot = point.nx * hpdx + point.ny * hpdy + point.nz * hpdz;
+                const twoDot = 2 * dot;
+                point.rx = (hpdx - twoDot * point.nx) / point.dis;
+                point.ry = (hpdy - twoDot * point.ny) / point.dis;
+                point.rz = (hpdz - twoDot * point.nz) / point.dis;
+                const attenuation = 1 / (point.dis * 0.001 + 1) * light;
+                point.rx *= attenuation;
+                point.ry *= attenuation;
+                point.rz *= attenuation;
             }
-            targetList.splice(insertIndex, 0, point);
             //point.reflects.set(this.name, new Reflect(xLScreen, yScreen, xRScreen, yScreen, disOfPointToHeadPlane));
         }
     }
@@ -124,33 +143,23 @@ export class Window {
 
                 if ((xmax - xmin) > 1 && (ymax - ymin) > 1) {
                     // 6. 赋法向量给深度相近且空间分布广的点
-                    for (let k = start; k <= end; k++) {
-                        point.normal(-this.direction.x, -this.direction.y, -this.direction.z);
+                    if (points[k].nx == 0 && points[k].ny == 0 && points[k].nz == 0) {
+                        for (let k = start; k <= end; k++) {
+                            points[k].nx = -this.direction.x;
+                            points[k].ny = -this.direction.y;
+                            points[k].nz = -this.direction.z;
+                        }
+                    } else {
+                        if (Math.random() < 0.5) {
+                            for (let k = start; k <= end; k++) {
+                                points[k].nx = -this.direction.x;
+                                points[k].ny = -this.direction.y;
+                                points[k].nz = -this.direction.z;
+                            }
+                        }
                     }
                 }
             }
         }
-    }
-
-    calx (eye, direction, rotation, point) {
-        const ecdx = eye.x - direction.start.x;
-        const ecdy = eye.y - direction.start.y;
-        const ecdz = eye.z - direction.start.z;
-        const ecd2 = ecdx * ecdx + ecdy * ecdy + ecdz * ecdz;
-        const disOfEyeToPlane = direction.projL(ecdx, ecdy, ecdz);
-        const disOfEyeProjToNormal = Math.sqrt(ecd2 - disOfEyeToPlane * disOfEyeToPlane);
-        const disOfEyeProjToXaxis = rotation.projL(ecdx, ecdy, ecdz);
-        const disOfEyeProjToYaxis = Math.sqrt(disOfEyeProjToNormal * disOfEyeProjToNormal - disOfEyeProjToXaxis * disOfEyeProjToXaxis);
-        
-        const epdx = point.x - eye.x;
-        const epdy = point.y - eye.y;
-        const epdz = point.z - eye.z;
-        const epd2 = epdx * epdx + epdy * epdy + epdz * epdz;
-        const disOfPointProjToEye = direction.projL(epdx, epdy, epdz);
-        const disOfPointYToEye = rotation.projL(epdx, epdy, epdz);
-        const disOfPointProjPlaneToEye2 = epd2 - disOfPointProjToEye * disOfPointProjToEye;
-        const disOfPointXToEye = Math.sqrt(disOfPointProjPlaneToEye2 - disOfPointYToEye * disOfPointYToEye);        
-
-        return [disOfEyeProjToYaxis + disOfPointXToEye, disOfEyeProjToXaxis + disOfPointYToEye];
     }
 }

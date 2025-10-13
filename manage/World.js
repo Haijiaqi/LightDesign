@@ -4,5 +4,11 @@ export class World {
     constructor(objects = [], windows = []) {
         this.objects = objects;
         this.windows = windows;
+        this.screen = new Window();
+        this.screen = new Window();
+    }
+
+    calc() {
+
     }
 }

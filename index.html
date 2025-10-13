@@ -1,13 +1,17 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>Light Design</title>
-    <meta charset="utf-8">
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>Red-Blue 3D Engine</title>
     <style>
         body { margin: 0; overflow: hidden; background: black; }
+        canvas { position: absolute; top: 0; left: 0; }
+        #debug { position: absolute; top: 10px; left: 10px; color: white; font-family: monospace; background: rgba(0,0,0,0.5); padding: 5px; }
     </style>
 </head>
 <body>
-<script type="module" src="main.js"></script>
+    <div id="debug">Loading...</div>
+    <script type="module" src="main.js"></script>
 </body>
 </html>
