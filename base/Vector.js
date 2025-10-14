@@ -1,12 +1,27 @@
 import { Point } from './Point.js';
 export class Vector {
-    constructor(x, y, z, x0 = 0, y0 = 0, z0 = 0) {
+    constructor(x, y, z) {
         this.x = x;
         this.y = y;
         this.z = z;
-        this.start = new Point(x0, y0, z0);
+        this.start = new Point(0, 0, 0);
         this.ll = x * x + y * y + z * z;
         this.l = Math.sqrt(this.ll);
+    }
+    normalInit(x0, y0, z0, x1, y1, z1) {
+        this.x = x1 - x0;
+        this.y = y1 - y0;
+        this.z = z1 - z0;
+        this.start.x = x0;
+        this.start.y = y0;
+        this.start.z = z0;
+        this.ll = this.x * this.x + this.y * this.y + this.z * this.z;
+        this.l = Math.sqrt(this.ll);
+        this.x /= this.l;
+        this.y /= this.l;
+        this.z /= this.l;
+        this.l = 1;
+        this.ll = 1;
     }
     cross(b) {
         return new Vector(this.y * b.z - b.y * this.z, this.z * b.x - b.z * this.x, this.x * b.y - b.x * this.y);
@@ -16,10 +31,13 @@ export class Vector {
     }
     projL(b) {
         const dot = this.x * b.x + this.y * b.y + this.z * b.z;
-        return dot / ll;
+        return dot / this.ll;
     }
     projL(x, y, z) {
         const dot = this.x * x + this.y * y + this.z * z;
         return dot / this.ll;
+    }
+    getPoint(l) {
+        return new Point(this.x * l + this.start.x, this.y * l + this.start.y, this.z * l + this.start.z);
     }
 }

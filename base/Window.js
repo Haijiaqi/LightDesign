@@ -1,12 +1,14 @@
 import { Point } from './Point.js';
 import { Vector } from './Vector.js';
 export class Window {
-    constructor(width, height, xlength, ylength, vector) {
+    constructor(width, height, xlength, ylength) {
         this.width = width;
         this.height = height;
-        this.DPIx = width / xlength;
-        this.DPIy = height / ylength;
-        this.direction = vector;
+        this.xlength = xlength;
+        this.ylength = ylength;
+        this.DPIx = width / this.xlength;
+        this.DPIy = height / this.ylength;
+        this.direction = null;
         this.vx = null;
         this.vy = null;
         this.disOfPointToPlane = 0;
@@ -19,13 +21,14 @@ export class Window {
         );
     }
 
-    calculate(eyeL, eyeD, direction, objects) {
-        calculatePointToCenter(eyeL, direction);
+    calculate(head, eyeD, direction, objects, light) {
+        this.direction = direction;
+        this.calculatePointToCenter(head, direction);
         for (let oi = 0; oi < objects.length; oi++) {
             const object = objects[oi];
             for (let pi = 0; pi < object.points.length; pi++) {
                 const point = object.points[pi];
-                calculateAPoint(eyeL, eyeD, direction, point);
+                this.calculateAPoint(head, eyeD, direction, point, light);
             }
         }
     }
@@ -49,20 +52,26 @@ export class Window {
         const hpdz = point.z - head.z;
 
         const disOfPointToHeadPlane = direction.projL(hpdx, hpdy, hpdz);
-        const rate = 1 - (this.disOfPointToPlane / disOfPointToHeadPlane);
+        const rate = this.disOfPointToPlane / disOfPointToHeadPlane;
+        const inverseRate = 1 - rate;
         const disOfPointProjToHeadPlaneXaxis = this.vy.projL(hpdx, hpdy, hpdz);
-        const y = (ylength / 2) - (this.disOfPointProjToPlaneXaxis + disOfPointProjToHeadPlaneXaxis * rate);
+        const y = (this.ylength / 2) - (this.disOfPointProjToPlaneXaxis + disOfPointProjToHeadPlaneXaxis * rate);
 
         const disOfPointProjToHeadPlaneYaxis = this.vx.projL(hpdx, hpdy, hpdz);
-        const x = (xlength / 2) + this.disOfPointProjToPlaneYaxis + disOfPointProjToHeadPlaneYaxis * rate;
-
+        const x = (this.xlength / 2) + this.disOfPointProjToPlaneYaxis + disOfPointProjToHeadPlaneYaxis * rate;
+        if (y < 0 || y > this.ylength || x < 0 || x > this.xlength) {
+            return;
+        }
         const yScreen = Math.round(y * this.DPIy);
         const xScreen = Math.round(x * this.DPIx);
+
+        const x_grid = Math.floor(xScreen / this.gridsize);
+        const y_grid = Math.floor(yScreen / this.gridsize);
+        if (x_grid >= this.grid.length || y_grid >= this.grid[0].length) {
+            return;
+        }
         point.xM = xScreen;
         point.yM = yScreen;
-
-        const x_grid = Math.round(xScreen / this.gridsize);
-        const y_grid = Math.round(yScreen / this.gridsize);
         const targetList = this.grid[x_grid][y_grid];
         point.dis = disOfPointToHeadPlane;
         let insertIndex = 0;
@@ -71,7 +80,7 @@ export class Window {
         }
         targetList.splice(insertIndex, 0, point);
         if (eyeD) {
-            const dis = (eyeD / 2) * rate;
+            const dis = (eyeD / 2) * inverseRate;
             const xL = x - dis;
             const xR = x + dis;
             const yLScreen = Math.round(y * this.DPIy);
@@ -81,11 +90,11 @@ export class Window {
             point.yL = yLScreen;
             point.xR = xRScreen;
             point.yR = yLScreen;
-            point.light = (-hpdx * point.rx + -hpdy * point.ry + -hpdz * point.rz) / (hpdx * hpdx + hpdy * hpdy + hpdz * hpdz);
+            // point.light = (-hpdx * point.rx + -hpdy * point.ry + -hpdz * point.rz) / (hpdx * hpdx + hpdy * hpdy + hpdz * hpdz);
             //point.links.set(this.name, new Link(xLScreen, yScreen, xRScreen, yScreen, disOfPointToHeadPlane));
         }
         if (light) {
-            if (point.nx != 0 && point.ny != 0 && point.nz != 0) {
+            if (point.nx != 0 || point.ny != 0 || point.nz != 0) {
                 const dot = point.nx * hpdx + point.ny * hpdy + point.nz * hpdz;
                 const twoDot = 2 * dot;
                 point.rx = (hpdx - twoDot * point.nx) / point.dis;
