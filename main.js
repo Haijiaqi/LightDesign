@@ -14,9 +14,9 @@ function createSampleObjects() {
         const phi = Math.acos(2 * Math.random() - 1);
         const r = 3;
         const x = r * Math.sin(phi) * Math.cos(theta);
-        const y = r * Math.sin(phi) * Math.sin(theta) - 15;
+        const y = r * Math.sin(phi) * Math.sin(theta) - 0;
         const z = r * Math.cos(phi);
-        if (y < -15) {
+        if (y > 0 || y < 0) {
             points.push(new Point(x, y, z));
         }
     }
@@ -55,7 +55,7 @@ for (let index = 0; index < 10; index++) {
     hiddenDir.normalInit(camX, camY, camZ, 0, 0, 0);
     let hiddenCamPos = hiddenDir.getPoint(-5);
     // hiddenWindow.calculate(hiddenCamPos, 0, hiddenDir, objects, 0); // 不计算双眼
-    hiddenWindow.calculateNormal(); // 估算法向量    
+    // hiddenWindow.calculateNormal(); // 估算法向量    
 }
 console.log("Normals estimated.");
 
@@ -74,8 +74,6 @@ lightDir.normalInit(lightX, lightY, lightZ, 0, 0, 5);
 
 let lightWindow = new Window(screenWidthPx, screenHeightPx, screenXLengthCm, screenYLengthCm);
 let lightCamPos = lightDir.getPoint(-5);
-// lightWindow.calculate(lightCamPos, 0, lightDir, objects, 1.0); // 第5个参数触发反射计算
-
 console.log("Reflection calculated.");
 
 // ========================
@@ -89,9 +87,12 @@ let mainCamZ = 0;
 let mainDir = new Vector(0, 0, 0);
 mainDir.normalInit(mainCamX, mainCamY, mainCamZ, 0, 0, 0);
 let mainWindow = new Window(screenWidthPx, screenHeightPx, screenXLengthCm, screenYLengthCm);
+// mainWindow.calculateNormal(); // 估算法向量    
 let mainCamPos = mainDir.getPoint(-40);
 
 mainWindow.calculate(mainCamPos, 0, mainDir, objects, 0);
+
+lightWindow.calculate(lightCamPos, 0, lightDir, objects, 1.0); // 第5个参数触发反射计算
 
 // ========================
 // 6. 渲染函数

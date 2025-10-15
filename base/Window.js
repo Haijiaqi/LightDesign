@@ -24,6 +24,12 @@ export class Window {
     calculate(head, eyeD, direction, objects, light) {
         this.direction = direction;
         this.calculatePointToCenter(head, direction);
+        
+        for (let i = 0; i < this.grid.length; i++) {
+            for (let j = 0; j < this.grid[i].length; j++) {
+                this.grid[i][j].length = 0;
+            }
+        }
         for (let oi = 0; oi < objects.length; oi++) {
             const object = objects[oi];
             for (let pi = 0; pi < object.points.length; pi++) {
@@ -31,6 +37,7 @@ export class Window {
                 this.calculateAPoint(head, eyeD, direction, point, light);
             }
         }
+        this.calculateNormal();
     }
     
     calculatePointToCenter (p, direction) {
@@ -47,6 +54,8 @@ export class Window {
     }
 
     calculateAPoint (head, eyeD, direction, point, light) {
+        point.dis = 0;
+        point.light = 1;
         const hpdx = point.x - head.x;
         const hpdy = point.y - head.y;
         const hpdz = point.z - head.z;
@@ -72,13 +81,16 @@ export class Window {
         }
         point.xM = xScreen;
         point.yM = yScreen;
-        const targetList = this.grid[x_grid][y_grid];
+        // const targetList = this.grid[x_grid][y_grid];
         point.dis = disOfPointToHeadPlane;
         let insertIndex = 0;
-        while (insertIndex < targetList.length && targetList[insertIndex].dis >= point.dis) {
+        while (insertIndex < this.grid[x_grid][y_grid].length && this.grid[x_grid][y_grid][insertIndex].dis < point.dis) {
             insertIndex++;
         }
-        targetList.splice(insertIndex, 0, point);
+        if (x_grid == 102 && y_grid == 61) {
+            point.dis = disOfPointToHeadPlane;
+        }
+        this.grid[x_grid][y_grid].splice(insertIndex, 0, point);
         if (eyeD) {
             const dis = (eyeD / 2) * inverseRate;
             const xL = x - dis;
@@ -90,7 +102,7 @@ export class Window {
             point.yL = yLScreen;
             point.xR = xRScreen;
             point.yR = yLScreen;
-            // point.light = (-hpdx * point.rx + -hpdy * point.ry + -hpdz * point.rz) / (hpdx * hpdx + hpdy * hpdy + hpdz * hpdz);
+            point.light = (-hpdx * point.rx + -hpdy * point.ry + -hpdz * point.rz) / (hpdx * hpdx + hpdy * hpdy + hpdz * hpdz);
             //point.links.set(this.name, new Link(xLScreen, yScreen, xRScreen, yScreen, disOfPointToHeadPlane));
         }
         if (light) {
@@ -137,13 +149,16 @@ export class Window {
                         break;
                     }
                 }
+                for (let e = end + 1; e < points.length; e++) {
+                    points[e].light *= 0.8;
+                }
                 // 检查 XY 分布是否足够广（单位：像素）
                 let xmin = Infinity, xmax = -Infinity;
                 let ymin = Infinity, ymax = -Infinity;
 
                 for (let k = start; k <= end; k++) {
-                    const px = points[k].x0;
-                    const py = points[k].y0;
+                    const px = points[k].xM;
+                    const py = points[k].yM;
                     if (px < xmin) xmin = px;
                     if (px > xmax) xmax = px;
                     if (py < ymin) ymin = py;
@@ -152,15 +167,13 @@ export class Window {
 
                 if ((xmax - xmin) > 1 && (ymax - ymin) > 1) {
                     // 6. 赋法向量给深度相近且空间分布广的点
-                    if (points[k].nx == 0 && points[k].ny == 0 && points[k].nz == 0) {
-                        for (let k = start; k <= end; k++) {
+                    for (let k = start; k <= end; k++) {
+                        if (points[k].nx == 0 && points[k].ny == 0 && points[k].nz == 0) {
                             points[k].nx = -this.direction.x;
                             points[k].ny = -this.direction.y;
                             points[k].nz = -this.direction.z;
-                        }
-                    } else {
-                        if (Math.random() < 0.5) {
-                            for (let k = start; k <= end; k++) {
+                        } else {
+                            if (Math.random() < 0.5) {
                                 points[k].nx = -this.direction.x;
                                 points[k].ny = -this.direction.y;
                                 points[k].nz = -this.direction.z;
