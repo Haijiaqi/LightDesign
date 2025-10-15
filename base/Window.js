@@ -102,7 +102,7 @@ export class Window {
             point.yL = yLScreen;
             point.xR = xRScreen;
             point.yR = yLScreen;
-            point.light = (-hpdx * point.rx + -hpdy * point.ry + -hpdz * point.rz) / (hpdx * hpdx + hpdy * hpdy + hpdz * hpdz);
+            point.light = 1;//(-hpdx * point.rx + -hpdy * point.ry + -hpdz * point.rz) / (hpdx * hpdx + hpdy * hpdy + hpdz * hpdz);
             //point.links.set(this.name, new Link(xLScreen, yScreen, xRScreen, yScreen, disOfPointToHeadPlane));
         }
         if (light) {
@@ -150,7 +150,7 @@ export class Window {
                     }
                 }
                 for (let e = end + 1; e < points.length; e++) {
-                    points[e].light *= 0.8;
+                    points[e].light *= 1;
                 }
                 // 检查 XY 分布是否足够广（单位：像素）
                 let xmin = Infinity, xmax = -Infinity;
