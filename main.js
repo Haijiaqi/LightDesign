@@ -11,70 +11,102 @@ const CONFIG = {
     screenXLengthCm: 31.0,
     screenYLengthCm: 15.515,
     // 双眼瞳距（厘米）
-    eyeD: 6.2,
+    eyeD: 6.3,
     // 相机初始参数
     initialCamRadius: 20,
     // 点云密度
     spherePoints: 1000,
-    cubePoints: 1000
+    cubePoints: 5000
 };
 
 // ========================
 // 2. 创建3D对象（立方体和球体）
 // ========================
-function createCube(size = 5, pointsPerFace = 100) {
+function createCube(size = 5, pointsPerFace = 100, x = 0, y = -30, z = 0, alpha = 0, ifEntity = false) {
     const points = [];
     const halfSize = size / 2;
-    
-    // 生成立方体6个面的点
+    // 转换角度为弧度
+    const rad = alpha * Math.PI / 180;
+    const cosA = Math.cos(rad);
+    const sinA = Math.sin(rad);
+
+    // 生成点的总数（根据是否填充内部调整）
+    const totalPoints = ifEntity 
+        ? pointsPerFace * 6 + pointsPerFace * 3 // 面 + 内部点
+        : pointsPerFace * 6;
+
     for (let i = 0; i < pointsPerFace; i++) {
+        // 生成立方体6个面的点
         // 前面 (z = +halfSize)
-        points.push(new Point(
+        addPoint(
             (Math.random() - 0.5) * size,
             (Math.random() - 0.5) * size,
             halfSize
-        ));
+        );
         
         // 后面 (z = -halfSize)
-        points.push(new Point(
+        addPoint(
             (Math.random() - 0.5) * size,
             (Math.random() - 0.5) * size,
             -halfSize
-        ));
+        );
         
         // 左面 (x = -halfSize)
-        points.push(new Point(
+        addPoint(
             -halfSize,
             (Math.random() - 0.5) * size,
             (Math.random() - 0.5) * size
-        ));
+        );
         
         // 右面 (x = +halfSize)
-        points.push(new Point(
+        addPoint(
             halfSize,
             (Math.random() - 0.5) * size,
             (Math.random() - 0.5) * size
-        ));
+        );
         
         // 上面 (y = +halfSize)
-        points.push(new Point(
+        addPoint(
             (Math.random() - 0.5) * size,
             halfSize,
             (Math.random() - 0.5) * size
-        ));
+        );
         
         // 下面 (y = -halfSize)
-        points.push(new Point(
+        addPoint(
             (Math.random() - 0.5) * size,
             -halfSize,
             (Math.random() - 0.5) * size
-        ));
+        );
+
+        // 如果需要填充内部，添加内部随机点
+        if (ifEntity) {
+            addPoint(
+                (Math.random() - 0.5) * size,
+                (Math.random() - 0.5) * size,
+                (Math.random() - 0.5) * size
+            );
+        }
     }
-    
+
+    // 辅助函数：添加点并应用旋转和位移
+    function addPoint(px, py, pz) {
+        // 绕Z轴旋转
+        const rotatedX = px * cosA - py * sinA;
+        const rotatedY = px * sinA + py * cosA;
+        const rotatedZ = pz;
+
+        // 应用位移
+        const finalX = rotatedX + x;
+        const finalY = rotatedY + y;
+        const finalZ = rotatedZ + z;
+
+        points.push(new Point(finalX, finalY, finalZ));
+    }
+
     return new Object(points);
 }
-
-function createSphere(radius = 3, numPoints = 2000) {
+function createSphere(radius = 3, numPoints = 200) {
     const points = [];
     
     // 生成球形点云
@@ -85,20 +117,149 @@ function createSphere(radius = 3, numPoints = 2000) {
         const theta = 2 * Math.PI * u;
         const phi = Math.acos(2 * v - 1);
         
-        const x = radius * Math.sin(phi) * Math.cos(theta) - 5;
-        const y = radius * Math.sin(phi) * Math.sin(theta) - 20;
-        const z = radius * Math.cos(phi) + 5;
+        const x = radius * Math.sin(phi) * Math.cos(theta) - 0;
+        const y = radius * Math.sin(phi) * Math.sin(theta) - 10;
+        const z = radius * Math.cos(phi) + 0;
         
         points.push(new Point(x, y, z));
     }
     
     return new Object(points);
 }
+function createPoints() {
+    const points = [];
+    
+    points.push(new Point(0.1, -10, 1.3));
+    points.push(new Point(0, -10, 1.2));
+    points.push(new Point(0.1, -10, 1.1));
+    points.push(new Point(0, -10, 1));
+    
+    return new Object(points);
+}
+function createLatitudeSphere(radius = 10, latitudeCount = 10, pointsPerCircle = 20) {
+    const points = [];
+    const latitudeStep = Math.PI / (latitudeCount + 1); // 纬度间隔（0到π）
 
+    // 生成每个纬度圈
+    for (let lat = 1; lat <= latitudeCount; lat++) {
+        const theta = lat * latitudeStep; // 极角（0为北极，π为南极）
+        const sinTheta = Math.sin(theta);
+        const cosTheta = Math.cos(theta);
+        const circleRadius = radius * sinTheta; // 该纬度圈的半径
+
+        // 生成当前纬度圈上的点
+        for (let i = 0; i < pointsPerCircle; i++) {
+            const phi = (i / pointsPerCircle) * Math.PI * 2; // 方位角
+            points.push(new Point(
+                circleRadius * Math.cos(phi), // X坐标
+                circleRadius * Math.sin(phi), // Y坐标
+                radius * cosTheta             // Z坐标
+            ));
+        }
+    }
+
+    return new Object(points);
+}
+function createRectangleFace(pointsCount = 1000, rotationZ = 0, ys = 0) {
+    const points = [];
+    const rad = rotationZ * Math.PI / 180; // 角度转弧度
+    const cosθ = Math.cos(rad);
+    const sinθ = Math.sin(rad);
+
+    // 四个角点原始坐标
+    const corners = [
+        {x: -2 + ys, y: 0 + ys, z: 8 + ys},  // 左上角
+        {x: 2 + ys, y: 0 + ys, z: 8 + ys},   // 右上角
+        {x: -2 + ys, y: 0 + ys, z: 0 + ys},  // 左下角
+        {x: 2 + ys, y: 0 + ys, z: 0 + ys}    // 右下角
+    ];
+
+    // 绕Z轴旋转公式：X-Y平面内旋转，Z坐标不变
+    const rotatePoint = (p) => {
+        return {
+            x: p.x * cosθ - p.y * sinθ,  // Z轴旋转影响X和Y
+            y: p.x * sinθ + p.y * cosθ,
+            z: p.z                       // Z坐标保持不变
+        };
+    };
+
+    // 处理角点
+    corners.forEach(corner => {
+        const rotated = rotatePoint(corner);
+        points.push(new Point(rotated.x, rotated.y, rotated.z));
+    });
+
+    // 生成面内随机点
+    for (let i = 0; i < pointsCount; i++) {
+        // 原始矩形范围内随机点（x: -2~2, z: 0~8，y固定0）
+        const rawPoint = {
+            x: -2 + ys + Math.random() * 4,
+            y: 0 + ys,
+            z: 0 + ys + Math.random() * 8
+        };
+        
+        const rotated = rotatePoint(rawPoint);
+        points.push(new Point(rotated.x, rotated.y, rotated.z));
+    }
+    return new Object(points);
+}
+function createSphereWithLines(radius = 3, longitudeLines = 12, latitudeLines = 8, pointsPerLine = 30) {
+    const points = [];
+    const halfPi = Math.PI / 2;
+    const twoPi = Math.PI * 2;
+
+    // 生成经度圈（绕Z轴的圆）
+    for (let lon = 0; lon < longitudeLines; lon++) {
+        const lonAngle = (lon / longitudeLines) * twoPi; // 经度角（0到2π）
+        const cosLon = Math.cos(lonAngle);
+        const sinLon = Math.sin(lonAngle);
+
+        // 每个经度圈上的点
+        for (let i = 0; i < pointsPerLine; i++) {
+            const latAngle = halfPi - (i / (pointsPerLine - 1)) * Math.PI; // 纬度角（π/2到-π/2）
+            const cosLat = Math.cos(latAngle);
+            const sinLat = Math.sin(latAngle);
+
+            // 球面坐标转笛卡尔坐标
+            const x = radius * cosLat * cosLon;
+            const y = radius * cosLat * sinLon;
+            const z = radius * sinLat;
+
+            points.push(new Point(x, y, z));
+        }
+    }
+
+    // 生成纬度圈（平行于赤道的圆）
+    for (let lat = 1; lat < latitudeLines; lat++) {
+        const latAngle = halfPi - (lat / latitudeLines) * Math.PI; // 排除南北极点
+        const cosLat = Math.cos(latAngle);
+        const sinLat = Math.sin(latAngle);
+        const circleRadius = radius * cosLat; // 纬度圈半径
+
+        // 每个纬度圈上的点
+        for (let i = 0; i < pointsPerLine; i++) {
+            const lonAngle = (i / (pointsPerLine - 1)) * twoPi; // 经度角（0到2π）
+            const cosLon = Math.cos(lonAngle);
+            const sinLon = Math.sin(lonAngle);
+
+            // 球面坐标转笛卡尔坐标
+            const x = circleRadius * cosLon;
+            const y = circleRadius * sinLon;
+            const z = radius * sinLat;
+
+            points.push(new Point(x, y, z));
+        }
+    }
+
+    return new Object(points);
+}
 // 创建示例对象
 const objects = [
-    createSphere(3, CONFIG.spherePoints),
-    createCube(5, Math.floor(CONFIG.cubePoints / 6))
+    // createSphere(5, CONFIG.spherePoints),
+    // createRectangleFace(),
+    // createRectangleFace(1000,0,2),
+    // createSphereWithLines(),
+    createCube(5, Math.floor(CONFIG.cubePoints / 6), 2, -20, 3, -45, false)
 ];
 
 // ========================
@@ -138,13 +299,13 @@ function init() {
     resizeCanvas();
     
     // 创建隐藏窗口用于法向量估算
-    hiddenWindow = new Window(screenWidthPx, screenHeightPx, CONFIG.screenXLengthCm, CONFIG.screenYLengthCm);
+    hiddenWindow = new Window(screenWidthPx, screenHeightPx, CONFIG.screenXLengthCm, CONFIG.screenYLengthCm, 'hidden');
     
     // 创建光源窗口
-    lightWindow = new Window(screenWidthPx, screenHeightPx, CONFIG.screenXLengthCm, CONFIG.screenYLengthCm);
+    lightWindow = new Window(screenWidthPx, screenHeightPx, CONFIG.screenXLengthCm, CONFIG.screenYLengthCm, 'light');
     
     // 创建主渲染窗口
-    mainWindow = new Window(screenWidthPx, screenHeightPx, CONFIG.screenXLengthCm, CONFIG.screenYLengthCm);
+    mainWindow = new Window(screenWidthPx, screenHeightPx, CONFIG.screenXLengthCm, CONFIG.screenYLengthCm, 'main');
     
     // 估算法向量
     estimateNormals();
@@ -169,7 +330,7 @@ function estimateNormals() {
     const radius = 15;
     
     // 从多个角度计算法向量
-    for (let index = 0; index < 10; index++) {
+    for (let index = 0; index < 100; index++) {
         // 生成随机角度
         const phi = Math.random() * Math.PI * 2;
         const theta = Math.acos(2 * Math.random() - 1);
@@ -199,9 +360,9 @@ function estimateNormals() {
 // ========================
 function updateLight() {
     // 计算光源位置
-    const lightX = 0;//lightRadius * Math.cos(lightElevation) * Math.cos(lightAngle);
-    const lightY = -30;//lightRadius * Math.cos(lightElevation) * Math.sin(lightAngle);
-    const lightZ = 5;//lightRadius * Math.sin(lightElevation);
+    const lightX = lightRadius * Math.cos(lightElevation) * Math.cos(lightAngle);
+    const lightY = lightRadius * Math.cos(lightElevation) * Math.sin(lightAngle);
+    const lightZ = lightRadius * Math.sin(lightElevation);
     
     // 设置光源方向（指向原点）
     const lightDir = new Vector(0, 0, 0);
@@ -209,7 +370,6 @@ function updateLight() {
     
     // 光源位置（稍微后移）
     const lightCamPos = lightDir.getPoint(-5);
-    
     // 计算反射光线
     lightWindow.calculate(lightCamPos, 0, lightDir, objects, 1.0);
     
@@ -221,16 +381,16 @@ function updateLight() {
 // ========================
 function updateCamera() {
     // 计算相机位置（球坐标转笛卡尔坐标）
-    const camX = 0;//camRadius * Math.cos(camElevation) * Math.sin(camAngle);
-    const camY = -20;//camRadius * Math.cos(camElevation) * Math.cos(camAngle);
-    const camZ = 0;//camRadius * Math.sin(camElevation);
+    const camX = camRadius * Math.cos(camElevation) * Math.sin(camAngle);
+    const camY = camRadius * Math.cos(camElevation) * Math.cos(camAngle);
+    const camZ = camRadius * Math.sin(camElevation);
     
     // 设置视线方向（指向原点）
     const mainDir = new Vector(0, 0, 0);
     mainDir.normalInit(camX, camY, camZ, 0, 0, 0);
     
     // 相机位置（稍微后移）
-    const mainCamPos = mainDir.getPoint(-15);
+    const mainCamPos = mainDir.getPoint(-35);
     
     return { camX, camY, camZ, mainDir, mainCamPos };
 }
@@ -252,11 +412,11 @@ function render() {
     for (const obj of objects) {
         for (const p of obj.points) {
             // 左眼（红）
-            ctx.fillStyle = `hsl(0, 100%, 35%)`;
+            ctx.fillStyle = `hsl(0, 100%, ${p.light * 35}%)`;
             ctx.fillRect(p.xL, p.yL, 1, 1);
 
             // 右眼（蓝）
-            ctx.fillStyle = `hsl(240, 100%, 50%)`;
+            ctx.fillStyle = `hsl(240, 100%, ${p.light * 50}%)`;
             ctx.fillRect(p.xR, p.yR, 1, 1);
         }
     }
