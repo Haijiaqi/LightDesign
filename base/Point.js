@@ -7,6 +7,7 @@ export class Point {
         this.ny = 0;
         this.nz = 0;
         this.dis = 0;
+        this.dir = 0;
         this.xM = 0;
         this.yM = 0;
         this.xL = 0;
@@ -16,6 +17,6 @@ export class Point {
         this.rx = 0;
         this.ry = 0;
         this.rz = 0;
-        this.light = 1;
+        this.light = 0.5;
     }
 }
