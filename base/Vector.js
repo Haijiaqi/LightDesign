@@ -7,6 +7,7 @@ export class Vector {
         this.start = new Point(0, 0, 0);
         this.ll = x * x + y * y + z * z;
         this.l = Math.sqrt(this.ll);
+        this.dirAngle = 0;
     }
     normalInit(x0, y0, z0, x1, y1, z1) {
         this.x = x1 - x0;
@@ -22,6 +23,34 @@ export class Vector {
         this.z /= this.l;
         this.l = 1;
         this.ll = 1;
+        this.getAngle();
+    }
+    getAngle() {
+        if (this.y != 0) {
+            this.dirAngle = Math.atan(this.x / this.y);
+            if (this.y < 0) {
+                if (this.x != 0) {
+                    if (this.x > 0) {
+                        this.dirAngle = Math.PI + this.dirAngle;
+                    } else {
+                        this.dirAngle = -Math.PI + this.dirAngle;
+                    }
+                } else {
+                    this.dirAngle = Math.PI;
+                }
+            }
+        } else {
+            if (this.x != 0) {
+                if (this.x > 0) {
+                    this.dirAngle = Math.PI / 2;
+                } else {
+                    this.dirAngle = -Math.PI / 2;
+                }
+            } else {
+                this.dirAngle = 0;
+            }
+        }
+        return this.dirAngle;
     }
     cross(b) {
         return new Vector(this.y * b.z - b.y * this.z, this.z * b.x - b.z * this.x, this.x * b.y - b.x * this.y);

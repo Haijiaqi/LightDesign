@@ -19,4 +19,11 @@ export class Point {
         this.rz = 0;
         this.light = 0.5;
     }
+
+    getD(p) {
+        const dx = p.x - this.x;
+        const dy = p.y - this.y;
+        const dz = p.z - this.z;
+        return Math.sqrt(dx * dx + dy * dy + dz * dz);
+    }
 }
