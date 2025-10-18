@@ -14,367 +14,283 @@ const CONFIG = {
     eyeD: 6.3,
     // 相机初始参数
     initialCamRadius: 20,
+    initialCamAngle: 0,
+    initialCamElevation: 0,
+    // 光源初始参数
+    initialLightRadius: 5,
+    initialLightAngle: 0,
+    initialLightElevation: 0,
     // 点云密度
     spherePoints: 1000,
-    cubePoints: 2000
+    cubePoints: 2000,
+    // 渲染和控制参数
+    rotationSpeed: 0.05,
+    moveSpeed: 0.5,
+    zoomSpeed: 0.1,
+    minZoom: 5,
+    maxZoom: 100,
+    minElevation: -Math.PI / 2 + 0.1,
+    maxElevation: Math.PI / 2 - 0.1,
+    // 拖拽旋转灵敏度
+    dragRotationSpeed: 0.01,
+    // 隐藏窗口估算次数
+    normalEstimationIterations: 500,
+    normalEstimationRadius: 25,
+    // 临时代码：预留摄像头控制参数
+    // cameraControl: {
+    //     enabled: false,
+    //     sensitivity: 0.01
+    // },
 };
 
 // ========================
-// 2. 创建3D对象（立方体和球体）
+// 2. 对象创建函数
 // ========================
 function createCube(size = 5, pointsPerFace = 100, x = 0, y = -30, z = 0, alpha = 0, ifEntity = false) {
     const points = [];
     const halfSize = size / 2;
-    // 转换角度为弧度
     const rad = alpha * Math.PI / 180;
     const cosA = Math.cos(rad);
     const sinA = Math.sin(rad);
 
-    // 生成点的总数（根据是否填充内部调整）
-    const totalPoints = ifEntity 
-        ? pointsPerFace * 6 + pointsPerFace * 3 // 面 + 内部点
-        : pointsPerFace * 6;
+    // 生成6个面的点
+    const faceGenerators = [
+        () => ({ x: (Math.random() - 0.5) * size, y: (Math.random() - 0.5) * size, z: halfSize }), // 前
+        () => ({ x: (Math.random() - 0.5) * size, y: (Math.random() - 0.5) * size, z: -halfSize }), // 后
+        () => ({ x: -halfSize, y: (Math.random() - 0.5) * size, z: (Math.random() - 0.5) * size }), // 左
+        () => ({ x: halfSize, y: (Math.random() - 0.5) * size, z: (Math.random() - 0.5) * size }), // 右
+        () => ({ x: (Math.random() - 0.5) * size, y: halfSize, z: (Math.random() - 0.5) * size }), // 上
+        () => ({ x: (Math.random() - 0.5) * size, y: -halfSize, z: (Math.random() - 0.5) * size })  // 下
+    ];
 
     for (let i = 0; i < pointsPerFace; i++) {
-        // 生成立方体6个面的点
-        // 前面 (z = +halfSize)
-        addPoint(
-            (Math.random() - 0.5) * size,
-            (Math.random() - 0.5) * size,
-            halfSize
-        );
-        
-        // 后面 (z = -halfSize)
-        addPoint(
-            (Math.random() - 0.5) * size,
-            (Math.random() - 0.5) * size,
-            -halfSize
-        );
-        
-        // 左面 (x = -halfSize)
-        addPoint(
-            -halfSize,
-            (Math.random() - 0.5) * size,
-            (Math.random() - 0.5) * size
-        );
-        
-        // 右面 (x = +halfSize)
-        addPoint(
-            halfSize,
-            (Math.random() - 0.5) * size,
-            (Math.random() - 0.5) * size
-        );
-        
-        // 上面 (y = +halfSize)
-        addPoint(
-            (Math.random() - 0.5) * size,
-            halfSize,
-            (Math.random() - 0.5) * size
-        );
-        
-        // 下面 (y = -halfSize)
-        addPoint(
-            (Math.random() - 0.5) * size,
-            -halfSize,
-            (Math.random() - 0.5) * size
-        );
+        // 修复：解构赋值使用正确的属性名 x, y, z
+        faceGenerators.forEach(gen => {
+            const { x: px, y: py, z: pz } = gen(); // 使用别名 (x as px, y as py, z as pz)
+            // 或者 const genResult = gen(); const px = genResult.x; const py = genResult.y; const pz = genResult.z;
+            const rotatedX = px * cosA - py * sinA;
+            const rotatedY = px * sinA + py * cosA;
+            const rotatedZ = pz;
+            points.push(new Point(rotatedX + x, rotatedY + y, rotatedZ + z));
+        });
 
-        // 如果需要填充内部，添加内部随机点
         if (ifEntity) {
-            addPoint(
-                (Math.random() - 0.5) * size,
-                (Math.random() - 0.5) * size,
-                (Math.random() - 0.5) * size
-            );
+            const intX = (Math.random() - 0.5) * size;
+            const intY = (Math.random() - 0.5) * size;
+            const intZ = (Math.random() - 0.5) * size;
+            const rotatedX = intX * cosA - intY * sinA;
+            const rotatedY = intX * sinA + intY * cosA;
+            const rotatedZ = intZ;
+            points.push(new Point(rotatedX + x, rotatedY + y, rotatedZ + z));
         }
     }
-
-    // 辅助函数：添加点并应用旋转和位移
-    function addPoint(px, py, pz) {
-        // 绕Z轴旋转
-        const rotatedX = px * cosA - py * sinA;
-        const rotatedY = px * sinA + py * cosA;
-        const rotatedZ = pz;
-
-        // 应用位移
-        const finalX = rotatedX + x;
-        const finalY = rotatedY + y;
-        const finalZ = rotatedZ + z;
-
-        points.push(new Point(finalX, finalY, finalZ));
-    }
-
     return new Object(points);
 }
-function createFace(size = 5, pointsPerFace = 100, x = 0, y = 0, z = 0, alpha = 0, ifEntity = false) {
-    const points = [];
-    const halfSize = size / 2;
-    // 转换角度为弧度
-    const rad = alpha * Math.PI / 180;
-    const cosA = Math.cos(rad);
-    const sinA = Math.sin(rad);
 
-    // 生成点的总数（根据是否填充内部调整）
-    const totalPoints = ifEntity 
-        ? pointsPerFace * 6 + pointsPerFace * 3 // 面 + 内部点
-        : pointsPerFace * 6;
-
-    for (let i = 0; i < pointsPerFace; i++) {
-        // 生成立方体6个面的点
-        const x0 = (Math.random() - 0.5) * 5 * size;
-        const y0 = 0;
-        const z0 = (Math.random() - 0.5) * 2 * size;
-        const po = addPoint(x0, y0, z0);
-        const pn = addPoint(x0, y0 - 1, z0);
-        // 如果需要填充内部，添加内部随机点
-        if (ifEntity) {
-            addPoint(
-                (Math.random() - 0.5) * size,
-                (Math.random() - 0.5) * size,
-                (Math.random() - 0.5) * size
-            );
-        }
-        const p = new Point(po.finalX, po.finalY, po.finalZ);
-        p.nx = pn.finalX - po.finalX;
-        p.ny = pn.finalY - po.finalY;
-        p.nz = pn.finalZ - po.finalZ;
-        points.push(p);
-        // points.push(new Point(pn.finalX, pn.finalY, pn.finalZ));
-    }
-
-    // 辅助函数：添加点并应用旋转和位移
-    function addPoint(px, py, pz) {
-        // 绕Z轴旋转
-        const rotatedX = px * cosA - py * sinA;
-        const rotatedY = px * sinA + py * cosA;
-        const rotatedZ = pz;
-
-        // 应用位移
-        const finalX = rotatedX + x;
-        const finalY = rotatedY + y;
-        const finalZ = rotatedZ + z;
-        return {finalX: finalX, finalY: finalY, finalZ: finalZ};
-    }
-
-    return new Object(points);
-}
 function createSphere(x0, y0, z0, radius = 1, numPoints = 50) {
     const points = [];
-    
-    // 生成球形点云
     for (let i = 0; i < numPoints; i++) {
-        // 使用均匀分布的球坐标
         const u = Math.random();
         const v = Math.random();
         const theta = 2 * Math.PI * u;
         const phi = Math.acos(2 * v - 1);
-        
         const x = radius * Math.sin(phi) * Math.cos(theta) + x0;
         const y = radius * Math.sin(phi) * Math.sin(theta) + y0;
         const z = radius * Math.cos(phi) + z0;
-        
         points.push(new Point(x, y, z));
     }
-    
     return new Object(points);
 }
+
 function createPoints() {
-    const points = [];
-    
-    points.push(new Point(0.1, -10, 1.3));
-    points.push(new Point(0, -10, 1.2));
-    points.push(new Point(0.1, -10, 1.1));
-    points.push(new Point(0, -10, 1));
-    
+    const points = [
+        new Point(0.1, -10, 1.3),
+        new Point(0, -10, 1.2),
+        new Point(0.1, -10, 1.1),
+        new Point(0, -10, 1)
+    ];
     return new Object(points);
 }
+
 function createLatitudeSphere(radius = 10, latitudeCount = 10, pointsPerCircle = 20) {
     const points = [];
-    const latitudeStep = Math.PI / (latitudeCount + 1); // 纬度间隔（0到π）
-
-    // 生成每个纬度圈
+    const latitudeStep = Math.PI / (latitudeCount + 1);
     for (let lat = 1; lat <= latitudeCount; lat++) {
-        const theta = lat * latitudeStep; // 极角（0为北极，π为南极）
+        const theta = lat * latitudeStep;
         const sinTheta = Math.sin(theta);
         const cosTheta = Math.cos(theta);
-        const circleRadius = radius * sinTheta; // 该纬度圈的半径
-
-        // 生成当前纬度圈上的点
+        const circleRadius = radius * sinTheta;
         for (let i = 0; i < pointsPerCircle; i++) {
-            const phi = (i / pointsPerCircle) * Math.PI * 2; // 方位角
+            const phi = (i / pointsPerCircle) * Math.PI * 2;
             points.push(new Point(
-                circleRadius * Math.cos(phi), // X坐标
-                circleRadius * Math.sin(phi), // Y坐标
-                radius * cosTheta             // Z坐标
+                circleRadius * Math.cos(phi),
+                circleRadius * Math.sin(phi),
+                radius * cosTheta
             ));
         }
     }
-
     return new Object(points);
 }
+
 function createRectangleFace(pointsCount = 1000, rotationZ = 0, ys = 0) {
     const points = [];
-    const rad = rotationZ * Math.PI / 180; // 角度转弧度
+    const rad = rotationZ * Math.PI / 180;
     const cosθ = Math.cos(rad);
     const sinθ = Math.sin(rad);
 
-    // 四个角点原始坐标
     const corners = [
-        {x: -2 + ys, y: 0 + ys, z: 8 + ys},  // 左上角
-        {x: 2 + ys, y: 0 + ys, z: 8 + ys},   // 右上角
-        {x: -2 + ys, y: 0 + ys, z: 0 + ys},  // 左下角
-        {x: 2 + ys, y: 0 + ys, z: 0 + ys}    // 右下角
+        {x: -2 + ys, y: 0 + ys, z: 8 + ys},
+        {x: 2 + ys, y: 0 + ys, z: 8 + ys},
+        {x: -2 + ys, y: 0 + ys, z: 0 + ys},
+        {x: 2 + ys, y: 0 + ys, z: 0 + ys}
     ];
 
-    // 绕Z轴旋转公式：X-Y平面内旋转，Z坐标不变
-    const rotatePoint = (p) => {
-        return {
-            x: p.x * cosθ - p.y * sinθ,  // Z轴旋转影响X和Y
-            y: p.x * sinθ + p.y * cosθ,
-            z: p.z                       // Z坐标保持不变
-        };
-    };
+    const rotatePoint = (p) => ({
+        x: p.x * cosθ - p.y * sinθ,
+        y: p.x * sinθ + p.y * cosθ,
+        z: p.z
+    });
 
-    // 处理角点
     corners.forEach(corner => {
         const rotated = rotatePoint(corner);
         points.push(new Point(rotated.x, rotated.y, rotated.z));
     });
 
-    // 生成面内随机点
     for (let i = 0; i < pointsCount; i++) {
-        // 原始矩形范围内随机点（x: -2~2, z: 0~8，y固定0）
         const rawPoint = {
             x: -2 + ys + Math.random() * 4,
             y: 0 + ys,
             z: 0 + ys + Math.random() * 8
         };
-        
         const rotated = rotatePoint(rawPoint);
         points.push(new Point(rotated.x, rotated.y, rotated.z));
     }
     return new Object(points);
 }
+
 function createSphereWithLines(radius = 3, longitudeLines = 12, latitudeLines = 8, pointsPerLine = 30) {
     const points = [];
     const halfPi = Math.PI / 2;
     const twoPi = Math.PI * 2;
 
-    // 生成经度圈（绕Z轴的圆）
+    // 经度线
     for (let lon = 0; lon < longitudeLines; lon++) {
-        const lonAngle = (lon / longitudeLines) * twoPi; // 经度角（0到2π）
+        const lonAngle = (lon / longitudeLines) * twoPi;
         const cosLon = Math.cos(lonAngle);
         const sinLon = Math.sin(lonAngle);
-
-        // 每个经度圈上的点
         for (let i = 0; i < pointsPerLine; i++) {
-            const latAngle = halfPi - (i / (pointsPerLine - 1)) * Math.PI; // 纬度角（π/2到-π/2）
+            const latAngle = halfPi - (i / (pointsPerLine - 1)) * Math.PI;
             const cosLat = Math.cos(latAngle);
             const sinLat = Math.sin(latAngle);
-
-            // 球面坐标转笛卡尔坐标
-            const x = radius * cosLat * cosLon;
-            const y = radius * cosLat * sinLon;
-            const z = radius * sinLat;
-
-            points.push(new Point(x, y, z));
+            points.push(new Point(
+                radius * cosLat * cosLon,
+                radius * cosLat * sinLon,
+                radius * sinLat
+            ));
         }
     }
 
-    // 生成纬度圈（平行于赤道的圆）
+    // 纬度线
     for (let lat = 1; lat < latitudeLines; lat++) {
-        const latAngle = halfPi - (lat / latitudeLines) * Math.PI; // 排除南北极点
+        const latAngle = halfPi - (lat / latitudeLines) * Math.PI;
         const cosLat = Math.cos(latAngle);
         const sinLat = Math.sin(latAngle);
-        const circleRadius = radius * cosLat; // 纬度圈半径
-
-        // 每个纬度圈上的点
+        const circleRadius = radius * cosLat;
         for (let i = 0; i < pointsPerLine; i++) {
-            const lonAngle = (i / (pointsPerLine - 1)) * twoPi; // 经度角（0到2π）
+            const lonAngle = (i / (pointsPerLine - 1)) * twoPi;
             const cosLon = Math.cos(lonAngle);
             const sinLon = Math.sin(lonAngle);
-
-            // 球面坐标转笛卡尔坐标
-            const x = circleRadius * cosLon;
-            const y = circleRadius * sinLon;
-            const z = radius * sinLat;
-
-            points.push(new Point(x, y, z));
+            points.push(new Point(
+                circleRadius * cosLon,
+                circleRadius * sinLon,
+                radius * sinLat
+            ));
         }
     }
-
     return new Object(points);
 }
-// 创建示例对象
-const objects = [
-    // createSphere(5, CONFIG.spherePoints),
-    // createRectangleFace(),
-    // createRectangleFace(1000,0,2),
-    // createSphereWithLines(),
-    createCube(5, Math.floor(CONFIG.cubePoints), 0, 0, 0, 45, false)
-];
-const otherObjects = [
-];
 
 // ========================
-// 3. 初始化全局变量
+// 3. 系统状态管理
 // ========================
-let screenWidthPx = window.innerWidth;
-let screenHeightPx = window.innerHeight;
+const SystemState = {
+    // 对象列表
+    objects: [
+        createCube(5, Math.floor(CONFIG.cubePoints), 0, 0, 0, 45, false)
+    ],
+    otherObjects: [], // 例如光源点
 
-// 相机控制参数
-let camAngle = 0; // 水平旋转角度
-let camElevation = 0; // 垂直旋转角度
-let camRadius = CONFIG.initialCamRadius; // 相机距离
-let isDragging = false;
-let lastMouseX = 0;
-let lastMouseY = 0;
+    // 窗口实例
+    hiddenWindow: null,
+    lightWindow: null,
+    mainWindow: null,
 
-// 光源参数
-let lightAngle = 0;// Math.PI / 2;
-let lightElevation = 0;//Math.PI / 6;
-let lightRadius = 1;
+    // 相机控制参数
+    camAngle: CONFIG.initialCamAngle,
+    camElevation: CONFIG.initialCamElevation,
+    camRadius: CONFIG.initialCamRadius,
 
-// 创建窗口实例
-let hiddenWindow = null;
-let lightWindow = null;
-let mainWindow = null;
+    // 光源控制参数
+    lightAngle: CONFIG.initialLightAngle,
+    lightElevation: CONFIG.initialLightElevation,
+    lightRadius: CONFIG.initialLightRadius,
 
-// DOM元素
-const canvas = document.createElement('canvas');
-const ctx = canvas.getContext('2d');
-const debugDiv = document.getElementById('debug');
+    // 鼠标拖拽状态
+    isDragging: false,
+    lastMouseX: 0,
+    lastMouseY: 0,
+
+    // 键盘状态
+    keys: {},
+
+    // DOM 元素
+    canvas: null,
+    ctx: null,
+    debugDiv: null,
+
+    // 画布尺寸
+    screenWidthPx: window.innerWidth,
+    screenHeightPx: window.innerHeight,
+};
 
 // ========================
 // 4. 初始化函数
 // ========================
 function init() {
+    // 创建 DOM 元素
+    SystemState.canvas = document.createElement('canvas');
+    SystemState.ctx = SystemState.canvas.getContext('2d');
+    SystemState.debugDiv = document.getElementById('debug') || document.createElement('div'); // 防止 debugDiv 不存在
+    SystemState.debugDiv.id = 'debug'; // 确保 ID
+    if (!document.getElementById('debug')) {
+        document.body.appendChild(SystemState.debugDiv);
+    }
+
     // 设置画布大小
     resizeCanvas();
-    
-    // 创建隐藏窗口用于法向量估算
-    hiddenWindow = new Window(screenWidthPx, screenHeightPx, CONFIG.screenXLengthCm, CONFIG.screenYLengthCm, 'hidden');
-    
-    // 创建光源窗口
-    lightWindow = new Window(screenWidthPx, screenHeightPx, CONFIG.screenXLengthCm, CONFIG.screenYLengthCm, 'light');
-    // 创建主渲染窗口
-    mainWindow = new Window(screenWidthPx, screenHeightPx, CONFIG.screenXLengthCm, CONFIG.screenYLengthCm, 'main');
-    mainWindow.direction = new Vector(0, 0, 0);
-    mainWindow.direction.normalInit(0, 0, 0, 0, 1, 0);
-    mainWindow.capital = mainWindow.direction.getPoint(-50);
+
+    // 创建窗口实例
+    SystemState.hiddenWindow = new Window(SystemState.screenWidthPx, SystemState.screenHeightPx, CONFIG.screenXLengthCm, CONFIG.screenYLengthCm, 'hidden');
+    SystemState.lightWindow = new Window(SystemState.screenWidthPx, SystemState.screenHeightPx, CONFIG.screenXLengthCm, CONFIG.screenYLengthCm, 'light');
+    SystemState.mainWindow = new Window(SystemState.screenWidthPx, SystemState.screenHeightPx, CONFIG.screenXLengthCm, CONFIG.screenYLengthCm, 'main');
+    SystemState.mainWindow.direction = new Vector(0, 0, 0);
+    SystemState.mainWindow.direction.normalInit(0, 0, 0, 0, 1, 0);
+    SystemState.mainWindow.capital = SystemState.mainWindow.direction.getPoint(-50);
+
     // 估算法向量
     estimateNormals();
-    
+
     // 计算初始光源
     updateLight();
-    
+
     // 添加到DOM
-    document.body.appendChild(canvas);
-    
+    document.body.appendChild(SystemState.canvas);
+
     // 设置事件监听器
     setupEventListeners();
-    
-    debugDiv.textContent = "初始化完成";
+
+    SystemState.debugDiv.textContent = "初始化完成";
+    console.log("初始化完成");
 }
 
 // ========================
@@ -382,31 +298,19 @@ function init() {
 // ========================
 function estimateNormals() {
     console.log("开始估算法向量...");
-    const radius = 15;
-    
-    // 从多个角度计算法向量
-    for (let index = 0; index < 1000; index++) {
-        // 生成随机角度
+    const radius = CONFIG.normalEstimationRadius;
+
+    for (let index = 0; index < CONFIG.normalEstimationIterations; index++) {
         const phi = Math.random() * Math.PI * 2;
         const theta = Math.acos(2 * Math.random() - 1);
-        
-        // 相机位置
         const camX = radius * Math.sin(theta) * Math.cos(phi);
         const camY = radius * Math.sin(theta) * Math.sin(phi);
         const camZ = radius * Math.cos(theta);
-        
-        // 设置视线方向（指向原点）
         const hiddenDir = new Vector(0, 0, 0);
         hiddenDir.normalInit(camX, camY, camZ, 0, 0, 0);
-        
-        // 相机位置（稍微后移）
         const hiddenCamPos = hiddenDir.getPoint(-5);
-        
-        // 计算并估算法向量
-        hiddenWindow.calculate(hiddenCamPos, 0, hiddenDir, objects, 0, otherObjects);
-        // hiddenWindow.calculateNormal();
+        SystemState.hiddenWindow.calculate(hiddenCamPos, 0, hiddenDir, SystemState.objects, 0, SystemState.otherObjects);
     }
-    
     console.log("法向量估算完成");
 }
 
@@ -414,266 +318,188 @@ function estimateNormals() {
 // 6. 光源更新
 // ========================
 function updateLight() {
-    // 计算光源位置
-    const lightX = lightRadius * Math.cos(lightElevation) * Math.cos(lightAngle);
-    const lightY = lightRadius * Math.cos(lightElevation) * Math.sin(lightAngle);
-    const lightZ = lightRadius * Math.sin(lightElevation);
-    
-    // 设置光源方向（指向原点）
+    const lightX = SystemState.lightRadius * Math.cos(SystemState.lightElevation) * Math.cos(SystemState.lightAngle);
+    const lightY = SystemState.lightRadius * Math.cos(SystemState.lightElevation) * Math.sin(SystemState.lightAngle);
+    const lightZ = SystemState.lightRadius * Math.sin(SystemState.lightElevation);
     const lightDir = new Vector(0, 0, 0);
     lightDir.normalInit(lightX, lightY, lightZ, 0, 0, 0);
-    
-    // 光源位置（稍微后移）
     const lightCamPos = lightDir.getPoint(-5);
-    // 计算反射光线
-    lightWindow.calculate(lightCamPos, 0, lightDir, objects, 1.0, otherObjects);
-    otherObjects.length = 0;
-    otherObjects.push(createSphere(lightWindow.capital.x, lightWindow.capital.y, lightWindow.capital.z));
-    
-    return { lightX, lightY, lightZ };
+    SystemState.lightWindow.calculate(lightCamPos, 0, lightDir, SystemState.objects, 1.0, SystemState.otherObjects);
+    SystemState.otherObjects.length = 0; // 清空 otherObjects
+    SystemState.otherObjects.push(createSphere(lightX, lightY, lightZ, 1, 20)); // 添加光源点
 }
 
 // ========================
-// 7. 更新相机位置
+// 7. 相机更新
 // ========================
 function updateCamera() {
-    // 计算相机位置（球坐标转笛卡尔坐标）
-    // const camX = camRadius * Math.cos(camElevation) * Math.sin(camAngle);
-    // const camY = camRadius * Math.cos(camElevation) * Math.cos(camAngle);
-    // const camZ = camRadius * Math.sin(camElevation);
-    
-    // 设置视线方向（指向原点）
-
-    // mainWindow.capital.x = Math.cos(camElevation) * Math.sin(camAngle) + ;
-    // mainWindow.capital.y = Math.cos(camElevation) * Math.cos(camAngle);
-    // mainWindow.capital.z = Math.sin(camElevation);
-    // const mainDir = new Vector(0, 0, 0);
-    // mainDir.normalInit(camX, camY, camZ, 0, 0, 0);
-    
-    // 相机位置（稍微后移）
-    // const mainCamPos = mainWindow.direction.getPoint(-35);
-    // 重新计算主视角投影（启用双眼模式）
-    mainWindow.calculate(mainWindow.capital, CONFIG.eyeD, mainWindow.direction, objects, 0, otherObjects);
-    
-    // return { camX, camY, camZ, mainDir, mainCamPos };
+    SystemState.mainWindow.calculate(SystemState.mainWindow.capital, CONFIG.eyeD, SystemState.mainWindow.direction, SystemState.objects, 0, SystemState.otherObjects);
 }
 
 // ========================
 // 8. 渲染函数
 // ========================
 function render() {
-    // 清空画布
-    ctx.clearRect(0, 0, screenWidthPx, screenHeightPx);
-    // 更新相机
+    const ctx = SystemState.ctx;
+    ctx.clearRect(0, 0, SystemState.screenWidthPx, SystemState.screenHeightPx);
     updateCamera();
-    
-    
-    // 渲染红蓝点// 遍历 grid 二维数组（行方向）
-    for (let gridX = 0; gridX < mainWindow.grid.length; gridX++) {
-        // 遍历当前行的每个网格（列方向）
-        for (let gridY = 0; gridY < mainWindow.grid[gridX].length; gridY++) {
-            // 当前网格中的点集合（对应原 obj.points）
-            const pointsInGrid = mainWindow.grid[gridX][gridY];
-            
-            // 遍历当前网格内的所有点
+
+    // 渲染红蓝点
+    for (let gridX = 0; gridX < SystemState.mainWindow.grid.length; gridX++) {
+        for (let gridY = 0; gridY < SystemState.mainWindow.grid[gridX].length; gridY++) {
+            const pointsInGrid = SystemState.mainWindow.grid[gridX][gridY];
             for (const p of pointsInGrid) {
                 if (Math.abs(p.xL - p.xR) > 0) {
-                    // 左眼（红）：仅在坐标非0时绘制
                     if (p.xL !== 0 && p.yL !== 0) {
                         ctx.fillStyle = `hsl(0, 100%, ${p.light * 35}%)`;
                         ctx.fillRect(p.xL, p.yL, 1, 1);
                     }
-                    // 右眼（蓝）：仅在坐标非0时绘制
                     if (p.xR !== 0 && p.yR !== 0) {
                         ctx.fillStyle = `hsl(240, 100%, ${p.light * 50}%)`;
                         ctx.fillRect(p.xR, p.yR, 1, 1);
                     }
                 } else {
-                    // 双眼坐标一致时（紫色）
                     ctx.fillStyle = `hsl(285, 90%, ${p.light * 50}%)`;
                     ctx.fillRect(p.xL, p.yL, 1, 1);
                 }
             }
         }
     }
-    
-    // 更新调试信息
-    updateLight();
-    // debugDiv.textContent = 
-    //     `相机: (${camX.toFixed(1)}, ${camY.toFixed(1)}, ${camZ.toFixed(1)}) | ` +
-    //     `光源: (${lightPos.lightX.toFixed(1)}, ${lightPos.lightY.toFixed(1)}, ${lightPos.lightZ.toFixed(1)}) | ` +
-    //     `距离: ${camRadius.toFixed(1)}`;
 }
 
 // ========================
-// 9. 事件监听器设置
+// 9. 输入处理
+// ========================
+function handleInput() {
+    const keys = SystemState.keys;
+
+    // WASD 控制相机水平旋转 (模拟原始代码中的 Z/X/C/V/B/N/M)
+    if (keys['z']) SystemState.mainWindow.horizontalRotation(-CONFIG.rotationSpeed);
+    if (keys['x']) SystemState.mainWindow.horizontalRotation(-CONFIG.rotationSpeed * 0.5);
+    if (keys['c']) SystemState.mainWindow.horizontalRotation(-CONFIG.rotationSpeed * 0.25);
+    if (keys['v']) SystemState.mainWindow.horizontalRotation(0); // 无旋转
+    if (keys['b']) SystemState.mainWindow.horizontalRotation(CONFIG.rotationSpeed * 0.25);
+    if (keys['n']) SystemState.mainWindow.horizontalRotation(CONFIG.rotationSpeed * 0.5);
+    if (keys['m']) SystemState.mainWindow.horizontalRotation(CONFIG.rotationSpeed);
+
+    // Q/E 控制相机距离
+    if (keys['q']) SystemState.camRadius = Math.max(CONFIG.minZoom, SystemState.camRadius - CONFIG.moveSpeed);
+    if (keys['e']) SystemState.camRadius = Math.min(CONFIG.maxZoom, SystemState.camRadius + CONFIG.moveSpeed);
+
+    // 方向键控制光源
+    if (keys['arrowleft']) SystemState.lightAngle -= CONFIG.rotationSpeed;
+    if (keys['arrowright']) SystemState.lightAngle += CONFIG.rotationSpeed;
+    if (keys['arrowup']) SystemState.lightElevation = Math.min(CONFIG.maxElevation, SystemState.lightElevation + CONFIG.rotationSpeed);
+    if (keys['arrowdown']) SystemState.lightElevation = Math.max(CONFIG.minElevation, SystemState.lightElevation - CONFIG.rotationSpeed);
+
+    // 临时代码：预留摄像头控制逻辑入口
+    // if (CONFIG.cameraControl.enabled) {
+    //     // 这里可以从摄像头数据更新 SystemState.camAngle, SystemState.camElevation 等
+    //     // 例如：SystemState.camAngle += cameraHeadYaw * CONFIG.cameraControl.sensitivity;
+    // }
+}
+
+// ========================
+// 10. 事件监听器设置
 // ========================
 function setupEventListeners() {
-    // 键盘控制
-    const keys = {};
-    
+    // 键盘事件
     window.addEventListener('keydown', (e) => {
-        if (e.key == 'Shift') {
-            if (e.location == 1) {
-                keys['shiftleft'] = true;
-            } else {
-                keys['shiftright'] = true;
-            }
-        } else {
-            keys[e.key.toLowerCase()] = true;
-        }
+        SystemState.keys[e.key.toLowerCase()] = true;
     });
-    
     window.addEventListener('keyup', (e) => {
-        if (e.key == 'Shift') {
-            if (e.location == 1) {
-                keys['shiftleft'] = false;
-            } else {
-                keys['shiftright'] = false;
-            }
-        } else {
-            keys[e.key.toLowerCase()] = false;
-        }
+        SystemState.keys[e.key.toLowerCase()] = false;
     });
-    
-    // 鼠标控制
-    canvas.addEventListener('mousedown', (e) => {
-        isDragging = true;
-        lastMouseX = e.clientX;
-        lastMouseY = e.clientY;
+
+    // 鼠标事件
+    SystemState.canvas.addEventListener('mousedown', (e) => {
+        SystemState.isDragging = true;
+        SystemState.lastMouseX = e.clientX;
+        SystemState.lastMouseY = e.clientY;
     });
-    
     window.addEventListener('mouseup', () => {
-        isDragging = false;
+        SystemState.isDragging = false;
     });
-    
-    canvas.addEventListener('mousemove', (e) => {
-        if (isDragging) {
-            const deltaX = e.clientX - lastMouseX;
-            const deltaY = e.clientY - lastMouseY;
-            
-            // 水平旋转（绕Y轴）
-            camAngle += deltaX * 0.01;
-            
-            // 垂直旋转（限制在-85°到85°之间，避免翻转）
-            camElevation = Math.max(-Math.PI/2 + 0.1, 
-                           Math.min(Math.PI/2 - 0.1, camElevation + deltaY * 0.01));
-            
-            lastMouseX = e.clientX;
-            lastMouseY = e.clientY;
+    SystemState.canvas.addEventListener('mousemove', (e) => {
+        if (SystemState.isDragging) {
+            const deltaX = e.clientX - SystemState.lastMouseX;
+            const deltaY = e.clientY - SystemState.lastMouseY;
+            SystemState.camAngle += deltaX * CONFIG.dragRotationSpeed;
+            SystemState.camElevation = Math.max(CONFIG.minElevation, Math.min(CONFIG.maxElevation, SystemState.camElevation - deltaY * CONFIG.dragRotationSpeed)); // 注意 deltaY 符号
+            SystemState.lastMouseX = e.clientX;
+            SystemState.lastMouseY = e.clientY;
         }
     });
-    
-    // 滚轮缩放
-    canvas.addEventListener('wheel', (e) => {
+
+    // 滚轮事件
+    SystemState.canvas.addEventListener('wheel', (e) => {
         e.preventDefault();
-        // 缩放相机距离（限制最小和最大距离）
-        camRadius = Math.max(5, Math.min(100, camRadius + e.deltaY * 0.1));
+        SystemState.camRadius = Math.max(CONFIG.minZoom, Math.min(CONFIG.maxZoom, SystemState.camRadius + e.deltaY * CONFIG.zoomSpeed));
     });
-    
-    // 窗口大小变化
+
+    // 窗口大小变化事件
     window.addEventListener('resize', () => {
         resizeCanvas();
         // 重新创建窗口实例以适应新尺寸
-        hiddenWindow = new Window(screenWidthPx, screenHeightPx, CONFIG.screenXLengthCm, CONFIG.screenYLengthCm);
-        lightWindow = new Window(screenWidthPx, screenHeightPx, CONFIG.screenXLengthCm, CONFIG.screenYLengthCm);
-        mainWindow.update(screenWidthPx, screenHeightPx, CONFIG.screenXLengthCm, CONFIG.screenYLengthCm);
+        SystemState.hiddenWindow = new Window(SystemState.screenWidthPx, SystemState.screenHeightPx, CONFIG.screenXLengthCm, CONFIG.screenYLengthCm, 'hidden');
+        SystemState.lightWindow = new Window(SystemState.screenWidthPx, SystemState.screenHeightPx, CONFIG.screenXLengthCm, CONFIG.screenYLengthCm, 'light');
+        SystemState.mainWindow.update(SystemState.screenWidthPx, SystemState.screenHeightPx, CONFIG.screenXLengthCm, CONFIG.screenYLengthCm);
+        // 重新估算法向量（可选，可能耗时）
+        // estimateNormals();
     });
-    
-    // 处理输入的主循环
-    function handleInput() {
-        const rotationSpeed = 0.05;
-        const moveSpeed = 0.5;
-        camAngle = 0;
-        // if (keys['`'] || keys['1'] || keys['2'] || keys['3'] || keys['4'] || keys['5'] || keys['6'] || keys['7'] || keys['8'] || keys['9'] || keys['0'] || keys['-'] || keys['=']) {
-        //     if (keys['`']) camAngle = Math.PI;
-        //     if (keys['1']) camAngle = Math.PI * (5 / 6);
-        //     if (keys['2']) camAngle = Math.PI * (2 / 3);
-        //     if (keys['3']) camAngle = Math.PI * (1 / 2);
-        //     if (keys['4']) camAngle = Math.PI * (1 / 3);
-        //     if (keys['5']) camAngle = Math.PI / 6;
-        //     if (keys['6']) camAngle = 0;
-        //     if (keys['7']) camAngle = -Math.PI / 6;
-        //     if (keys['8']) camAngle = -Math.PI * (1 / 3);
-        //     if (keys['9']) camAngle = -Math.PI * (1 / 2);
-        //     if (keys['0']) camAngle = -Math.PI * (2 / 3);
-        //     if (keys['-']) camAngle = -Math.PI * (5 / 6);
-        //     if (keys['=']) camAngle = -Math.PI;
-        //     camAngle += mainWindow.dirAngle;
-        //     mainWindow.direction.x = Math.cos(camElevation) * Math.sin(camAngle);
-        //     mainWindow.direction.y = Math.cos(camElevation) * Math.cos(camAngle);
-        //     mainWindow.direction.z = Math.sin(camElevation);
-        // }
-
-        // if (keys['shiftleft'] || keys['x'] || keys['c'] || keys['v'] || keys['b'] || keys['n'] || keys['m'] || keys[','] || keys['.'] || keys['/'] || keys['shiftright']) {
-        //     if (keys['shiftleft']) camAngle = Math.PI * (5 / 10);
-        //     if (keys['z']) camAngle = -Math.PI * (4 / 20);
-        //     if (keys['x']) camAngle = -Math.PI * (3 / 20);
-        //     if (keys['c']) camAngle = -Math.PI * (2 / 20);
-        //     if (keys['v']) camAngle = -Math.PI * (1 / 20);
-        //     if (keys['b']) camAngle = 0;
-        //     if (keys['n']) camAngle = Math.PI * (1 / 20);
-        //     if (keys['m']) camAngle = Math.PI * (2 / 20);
-        //     if (keys[',']) camAngle = Math.PI * (3 / 20);
-        //     if (keys['.']) camAngle = Math.PI * (4 / 20);
-        //     if (keys['/']) camAngle = Math.PI * (5 / 20);
-            
-        //     camAngle += mainWindow.dirAngle;
-        //     const hcd = mainWindow.capital.getD(mainWindow.direction.start);
-        //     mainWindow.direction.start.x = hcd * Math.cos(camElevation) * Math.sin(camAngle) + mainWindow.capital.x;
-        //     mainWindow.direction.start.y = hcd * Math.cos(camElevation) * Math.cos(camAngle) + mainWindow.capital.y;
-        //     mainWindow.direction.start.z = hcd * Math.sin(camElevation) + mainWindow.capital.z;
-        //     mainWindow.direction.x = Math.cos(camElevation) * Math.sin(camAngle);
-        //     mainWindow.direction.y = Math.cos(camElevation) * Math.cos(camAngle);
-        //     mainWindow.direction.z = Math.sin(camElevation);
-        //     // if (keys['shiftright']) camDir = -Math.PI * (1 / 2);
-        // }
-        // WASD 控制相机旋转
-        if (keys['z']) camAngle = -0.04;
-        if (keys['x']) camAngle = -0.02;
-        if (keys['c']) camAngle = -0.01;
-        if (keys['v']) camAngle = 0;
-        if (keys['b']) camAngle = 0.01;
-        if (keys['n']) camAngle = 0.02;
-        if (keys['m']) camAngle = 0.04;
-        mainWindow.horizontalRotation(camAngle);
-        // if (keys['arrowleft'] || keys['arrowright'] || keys['arrowup'] || keys['arrowdown']) {
-        //     if (keys['arrowleft']) camAngle = -rotationSpeed; // 左转
-        //     if (keys['arrowright']) camAngle = rotationSpeed; // 右转
-        //     mainWindow.horizontalRotation(camAngle);
-        // }
-        // // Q/E 控制相机距离
-        // if (keys['q']) camRadius = Math.max(5, camRadius - moveSpeed); // 靠近
-        // if (keys['e']) camRadius = Math.min(100, camRadius + moveSpeed); // 远离
-        
-        // // 方向键控制光源
-        // if (keys['arrowleft']) lightAngle -= rotationSpeed;
-        // if (keys['arrowright']) lightAngle += rotationSpeed;
-        // if (keys['arrowup']) lightElevation = Math.min(Math.PI/2 - 0.1, lightElevation + rotationSpeed);
-        // if (keys['arrowdown']) lightElevation = Math.max(-Math.PI/2 + 0.1, lightElevation - rotationSpeed);
-    }
-    
-    // 主循环
-    function gameLoop() {
-        handleInput();
-        render();
-        requestAnimationFrame(gameLoop);
-    }
-    
-    gameLoop();
 }
 
 // ========================
-// 10. 调整画布大小
+// 11. 调整画布大小
 // ========================
 function resizeCanvas() {
-    screenWidthPx = window.innerWidth;
-    screenHeightPx = window.innerHeight;
-    canvas.width = screenWidthPx;
-    canvas.height = screenHeightPx;
+    SystemState.screenWidthPx = window.innerWidth;
+    SystemState.screenHeightPx = window.innerHeight;
+    SystemState.canvas.width = SystemState.screenWidthPx;
+    SystemState.canvas.height = SystemState.screenHeightPx;
 }
 
 // ========================
-// 11. 启动应用
+// 12. 动态对象创建接口（预留）
+// ========================
+function createObjectFromCommand(command) {
+    // 临时代码：预留通过指令创建对象的接口
+    // 例如: command = { type: 'sphere', params: { x: 0, y: 0, z: 0, radius: 5, points: 100 } }
+    console.log("收到创建对象指令:", command);
+    switch(command.type) {
+        case 'sphere':
+            return createSphere(command.params.x, command.params.y, command.params.z, command.params.radius, command.params.points);
+        case 'cube':
+            return createCube(command.params.size, command.params.pointsPerFace, command.params.x, command.params.y, command.params.z, command.params.alpha, command.params.ifEntity);
+        default:
+            console.warn("未知的对象类型:", command.type);
+            return null;
+    }
+}
+
+// ========================
+// 13. 摄像头控制接口（预留）
+// ========================
+function updateFromCamera(cameraData) {
+    // 临时代码：预留摄像头数据更新系统状态的接口
+    // 例如: cameraData = { headYaw: 0.1, headPitch: -0.05, handPosition: {x: 1, y: 2, z: 3} }
+    // SystemState.camAngle += cameraData.headYaw * CONFIG.cameraControl.sensitivity;
+    // SystemState.camElevation += cameraData.headPitch * CONFIG.cameraControl.sensitivity;
+    console.log("收到摄像头数据:", cameraData);
+}
+
+// ========================
+// 14. 主循环
+// ========================
+function gameLoop() {
+    handleInput();
+    updateLight(); // 每帧更新光源位置（如果需要动态光源）
+    render();
+    requestAnimationFrame(gameLoop);
+}
+
+// ========================
+// 15. 启动应用
 // ========================
 init();
+gameLoop(); // 启动主循环
