@@ -77,6 +77,9 @@ export class Window {
         this.dirAngle = camAngle;
         this.direction.dirAngle = camDirAngle;
     }
+    headMove(headDisFromPane) {
+        this.capital = this.direction.getPoint(-headDisFromPane);
+    }
     calculate(head, eyeD, direction, objects, light, otherObjects) {
         this.direction = direction;
         this.capital = head;

@@ -2,6 +2,7 @@ import { Window } from './base/Window.js';
 import { Object } from './base/Object.js';
 import { Point } from './base/Point.js';
 import { Vector } from './base/Vector.js';
+import { Classifier } from './math/Classifier.js';
 
 // ========================
 // 1. 配置参数（预留接口）
@@ -17,12 +18,12 @@ const CONFIG = {
     initialCamAngle: 0,
     initialCamElevation: 0,
     // 光源初始参数
-    initialLightRadius: 5,
+    initialLightRadius: 1,
     initialLightAngle: 0,
     initialLightElevation: 0,
     // 点云密度
     spherePoints: 1000,
-    cubePoints: 2000,
+    cubePoints: 500,
     // 渲染和控制参数
     rotationSpeed: 0.05,
     moveSpeed: 0.5,
@@ -34,13 +35,20 @@ const CONFIG = {
     // 拖拽旋转灵敏度
     dragRotationSpeed: 0.01,
     // 隐藏窗口估算次数
-    normalEstimationIterations: 500,
-    normalEstimationRadius: 25,
-    // 临时代码：预留摄像头控制参数
-    // cameraControl: {
-    //     enabled: false,
-    //     sensitivity: 0.01
-    // },
+    normalEstimationIterations: 10,
+    normalEstimationRadius: 15,
+    // 摄像头控制参数
+    cameraControl: {
+        enabled: true, // 默认关闭摄像头控制
+        sensitivity: 0.005, // 控制灵敏度
+        targetHue: 0, // 目标颜色的色调 (0=红, 120=绿, 240=蓝)
+        targetHueTolerance: 30, // 色调容差
+        targetSaturation: 0.7, // 最小饱和度
+        targetValue: 0.5, // 最小亮度
+        minArea: 50, // 最小识别面积 (像素^2)
+        maxArea: 10000, // 最大识别面积 (像素^2)
+        smoothingFactor: 0.1 // 位置平滑因子 (0-1, 1=无平滑)
+    },
 };
 
 // ========================
@@ -53,7 +61,6 @@ function createCube(size = 5, pointsPerFace = 100, x = 0, y = -30, z = 0, alpha 
     const cosA = Math.cos(rad);
     const sinA = Math.sin(rad);
 
-    // 生成6个面的点
     const faceGenerators = [
         () => ({ x: (Math.random() - 0.5) * size, y: (Math.random() - 0.5) * size, z: halfSize }), // 前
         () => ({ x: (Math.random() - 0.5) * size, y: (Math.random() - 0.5) * size, z: -halfSize }), // 后
@@ -64,10 +71,8 @@ function createCube(size = 5, pointsPerFace = 100, x = 0, y = -30, z = 0, alpha 
     ];
 
     for (let i = 0; i < pointsPerFace; i++) {
-        // 修复：解构赋值使用正确的属性名 x, y, z
         faceGenerators.forEach(gen => {
-            const { x: px, y: py, z: pz } = gen(); // 使用别名 (x as px, y as py, z as pz)
-            // 或者 const genResult = gen(); const px = genResult.x; const py = genResult.y; const pz = genResult.z;
+            const { x: px, y: py, z: pz } = gen(); // 修复解构赋值
             const rotatedX = px * cosA - py * sinA;
             const rotatedY = px * sinA + py * cosA;
             const rotatedZ = pz;
@@ -214,6 +219,7 @@ function createSphereWithLines(radius = 3, longitudeLines = 12, latitudeLines = 
 // 3. 系统状态管理
 // ========================
 const SystemState = {
+    ifControl: true,
     // 对象列表
     objects: [
         createCube(5, Math.floor(CONFIG.cubePoints), 0, 0, 0, 45, false)
@@ -251,17 +257,176 @@ const SystemState = {
     // 画布尺寸
     screenWidthPx: window.innerWidth,
     screenHeightPx: window.innerHeight,
+
+    // 摄像头相关状态
+    video: null,
+    videoCanvas: null,
+    videoCtx: null,
+    cameraActive: false,
+    targetPosition: { x: 0, y: 0 }, // 平滑后的目标位置
+    lastDetectionTime: 0, // 上次检测时间，用于控制检测频率
+    detectionInterval: 5, // 每隔 100ms 检测一次
+    smoothingListDis: []
 };
+const C = new Classifier();
 
 // ========================
-// 4. 初始化函数
+// 4. 摄像头初始化函数
 // ========================
-function init() {
+async function initCamera() {
+    if (!CONFIG.cameraControl.enabled) {
+        console.log("摄像头控制未启用，跳过初始化。");
+        return;
+    }
+
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        SystemState.video = document.createElement('video');
+        SystemState.video.srcObject = stream;
+        SystemState.video.play();
+        SystemState.video.style.display = 'none'; // 隐藏视频元素
+        document.body.appendChild(SystemState.video);
+
+        // 创建用于处理视频帧的 canvas
+        SystemState.videoCanvas = document.createElement('canvas');
+        SystemState.videoCtx = SystemState.videoCanvas.getContext('2d');
+
+        SystemState.cameraActive = true;
+        console.log("摄像头初始化成功。");
+    } catch (err) {
+        console.error("无法访问摄像头:", err);
+        SystemState.debugDiv.textContent = `摄像头错误: ${err.message || err}`;
+        CONFIG.cameraControl.enabled = false; // 禁用摄像头控制
+    }
+}
+
+// ========================
+// 5. 摄像头识别处理函数
+// ========================
+function processCamera() {
+    console.group("=== processCamera 开始 ==="); // 开始一个日志组，方便折叠查看
+
+    // 1. 检查摄像头是否已激活且配置允许处理
+    if (!SystemState.cameraActive) {
+        console.log("摄像头未激活，跳过处理。SystemState.cameraActive =", SystemState.cameraActive);
+        console.groupEnd(); // 结束日志组
+        return;
+    }
+    if (!CONFIG.cameraControl.enabled) {
+        console.log("摄像头控制在配置中被禁用，跳过处理。CONFIG.cameraControl.enabled =", CONFIG.cameraControl.enabled);
+        console.groupEnd(); // 结束日志组
+        return;
+    }
+    // console.log("摄像头已激活且控制已启用，继续处理。");
+
+    // 2. 控制处理频率
+    const now = Date.now();
+    // console.log("当前时间戳:", now, "上次处理时间戳:", SystemState.lastDetectionTime, "间隔阈值:", SystemState.detectionInterval);
+    if (now - SystemState.lastDetectionTime < SystemState.detectionInterval) {
+        // console.log("未到处理间隔，跳过本次处理。距离下次处理还需:", (SystemState.detectionInterval - (now - SystemState.lastDetectionTime)), "ms");
+        console.groupEnd(); // 结束日志组
+        return;
+    }
+    // console.log("已到达处理间隔，开始处理视频帧。");
+    SystemState.lastDetectionTime = now;
+
+    // 3. 获取视频和处理用的 Canvas 上下文
+    const video = SystemState.video;
+    const canvas = SystemState.videoCanvas;
+    const ctx = SystemState.videoCtx;
+
+    // 4. 检查视频是否准备好
+    // console.log("视频 readyState:", video.readyState, " (0: HAVE_NOTHING, 1: HAVE_METADATA, 2: HAVE_CURRENT_DATA, 3: HAVE_FUTURE_DATA, 4: HAVE_ENOUGH_DATA)");
+    if (video.readyState !== video.HAVE_ENOUGH_DATA) {
+        console.warn("视频数据不足，无法处理。");
+        console.groupEnd(); // 结束日志组
+        return;
+    }
+    // console.log("视频数据充足，准备处理。");
+
+    // 5. 设置处理 Canvas 的尺寸
+    // console.log("视频原始尺寸: 宽", video.videoWidth, "高", video.videoHeight);
+    canvas.width = video.videoWidth / 8;
+    canvas.height = video.videoHeight / 8;
+    // console.log("设置处理 Canvas 尺寸: 宽", canvas.width, "高", canvas.height);
+
+    // 6. 将视频帧绘制到 Canvas
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    // console.log("已将视频帧绘制到处理 Canvas。");
+
+    // 7. 获取像素数据
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const data = imageData.data;
+    // console.log("获取到 ImageData，总像素数:", data.length / 4);
+    const res = C.processImageFromCamera(data, canvas.width, canvas.height);
+    if (res && res.estimateDis) {
+        const headDis = processQueue(SystemState.smoothingListDis, res.estimateDis, 5, 0.4);
+        SystemState.mainWindow.headMove(headDis);
+        SystemState.ifControl = true;
+    }
+
+    // updateCameraDisplay(res);
+    console.groupEnd(); // 结束日志组
+    console.log("--- processCamera 结束 ---\n"); // 结束标记，增加空行便于阅读
+}
+function processQueue(dataList, num, maxLength = 5, tol = 0.1) {
+    // 1. 入队并控制最大长度
+    dataList.push(num);
+    if (dataList.length > maxLength) {
+        dataList.shift(); // 移除最旧的元素 (头部移除，O(n) 操作，但队列短所以影响小)
+        // 如果 maxLength 非常大，可以考虑用循环数组优化 shift，但通常不必要。
+    }
+
+    // 2. 计算当前队列的初始平均值 (O(n))
+    let sum = 0;
+    const len = dataList.length;
+    for (const val of dataList) {
+        sum += val;
+    }
+    const avg = len > 0 ? sum / len : 0;
+
+    // 3. 原地筛选元素 (O(n))
+    // 使用 writeIndex 指针，将符合条件的元素依次放回数组前面
+    let writeIndex = 0;
+    let newSum = 0;
+    const lastOriginalIndex = dataList.length - 1; // 新添加元素在筛选前的索引
+
+    for (let i = 0; i < dataList.length; i++) {
+        const val = dataList[i];
+        let valid = false;
+
+        if (avg === 0) {
+            // 平均值为0时，使用绝对偏差判断
+            valid = Math.abs(val) <= tol;
+        } else {
+            // 平均值非0时，使用相对偏差判断
+            const diffRatio = Math.abs(val - avg) / Math.abs(avg);
+            // 对最新添加的元素，使用更宽松的容差 (2 * tol)
+            valid = i === lastOriginalIndex ? diffRatio <= 2 * tol : diffRatio <= tol;
+        }
+
+        if (valid) {
+            dataList[writeIndex] = val; // 将有效元素写入新位置
+            newSum += val;
+            writeIndex++; // 移动写指针
+        }
+    }
+
+    // 4. 截断数组到有效部分 (O(1))
+    dataList.length = writeIndex;
+
+    // 5. 返回筛选后数组的平均值
+    return writeIndex > 0 ? newSum / writeIndex : 0;
+}
+// ========================
+// 6. 初始化函数
+// ========================
+async function init() { // 改为 async
     // 创建 DOM 元素
     SystemState.canvas = document.createElement('canvas');
     SystemState.ctx = SystemState.canvas.getContext('2d');
-    SystemState.debugDiv = document.getElementById('debug') || document.createElement('div'); // 防止 debugDiv 不存在
-    SystemState.debugDiv.id = 'debug'; // 确保 ID
+    SystemState.debugDiv = document.getElementById('debug') || document.createElement('div');
+    SystemState.debugDiv.id = 'debug';
     if (!document.getElementById('debug')) {
         document.body.appendChild(SystemState.debugDiv);
     }
@@ -289,12 +454,15 @@ function init() {
     // 设置事件监听器
     setupEventListeners();
 
+    // 初始化摄像头
+    await initCamera(); // 等待摄像头初始化
+    // initCameraDisplay();
     SystemState.debugDiv.textContent = "初始化完成";
     console.log("初始化完成");
 }
 
 // ========================
-// 5. 法向量估算
+// 7. 法向量估算
 // ========================
 function estimateNormals() {
     console.log("开始估算法向量...");
@@ -315,7 +483,7 @@ function estimateNormals() {
 }
 
 // ========================
-// 6. 光源更新
+// 8. 光源更新
 // ========================
 function updateLight() {
     const lightX = SystemState.lightRadius * Math.cos(SystemState.lightElevation) * Math.cos(SystemState.lightAngle);
@@ -326,18 +494,18 @@ function updateLight() {
     const lightCamPos = lightDir.getPoint(-5);
     SystemState.lightWindow.calculate(lightCamPos, 0, lightDir, SystemState.objects, 1.0, SystemState.otherObjects);
     SystemState.otherObjects.length = 0; // 清空 otherObjects
-    SystemState.otherObjects.push(createSphere(lightX, lightY, lightZ, 1, 20)); // 添加光源点
+    SystemState.otherObjects.push(createSphere(lightX, lightY, lightZ, 0.5, 20)); // 添加光源点
 }
 
 // ========================
-// 7. 相机更新
+// 9. 相机更新
 // ========================
 function updateCamera() {
     SystemState.mainWindow.calculate(SystemState.mainWindow.capital, CONFIG.eyeD, SystemState.mainWindow.direction, SystemState.objects, 0, SystemState.otherObjects);
 }
 
 // ========================
-// 8. 渲染函数
+// 10. 渲染函数
 // ========================
 function render() {
     const ctx = SystemState.ctx;
@@ -368,19 +536,22 @@ function render() {
 }
 
 // ========================
-// 9. 输入处理
+// 11. 输入处理
 // ========================
 function handleInput() {
     const keys = SystemState.keys;
 
     // WASD 控制相机水平旋转 (模拟原始代码中的 Z/X/C/V/B/N/M)
-    if (keys['z']) SystemState.mainWindow.horizontalRotation(-CONFIG.rotationSpeed);
-    if (keys['x']) SystemState.mainWindow.horizontalRotation(-CONFIG.rotationSpeed * 0.5);
-    if (keys['c']) SystemState.mainWindow.horizontalRotation(-CONFIG.rotationSpeed * 0.25);
-    if (keys['v']) SystemState.mainWindow.horizontalRotation(0); // 无旋转
-    if (keys['b']) SystemState.mainWindow.horizontalRotation(CONFIG.rotationSpeed * 0.25);
-    if (keys['n']) SystemState.mainWindow.horizontalRotation(CONFIG.rotationSpeed * 0.5);
-    if (keys['m']) SystemState.mainWindow.horizontalRotation(CONFIG.rotationSpeed);
+    if (keys['z'] || keys['x'] || keys['c'] || keys['v'] || keys['b'] || keys['n'] || keys['m']) {
+        SystemState.ifControl = true;
+        if (keys['z']) SystemState.mainWindow.horizontalRotation(-CONFIG.rotationSpeed);
+        if (keys['x']) SystemState.mainWindow.horizontalRotation(-CONFIG.rotationSpeed * 0.5);
+        if (keys['c']) SystemState.mainWindow.horizontalRotation(-CONFIG.rotationSpeed * 0.25);
+        if (keys['v']) SystemState.mainWindow.horizontalRotation(0); // 无旋转
+        if (keys['b']) SystemState.mainWindow.horizontalRotation(CONFIG.rotationSpeed * 0.25);
+        if (keys['n']) SystemState.mainWindow.horizontalRotation(CONFIG.rotationSpeed * 0.5);
+        if (keys['m']) SystemState.mainWindow.horizontalRotation(CONFIG.rotationSpeed);
+    }
 
     // Q/E 控制相机距离
     if (keys['q']) SystemState.camRadius = Math.max(CONFIG.minZoom, SystemState.camRadius - CONFIG.moveSpeed);
@@ -392,20 +563,26 @@ function handleInput() {
     if (keys['arrowup']) SystemState.lightElevation = Math.min(CONFIG.maxElevation, SystemState.lightElevation + CONFIG.rotationSpeed);
     if (keys['arrowdown']) SystemState.lightElevation = Math.max(CONFIG.minElevation, SystemState.lightElevation - CONFIG.rotationSpeed);
 
-    // 临时代码：预留摄像头控制逻辑入口
-    // if (CONFIG.cameraControl.enabled) {
-    //     // 这里可以从摄像头数据更新 SystemState.camAngle, SystemState.camElevation 等
-    //     // 例如：SystemState.camAngle += cameraHeadYaw * CONFIG.cameraControl.sensitivity;
-    // }
+    // 摄像头控制逻辑（如果启用）
+    // 摄像头的更新在 processCamera 中进行
 }
 
 // ========================
-// 10. 事件监听器设置
+// 12. 事件监听器设置
 // ========================
 function setupEventListeners() {
     // 键盘事件
     window.addEventListener('keydown', (e) => {
         SystemState.keys[e.key.toLowerCase()] = true;
+        // 示例：按 'c' 键切换摄像头控制
+        if (e.key.toLowerCase() === 'p') {
+            CONFIG.cameraControl.enabled = !CONFIG.cameraControl.enabled;
+            if (CONFIG.cameraControl.enabled) {
+                initCamera(); // 尝试重新初始化
+            }
+            SystemState.debugDiv.textContent = `摄像头控制: ${CONFIG.cameraControl.enabled ? '开启' : '关闭'}`;
+            console.log(`摄像头控制: ${CONFIG.cameraControl.enabled ? '开启' : '关闭'}`);
+        }
     });
     window.addEventListener('keyup', (e) => {
         SystemState.keys[e.key.toLowerCase()] = false;
@@ -439,6 +616,7 @@ function setupEventListeners() {
 
     // 窗口大小变化事件
     window.addEventListener('resize', () => {
+        SystemState.ifControl = true;
         resizeCanvas();
         // 重新创建窗口实例以适应新尺寸
         SystemState.hiddenWindow = new Window(SystemState.screenWidthPx, SystemState.screenHeightPx, CONFIG.screenXLengthCm, CONFIG.screenYLengthCm, 'hidden');
@@ -450,7 +628,7 @@ function setupEventListeners() {
 }
 
 // ========================
-// 11. 调整画布大小
+// 13. 调整画布大小
 // ========================
 function resizeCanvas() {
     SystemState.screenWidthPx = window.innerWidth;
@@ -460,11 +638,9 @@ function resizeCanvas() {
 }
 
 // ========================
-// 12. 动态对象创建接口（预留）
+// 14. 动态对象创建接口（预留）
 // ========================
 function createObjectFromCommand(command) {
-    // 临时代码：预留通过指令创建对象的接口
-    // 例如: command = { type: 'sphere', params: { x: 0, y: 0, z: 0, radius: 5, points: 100 } }
     console.log("收到创建对象指令:", command);
     switch(command.type) {
         case 'sphere':
@@ -478,10 +654,9 @@ function createObjectFromCommand(command) {
 }
 
 // ========================
-// 13. 摄像头控制接口（预留）
+// 15. 摄像头控制接口（预留）
 // ========================
 function updateFromCamera(cameraData) {
-    // 临时代码：预留摄像头数据更新系统状态的接口
     // 例如: cameraData = { headYaw: 0.1, headPitch: -0.05, handPosition: {x: 1, y: 2, z: 3} }
     // SystemState.camAngle += cameraData.headYaw * CONFIG.cameraControl.sensitivity;
     // SystemState.camElevation += cameraData.headPitch * CONFIG.cameraControl.sensitivity;
@@ -489,17 +664,114 @@ function updateFromCamera(cameraData) {
 }
 
 // ========================
-// 14. 主循环
+// 16. 主循环
 // ========================
 function gameLoop() {
     handleInput();
-    updateLight(); // 每帧更新光源位置（如果需要动态光源）
-    render();
+    processCamera(); // 在主循环中处理摄像头
+    drawCameraFeedOnMainCanvas(SystemState.ctx);
+    if (SystemState.ifControl) {
+        updateLight(); // 每帧更新光源位置（如果需要动态光源）
+        render();
+        SystemState.ifControl = false;
+    }
     requestAnimationFrame(gameLoop);
 }
+// 假设 SystemState.canvas 是你的主渲染画布 (ctx 是其 2D 上下文)
+// 假设 SystemState.video 是你的摄像头视频元素
+// 假设 SystemState.videoCanvas 是用于处理视频帧的隐藏 canvas
+
+// --- 1. 初始化摄像头显示画布 (通常在 initCamera 或 init 时调用一次) ---
+/**
+ * 初始化摄像头显示画布，居中显示且支持尺寸调整
+ * @param {number} scale - 尺寸缩放比例（0~1，1=原始尺寸，0.5=半尺寸，默认0.8）
+ */
+function initCameraDisplay(scale = 0.5) {
+    // 创建或替换画布
+    if (SystemState.videoDisplayCanvas) {
+        SystemState.videoDisplayCanvas.remove();
+    }
+    SystemState.videoDisplayCanvas = document.createElement('canvas');
+    SystemState.videoDisplayCtx = SystemState.videoDisplayCanvas.getContext('2d');
+
+    // 获取视频原始尺寸（默认640x480）
+    const videoWidth = SystemState.video?.videoWidth || 640;
+    const videoHeight = SystemState.video?.videoHeight || 480;
+
+    // 按比例调整尺寸（支持大小调节）
+    const displayWidth = Math.round(videoWidth * scale);
+    const displayHeight = Math.round(videoHeight * scale);
+    SystemState.videoDisplayCanvas.width = displayWidth;
+    SystemState.videoDisplayCanvas.height = displayHeight;
+
+    // 添加到页面并设置居中样式
+    document.body.appendChild(SystemState.videoDisplayCanvas);
+    const style = SystemState.videoDisplayCanvas.style;
+    style.position = 'fixed'; // 固定定位，相对于视口居中
+    style.top = '50%';
+    style.left = '50%';
+    // 通过transform平移实现精确居中（基于自身尺寸的一半）
+    style.transform = 'translate(-50%, -50%)';
+    style.zIndex = '1'; // 控制层级
+    style.border = '2px solid #fff'; // 可选：添加边框便于区分
+    style.boxShadow = '0 0 10px rgba(0,0,0,0.3)'; // 可选：添加阴影提升视觉效果
+
+    console.log(`摄像头显示画布初始化完成。尺寸: ${displayWidth}x${displayHeight}，缩放比例: ${scale}`);
+    return true;
+}
+
+
+// --- 2. 更新摄像头显示画布内容 (在 processCamera 或渲染循环中调用) ---
+function updateCameraDisplay(test) {
+    C.updateCameraDisplay(SystemState, test);
+}
+
+
+// --- 3. 将摄像头画面绘制到主渲染画布 (在 render 函数中调用) ---
+function drawCameraFeedOnMainCanvas(ctx, x = 0, y = 0, width = 200, height = 150, opacity = 0.5) { // 可调整位置、大小和透明度
+    if (!SystemState.videoDisplayCanvas) {
+        // console.warn("摄像头显示画布不存在，无法绘制。");
+        return;
+    }
+
+    // 保存当前绘图状态
+    ctx.save();
+
+    // 设置透明度
+    ctx.globalAlpha = opacity;
+
+    // 绘制摄像头画面到主画布的指定位置和大小
+    ctx.drawImage(SystemState.videoDisplayCanvas, x, y, width, height);
+
+    // 恢复绘图状态
+    ctx.restore();
+}
+
+// --- 使用示例 (集成到你的现有流程中) ---
+
+// 在 initCamera 函数成功后调用
+// if (SystemState.cameraActive) {
+//     initCameraDisplay();
+// }
+
+// 在 processCamera 函数的末尾调用 (确保在视频数据就绪时更新)
+// updateCameraDisplay(); // 这会更新 SystemState.videoDisplayCanvas 的内容
+
+// 在 render 函数中，在绘制 3D 内容 *之前* 或 *之后* 调用
+// drawCameraFeedOnMainCanvas(SystemState.ctx, 10, 10, 160, 120, 0.6); // 例如，左上角显示小窗口
+// ... (渲染 3D 点云) ...
+// FlushBatchDraw equivalent for canvas (ctx.flush() or requestAnimationFrame)
+
+// 注意:
+// - 如果你想让摄像头画面作为背景，就在 render 3D 内容 *之前* 调用 drawCameraFeedOnMainCanvas。
+// - 如果你想让摄像头画面叠加在 3D 内容之上，就在 render 3D 内容 *之后* 调用。
+// - 通过调整 x, y, width, height, opacity 参数可以控制摄像头画面的显示效果。
+// - `updateCameraDisplay` 负责获取视频帧，`drawCameraFeedOnMainCanvas` 负责将其绘制到主画布。
+// - `initCameraDisplay` 只需在摄像头初始化成功后调用一次。
 
 // ========================
-// 15. 启动应用
+// 17. 启动应用
 // ========================
-init();
-gameLoop(); // 启动主循环
+init().then(() => { // 等待 init 完成
+    gameLoop(); // 启动主循环
+}).catch(console.error);
