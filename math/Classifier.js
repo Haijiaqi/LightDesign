@@ -532,7 +532,7 @@ export class Classifier {
         // 12.4: 外延最远点距离
         const drbr = distance(farthestBlueOutward.x, farthestBlueOutward.y, farthestRedOutward.x, farthestRedOutward.y);
         console.log("外延最远点距离 (drbr):", drbr);
-        const estimateDis = 6.21 / (drbr / width);
+        const estimateDis = 7 / (drbr / width);
         const blueInwardDx = dirX !== 0 ? Math.sign(dirX) : Math.sign(dirY);
         const blueInwardDy = dirX !== 0 ? 0 : Math.sign(dirY);
         const farthestBlueInward = findFarthestPoint(bmx, bmy, blueInwardDx, blueInwardDy, isBlue);
@@ -569,7 +569,8 @@ export class Classifier {
         const centerOfCentersX = (bmx + rmx) / 2;
         const centerOfCentersY = (bmy + rmy) / 2;
         // console.log("红蓝中心点的中心:", { centerOfCentersX, centerOfCentersY });
-
+        const headHeight = centerOfCentersY / height;
+        const headX = centerOfCentersX / width;
         // 13. 检查 drbr 与 dbmrm 的倍数关系
         const drbrRatio = drbr / (dbmrm || 1);
         // console.log("drbr / dbmrm 比值:", drbrRatio);
@@ -613,10 +614,12 @@ export class Classifier {
                 allBluePoints,
                 allRedPoints,
                 elevation,
-                estimateDis
+                estimateDis,
+                headHeight,
+                headX
                 // ... 其他需要的值
             };
-            console.log("识别成功，返回结果:", result);
+            // console.log("识别成功，返回结果:", result);
             console.groupEnd();
             return result;
 

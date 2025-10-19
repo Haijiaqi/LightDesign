@@ -69,4 +69,10 @@ export class Vector {
     getPoint(l) {
         return new Point(this.x * l + this.start.x, this.y * l + this.start.y, this.z * l + this.start.z);
     }
+    timesLV(l) {
+        return new Vector(this.x * l, this.y * l, this.z * l);
+    }
+    addV(v) {
+        return new Vector(this.x + v.x, this.y + v.y, this.z + v.z);
+    }
 }

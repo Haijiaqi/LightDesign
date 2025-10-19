@@ -10,7 +10,7 @@ import { Classifier } from './math/Classifier.js';
 const CONFIG = {
     // 显示器物理尺寸（厘米）
     screenXLengthCm: 31.0,
-    screenYLengthCm: 15.515,
+    screenYLengthCm: 17.4,
     // 双眼瞳距（厘米）
     eyeD: 6.3,
     // 相机初始参数
@@ -18,12 +18,12 @@ const CONFIG = {
     initialCamAngle: 0,
     initialCamElevation: 0,
     // 光源初始参数
-    initialLightRadius: 1,
+    initialLightRadius: 5,
     initialLightAngle: 0,
     initialLightElevation: 0,
     // 点云密度
     spherePoints: 1000,
-    cubePoints: 500,
+    cubePoints: 750,
     // 渲染和控制参数
     rotationSpeed: 0.05,
     moveSpeed: 0.5,
@@ -35,7 +35,7 @@ const CONFIG = {
     // 拖拽旋转灵敏度
     dragRotationSpeed: 0.01,
     // 隐藏窗口估算次数
-    normalEstimationIterations: 10,
+    normalEstimationIterations: 500,
     normalEstimationRadius: 15,
     // 摄像头控制参数
     cameraControl: {
@@ -91,7 +91,51 @@ function createCube(size = 5, pointsPerFace = 100, x = 0, y = -30, z = 0, alpha 
     }
     return new Object(points);
 }
+function createPlane(width = 20, height = 10, pointsPerFace = 10000, x = 0, y = 0, z = 0, alpha = 5, ifEntity = false) {
+    const points = [];
+    const halfWidth = width / 2;   // 宽度半值（X方向范围）
+    const halfHeight = height / 2; // 高度半值（Z方向范围）
+    const rad = alpha * Math.PI / 180; // 角度转弧度
+    const cosA = Math.cos(rad);
+    const sinA = Math.sin(rad);
 
+    // 生成平面表面点（Z轴在平面上，中心位于Z轴）
+    const generateSurfacePoint = () => {
+        // 原始坐标：X范围[-halfWidth, halfWidth]，Z范围[-halfHeight, halfHeight]，Y=0（下边框初始在xy平面）
+        const px = (Math.random() - 0.5) * width;
+        const pz = (Math.random() - 0.5) * height;
+        const py = 0;
+
+        // 绕Z轴旋转点坐标
+        const rotatedX = px * cosA - py * sinA;
+        const rotatedY = px * sinA + py * cosA;
+        const rotatedZ = pz;
+
+        // 计算法向量（默认(0,-1,0)，同步绕Z轴旋转）
+        const nx = 0 * cosA - (-1) * sinA; // 原法向量(0,-1,0)旋转后x分量
+        const ny = 0 * sinA + (-1) * cosA; // 原法向量(0,-1,0)旋转后y分量
+        const nz = 0; // Z分量不变
+
+        const p = new Point(rotatedX + x, rotatedY + y, rotatedZ + z);
+        p.nx = nx;p.ny = ny;p.nz = nz;
+        // 平移到目标位置并返回点（包含法向量）
+        return p;
+    };
+
+    // 生成平面点（表面点）
+    for (let i = 0; i < pointsPerFace; i++) {
+        points.push(generateSurfacePoint());
+    }
+
+    // 若需要实体点（内部填充点，逻辑同表面点）
+    if (ifEntity) {
+        for (let i = 0; i < pointsPerFace; i++) {
+            points.push(generateSurfacePoint());
+        }
+    }
+
+    return new Object(points);
+}
 function createSphere(x0, y0, z0, radius = 1, numPoints = 50) {
     const points = [];
     for (let i = 0; i < numPoints; i++) {
@@ -222,7 +266,8 @@ const SystemState = {
     ifControl: true,
     // 对象列表
     objects: [
-        createCube(5, Math.floor(CONFIG.cubePoints), 0, 0, 0, 45, false)
+        createCube(5, Math.floor(CONFIG.cubePoints), 0, 0, 8.7, 45, false),
+        // createPlane()
     ],
     otherObjects: [], // 例如光源点
 
@@ -265,8 +310,10 @@ const SystemState = {
     cameraActive: false,
     targetPosition: { x: 0, y: 0 }, // 平滑后的目标位置
     lastDetectionTime: 0, // 上次检测时间，用于控制检测频率
-    detectionInterval: 5, // 每隔 100ms 检测一次
-    smoothingListDis: []
+    detectionInterval: 20, // 每隔 100ms 检测一次
+    smoothingListDis: [],
+    smoothingListHeight: [],
+    smoothingListX: []
 };
 const C = new Classifier();
 
@@ -359,9 +406,17 @@ function processCamera() {
     const data = imageData.data;
     // console.log("获取到 ImageData，总像素数:", data.length / 4);
     const res = C.processImageFromCamera(data, canvas.width, canvas.height);
-    if (res && res.estimateDis) {
-        const headDis = processQueue(SystemState.smoothingListDis, res.estimateDis, 5, 0.4);
-        SystemState.mainWindow.headMove(headDis);
+    if (res && res.estimateDis && res.headHeight && res.headX) {
+        const headDis = processQueue(SystemState.smoothingListDis, res.estimateDis, 10, 0.4);
+        let headHeight = processQueue(SystemState.smoothingListHeight, res.headHeight, 10, 0.4);
+        let headX = processQueue(SystemState.smoothingListX, res.headX, 10, 0.4);
+        headHeight = Math.tan(((0.5 - headHeight) / 0.5) * (Math.PI / 6)) * headDis + (SystemState.mainWindow.ylength / 2);
+        if (Math.abs(headX - 0.5) > 0.25) {
+            headX = 0;
+        } else {
+            headX = Math.tan(((0.5 - headX) / 0.25) * (Math.PI / 6)) * headDis;
+        }
+        SystemState.mainWindow.headMoveTo(-headDis, headHeight, headX);
         SystemState.ifControl = true;
     }
 
@@ -439,7 +494,7 @@ async function init() { // 改为 async
     SystemState.lightWindow = new Window(SystemState.screenWidthPx, SystemState.screenHeightPx, CONFIG.screenXLengthCm, CONFIG.screenYLengthCm, 'light');
     SystemState.mainWindow = new Window(SystemState.screenWidthPx, SystemState.screenHeightPx, CONFIG.screenXLengthCm, CONFIG.screenYLengthCm, 'main');
     SystemState.mainWindow.direction = new Vector(0, 0, 0);
-    SystemState.mainWindow.direction.normalInit(0, 0, 0, 0, 1, 0);
+    SystemState.mainWindow.direction.normalInit(0, 0, 8.7, 0, 1, 8.7);
     SystemState.mainWindow.capital = SystemState.mainWindow.direction.getPoint(-50);
 
     // 估算法向量
@@ -490,11 +545,11 @@ function updateLight() {
     const lightY = SystemState.lightRadius * Math.cos(SystemState.lightElevation) * Math.sin(SystemState.lightAngle);
     const lightZ = SystemState.lightRadius * Math.sin(SystemState.lightElevation);
     const lightDir = new Vector(0, 0, 0);
-    lightDir.normalInit(lightX, lightY, lightZ, 0, 0, 0);
+    lightDir.normalInit(lightX, lightY, lightZ + 8.7, 0, 0, 8.7);
     const lightCamPos = lightDir.getPoint(-5);
     SystemState.lightWindow.calculate(lightCamPos, 0, lightDir, SystemState.objects, 1.0, SystemState.otherObjects);
     SystemState.otherObjects.length = 0; // 清空 otherObjects
-    SystemState.otherObjects.push(createSphere(lightX, lightY, lightZ, 0.5, 20)); // 添加光源点
+    SystemState.otherObjects.push(createSphere(lightCamPos.x, lightCamPos.y, lightCamPos.z, 0.5, 20)); // 添加光源点
 }
 
 // ========================
@@ -505,34 +560,274 @@ function updateCamera() {
 }
 
 // ========================
-// 10. 渲染函数
-// ========================
-function render() {
-    const ctx = SystemState.ctx;
-    ctx.clearRect(0, 0, SystemState.screenWidthPx, SystemState.screenHeightPx);
-    updateCamera();
+// 10. 渲染函数（基于putImageData批量绘图优化，支持邻接点绘制规则）
+// ========================// 1. 预计算固定色相的RGB颜色表（仅初始化一次，避免循环内复杂计算）
+// 色相：红(0)、蓝(240)、紫(285)；饱和度：红/蓝(100%)、紫(90%)
+const COLOR_LUT = (() => {
+  const factor = 100; // 用于将小数亮度转换为数组索引的因子
+  const maxBrightnessRed = 35;   // 对应 baseLight = 35
+  const maxBrightnessBluePurple = 50; // 对应 baseLight = 50
 
-    // 渲染红蓝点
-    for (let gridX = 0; gridX < SystemState.mainWindow.grid.length; gridX++) {
-        for (let gridY = 0; gridY < SystemState.mainWindow.grid[gridX].length; gridY++) {
-            const pointsInGrid = SystemState.mainWindow.grid[gridX][gridY];
-            for (const p of pointsInGrid) {
-                if (Math.abs(p.xL - p.xR) > 0) {
-                    if (p.xL !== 0 && p.yL !== 0) {
-                        ctx.fillStyle = `hsl(0, 100%, ${p.light * 35}%)`;
-                        ctx.fillRect(p.xL, p.yL, 1, 1);
-                    }
-                    if (p.xR !== 0 && p.yR !== 0) {
-                        ctx.fillStyle = `hsl(240, 100%, ${p.light * 50}%)`;
-                        ctx.fillRect(p.xR, p.yR, 1, 1);
-                    }
-                } else {
-                    ctx.fillStyle = `hsl(285, 90%, ${p.light * 50}%)`;
-                    ctx.fillRect(p.xL, p.yL, 1, 1);
-                }
+  // 计算数组大小
+  const sizeRed = Math.round(maxBrightnessRed * factor) + 1; // 0 到 3500 (含)
+  const sizeBluePurple = Math.round(maxBrightnessBluePurple * factor) + 1; // 0 到 5000 (含)
+
+  const lut = {
+    red: new Array(sizeRed),    // 索引 0 到 3500
+    blue: new Array(sizeBluePurple),   // 索引 0 到 5000
+    purple: new Array(sizeBluePurple)  // 索引 0 到 5000
+  };
+
+  // 基础HSL转RGB（仅用于预计算，不在循环中调用）
+  const hslToRgb = (h, s, l) => {
+    s /= 100;
+    l /= 100;
+    const k = n => (n + h / 30) % 12;
+    const a = s * Math.min(l, 1 - l);
+    const f = n => l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
+    return [Math.round(f(0) * 255), Math.round(f(8) * 255), Math.round(f(4) * 255)];
+  };
+
+  // 预计算红色（h=0, s=100%）：亮度0-35
+  for (let i = 0; i < sizeRed; i++) {
+    const l = i / factor; // 例如 i=150 -> l=1.5
+    lut.red[i] = hslToRgb(0, 100, l);
+  }
+
+  // 预计算蓝色（h=240, s=100%）：亮度0-50
+  for (let i = 0; i < sizeBluePurple; i++) {
+    const l = i / factor;
+    lut.blue[i] = hslToRgb(240, 100, l);
+  }
+
+  // 预计算紫色（h=285, s=90%）：亮度0-50
+  for (let i = 0; i < sizeBluePurple; i++) {
+    const l = i / factor;
+    lut.purple[i] = hslToRgb(285, 90, l);
+  }
+
+  return lut;
+})();
+
+// 2. 优化后的渲染函数
+function render() {
+  const ctx = SystemState.ctx;
+  const { screenWidthPx: width, screenHeightPx: height } = SystemState;
+  
+  // 初始化ImageData（批量像素容器）
+  const imageData = ctx.createImageData(width, height);
+  const pixelData = imageData.data; // RGBA数组：[R, G, B, A]，A固定255（不透明）
+
+  updateCamera();
+
+  // 遍历所有网格点（主循环）
+  for (let gridX = 0; gridX < SystemState.mainWindow.grid.length; gridX++) {
+    const gridCol = SystemState.mainWindow.grid[gridX];
+    for (let gridY = 0; gridY < gridCol.length; gridY++) {
+      const pointsInGrid = gridCol[gridY];
+      for (const p of pointsInGrid) {
+        // --------------------------
+        // 处理非紫色点（红蓝点，完全独立计算）
+        // --------------------------
+        if (Math.abs(p.xL - p.xR) > 0) {
+          const first = p.xL % 2 === 0;
+          // ① 红色点：xL/yL，baseLight=35，从预计算表取色
+          if (first && p.xL !== 0 && p.yL !== 0) {
+            const x = p.xL;
+            const y = p.yL;
+            const light = p.light; // 使用 p.light (与修改前一致)
+            const baseLight = 35;
+            
+            // 主点亮度：light * baseLight（计算索引）
+            const mainBrightnessVal = light * baseLight;
+            const mainIndex = Math.max(0, Math.min(3500, Math.round(mainBrightnessVal * 100))); // 限制索引范围 [0, 3500]
+            const [rMain, gMain, bMain] = COLOR_LUT.red[mainIndex] || [0, 0, 0]; // 使用数组索引查找
+            
+            // 内联写主点像素（无函数调用开销，直接操作数组）
+            if (x >= 0 && x < width && y >= 0 && y < height) {
+              const idx = (y * width + x) * 4;
+              pixelData[idx] = rMain;
+              pixelData[idx + 1] = gMain;
+              pixelData[idx + 2] = bMain;
+              pixelData[idx + 3] = 255;
             }
+
+            // 红色点邻接点（根据light生成，独立计算）
+            const redNeighbors = getNeighbors(x, y, light);
+            for (const nb of redNeighbors) {
+              const { nx, ny, ratio } = nb;
+              // 邻接点亮度：light * baseLight * ratio（符合"亮度越高，邻接越亮"直觉）
+              const nbBrightnessVal = light * baseLight * ratio; // light * 35 * ratio
+              const nbIndex = Math.max(0, Math.min(3500, Math.round(nbBrightnessVal * 100))); // 限制索引范围 [0, 3500]
+              const [rNb, gNb, bNb] = COLOR_LUT.red[nbIndex] || [0, 0, 0]; // 使用数组索引查找
+              
+              // 内联写邻接点像素
+              if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                const nbIdx = (ny * width + nx) * 4;
+                pixelData[nbIdx] = rNb;
+                pixelData[nbIdx + 1] = gNb;
+                pixelData[nbIdx + 2] = bNb;
+                pixelData[nbIdx + 3] = 255;
+              }
+            }
+          }
+
+          // ② 蓝色点：xR/yR，baseLight=50，从预计算表取色（与红色点完全独立）
+          if (p.xR !== 0 && p.yR !== 0) {
+            const x = p.xR;
+            const y = p.yR;
+            const light = p.light; // 使用 p.light (与修改前一致)
+            const baseLight = 50;
+            
+            // 主点像素
+            const mainBrightnessVal = light * baseLight; // light * 50
+            const mainIndex = Math.max(0, Math.min(5000, Math.round(mainBrightnessVal * 100))); // 限制索引范围 [0, 5000]
+            const [rMain, gMain, bMain] = COLOR_LUT.blue[mainIndex] || [0, 0, 0]; // 使用数组索引查找
+            if (x >= 0 && x < width && y >= 0 && y < height) {
+              const idx = (y * width + x) * 4;
+              pixelData[idx] = rMain;
+              pixelData[idx + 1] = gMain;
+              pixelData[idx + 2] = bMain;
+              pixelData[idx + 3] = 255;
+            }
+
+            // 蓝色点邻接点
+            const blueNeighbors = getNeighbors(x, y, light);
+            for (const nb of blueNeighbors) {
+              const { nx, ny, ratio } = nb;
+              const nbBrightnessVal = light * baseLight * ratio; // light * 50 * ratio
+              const nbIndex = Math.max(0, Math.min(5000, Math.round(nbBrightnessVal * 100))); // 限制索引范围 [0, 5000]
+              const [rNb, gNb, bNb] = COLOR_LUT.blue[nbIndex] || [0, 0, 0]; // 使用数组索引查找
+              if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                const nbIdx = (ny * width + nx) * 4;
+                pixelData[nbIdx] = rNb;
+                pixelData[nbIdx + 1] = gNb;
+                pixelData[nbIdx + 2] = bNb;
+                pixelData[nbIdx + 3] = 255;
+              }
+            }
+          }
+          if (!first && p.xL !== 0 && p.yL !== 0) {
+            const x = p.xL;
+            const y = p.yL;
+            const light = p.light; // 使用 p.light (与修改前一致)
+            const baseLight = 35;
+            
+            // 主点亮度：light * baseLight（计算索引）
+            const mainBrightnessVal = light * baseLight;
+            const mainIndex = Math.max(0, Math.min(3500, Math.round(mainBrightnessVal * 100))); // 限制索引范围 [0, 3500]
+            const [rMain, gMain, bMain] = COLOR_LUT.red[mainIndex] || [0, 0, 0]; // 使用数组索引查找
+            
+            // 内联写主点像素（无函数调用开销，直接操作数组）
+            if (x >= 0 && x < width && y >= 0 && y < height) {
+              const idx = (y * width + x) * 4;
+              pixelData[idx] = rMain;
+              pixelData[idx + 1] = gMain;
+              pixelData[idx + 2] = bMain;
+              pixelData[idx + 3] = 255;
+            }
+
+            // 红色点邻接点（根据light生成，独立计算）
+            const redNeighbors = getNeighbors(x, y, light);
+            for (const nb of redNeighbors) {
+              const { nx, ny, ratio } = nb;
+              // 邻接点亮度：light * baseLight * ratio（符合"亮度越高，邻接越亮"直觉）
+              const nbBrightnessVal = light * baseLight * ratio; // light * 35 * ratio
+              const nbIndex = Math.max(0, Math.min(3500, Math.round(nbBrightnessVal * 100))); // 限制索引范围 [0, 3500]
+              const [rNb, gNb, bNb] = COLOR_LUT.red[nbIndex] || [0, 0, 0]; // 使用数组索引查找
+              
+              // 内联写邻接点像素
+              if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                const nbIdx = (ny * width + nx) * 4;
+                pixelData[nbIdx] = rNb;
+                pixelData[nbIdx + 1] = gNb;
+                pixelData[nbIdx + 2] = bNb;
+                pixelData[nbIdx + 3] = 255;
+              }
+            }
+          }
+        } 
+        // --------------------------
+        // 处理紫色点（独立逻辑）
+        // --------------------------
+        else {
+          if (p.xL !== 0 && p.yL !== 0) {
+            const x = p.xL;
+            const y = p.yL;
+            const light = p.light; // 使用 p.light (与修改前一致)
+            const baseLight = 50;
+            
+            // 主点像素
+            const mainBrightnessVal = light * baseLight; // light * 50
+            const mainIndex = Math.max(0, Math.min(5000, Math.round(mainBrightnessVal * 100))); // 限制索引范围 [0, 5000]
+            const [rMain, gMain, bMain] = COLOR_LUT.purple[mainIndex] || [0, 0, 0]; // 使用数组索引查找
+            if (x >= 0 && x < width && y >= 0 && y < height) {
+              const idx = (y * width + x) * 4;
+              pixelData[idx] = rMain;
+              pixelData[idx + 1] = gMain;
+              pixelData[idx + 2] = bMain;
+              pixelData[idx + 3] = 255;
+            }
+
+            // 紫色点邻接点
+            const purpleNeighbors = getNeighbors(x, y, light);
+            for (const nb of purpleNeighbors) {
+              const { nx, ny, ratio } = nb;
+              const nbBrightnessVal = light * baseLight * ratio; // light * 50 * ratio
+              const nbIndex = Math.max(0, Math.min(5000, Math.round(nbBrightnessVal * 100))); // 限制索引范围 [0, 5000]
+              const [rNb, gNb, bNb] = COLOR_LUT.purple[nbIndex] || [0, 0, 0]; // 使用数组索引查找
+              if (nx >= 0 && nx < width && ny >= 0 && ny < height) {
+                const nbIdx = (ny * width + nx) * 4;
+                pixelData[nbIdx] = rNb;
+                pixelData[nbIdx + 1] = gNb;
+                pixelData[nbIdx + 2] = bNb;
+                pixelData[nbIdx + 3] = 255;
+              }
+            }
+          }
         }
+      }
     }
+  }
+
+  // 批量渲染所有像素（仅1次DOM操作）
+  ctx.putImageData(imageData, 0, 0);
+
+  // --------------------------
+  // 工具函数：生成邻接点（仅计算坐标和比例，无渲染逻辑）
+  // --------------------------
+  function getNeighbors(x, y, light) {
+    const neighbors = [];
+    // 规则1：light===1 → 8邻接（上下左右0.707，对角线0.34）
+    if (light <= 1 && light > 0.6) {
+      neighbors.push(
+        { nx: x, ny: y - 1, ratio: 0.707 }, // 上
+        { nx: x, ny: y + 1, ratio: 0.707 }, // 下
+        { nx: x - 1, ny: y, ratio: 0.707 }, // 左
+        { nx: x + 1, ny: y, ratio: 0.707 }, // 右
+        { nx: x - 1, ny: y - 1, ratio: 0.4 }, // 左上
+        { nx: x + 1, ny: y - 1, ratio: 0.4 }, // 右上
+        { nx: x - 1, ny: y + 1, ratio: 0.4 }, // 左下
+        { nx: x + 1, ny: y + 1, ratio: 0.4 }  // 右下
+      );
+    }
+    // 规则2：0.19 < light ≤0.66 → 4邻接（light*0.707，保持亮度关联）
+    else if (light <= 0.6 && light > 0.3) {
+      const ratio = light * 0.707; // 亮度越低，邻接越暗，符合直觉
+      neighbors.push(
+        { nx: x, ny: y - 1, ratio: 0.707 }, // 上
+        { nx: x, ny: y + 1, ratio: 0.707 }, // 下
+        { nx: x - 1, ny: y, ratio: 0.707 }, // 左
+        { nx: x + 1, ny: y, ratio: 0.707 }, // 右
+        { nx: x - 1, ny: y - 1, ratio: 0.4 }, // 左上
+        { nx: x + 1, ny: y - 1, ratio: 0.4 }, // 右上
+        { nx: x - 1, ny: y + 1, ratio: 0.4 }, // 左下
+        { nx: x + 1, ny: y + 1, ratio: 0.4 }  // 右下
+      );
+    }
+    // 规则3：light ≤0.19 → 无邻接
+    return neighbors;
+  }
 }
 
 // ========================

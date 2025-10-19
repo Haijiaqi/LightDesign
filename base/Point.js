@@ -17,7 +17,7 @@ export class Point {
         this.rx = 0;
         this.ry = 0;
         this.rz = 0;
-        this.light = 0.5;
+        this.light = 0.6;
     }
 
     getD(p) {

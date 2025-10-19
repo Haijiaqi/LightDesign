@@ -77,8 +77,14 @@ export class Window {
         this.dirAngle = camAngle;
         this.direction.dirAngle = camDirAngle;
     }
-    headMove(headDisFromPane) {
-        this.capital = this.direction.getPoint(-headDisFromPane);
+    headMoveTo(headDisFromPane, headHeight, headX) {
+        this.capital = this.direction.getPoint(headDisFromPane);
+        let py = this.vy.timesLV(headHeight);
+        let px = this.vx.timesLV(headX);
+        let pa = py.addV(px);
+        this.capital.x += pa.x;
+        this.capital.y += pa.y;
+        this.capital.z += pa.z;
     }
     calculate(head, eyeD, direction, objects, light, otherObjects) {
         this.direction = direction;
@@ -201,6 +207,15 @@ export class Window {
 
         // 9. 双眼坐标计算（公共：eyeD 存在时）
         if (eyeD) {
+            // 屏幕边界校验（OtherPoint 无此逻辑）
+            if (point.xL < 0 || point.xR > this.width || point.yL < 0 || point.yR < 0) {
+                point.xL = 0;
+                point.xR = 0;
+                point.yL = 0;
+                point.yR = 0;
+                point.xM = 0;
+                point.yM = 0;
+            }
             const dis = (eyeD / 2) * inverseRate;
             const xL = x - dis;
             const xR = x + dis;
@@ -218,20 +233,10 @@ export class Window {
     }
     handleAPointSpecific(head, eyeD, point, light, inverseRate) {
         // 1. A点特有：light 初始值（OtherPoint 初始值为1，此处为0.5）
-        point.light = 0.5;
+        point.light = 0.4;
 
         // 2. A点特有：eyeD 存在时的屏幕边界校验与光照计算
         if (eyeD) {
-            // 屏幕边界校验（OtherPoint 无此逻辑）
-            if (point.xL < 0 || point.xR > this.width || point.yL < 0 || point.yR < 0 || point.yL > this.height || point.yR > this.height) {
-                point.xL = 0;
-                point.xR = 0;
-                point.yL = 0;
-                point.yR = 0;
-                point.xM = 0;
-                point.yM = 0;
-            }
-
             // 法向量与光照计算（OtherPoint 无此逻辑）
             if (point.rx != 0 || point.ry != 0 || point.rz != 0) {
                 const hpdx = point.x - head.x;
@@ -250,7 +255,7 @@ export class Window {
             }
 
             // 光照补偿（OtherPoint 无此逻辑）
-            point.light += 0.5;
+            point.light += 0.6;
 
             // 光照衰减（OtherPoint 无此逻辑）
             const attenuation = 1 / (point.dir * 0.001 + 1);
