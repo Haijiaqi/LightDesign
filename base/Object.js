@@ -1,6 +1,6 @@
-import { Point } from './Point.js';
+import { Point } from "./Point.js";
 export class Object {
-    constructor(points = []) {
-        this.points = points;
-    }
+  constructor(points = []) {
+    this.points = points;
+  }
 }
