@@ -23,7 +23,7 @@ const CONFIG = {
     initialLightElevation: 0,
     // 点云密度
     spherePoints: 1000,
-    cubePoints: 750,
+    cubePoints: 250,
     // 渲染和控制参数
     rotationSpeed: 0.05,
     moveSpeed: 0.5,
@@ -266,7 +266,7 @@ const SystemState = {
     ifControl: true,
     // 对象列表
     objects: [
-        createCube(5, Math.floor(CONFIG.cubePoints), 0, 0, 8.7, 45, false),
+        createCube(2, Math.floor(CONFIG.cubePoints), 0, 0, 8.7, 45, false),
         // createPlane()
     ],
     otherObjects: [], // 例如光源点
@@ -407,14 +407,14 @@ function processCamera() {
     // console.log("获取到 ImageData，总像素数:", data.length / 4);
     const res = C.processImageFromCamera(data, canvas.width, canvas.height);
     if (res && res.estimateDis && res.headHeight && res.headX) {
-        const headDis = processQueue(SystemState.smoothingListDis, res.estimateDis, 10, 0.4);
-        let headHeight = processQueue(SystemState.smoothingListHeight, res.headHeight, 10, 0.4);
-        let headX = processQueue(SystemState.smoothingListX, res.headX, 10, 0.4);
-        headHeight = Math.tan(((0.5 - headHeight) / 0.5) * (Math.PI / 6)) * headDis + (SystemState.mainWindow.ylength / 2);
+        const headDis = processQueue(SystemState.smoothingListDis, res.estimateDis, 3, 0.4);
+        let headHeight = processQueue(SystemState.smoothingListHeight, res.headHeight, 3, 0.4);
+        let headX = processQueue(SystemState.smoothingListX, res.headX, 3, 0.4);
+        headHeight = (((0.5 - headHeight) / 0.5) / 1.732) * headDis + (SystemState.mainWindow.ylength / 2);
         if (Math.abs(headX - 0.5) > 0.25) {
             headX = 0;
         } else {
-            headX = Math.tan(((0.5 - headX) / 0.25) * (Math.PI / 6)) * headDis;
+            headX = (((0.5 - headX) / 0.25) / 1.732) * headDis;
         }
         SystemState.mainWindow.headMoveTo(-headDis, headHeight, headX);
         SystemState.ifControl = true;
