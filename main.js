@@ -11,6 +11,8 @@ const CONFIG = {
   // 显示器物理尺寸（厘米）
   screenXLengthCm: 31.0,
   screenYLengthCm: 17.4,
+  screenWidth: 1920,
+  screenHeight: 1080,
   // 双眼瞳距（厘米）
   eyeD: 6.3,
   // 相机初始参数
@@ -39,7 +41,7 @@ const CONFIG = {
   normalEstimationRadius: 15,
   // 摄像头控制参数
   cameraControl: {
-    enabled: true, // 默认关闭摄像头控制
+    enabled: false, // 默认关闭摄像头控制
     sensitivity: 0.005, // 控制灵敏度
     targetHue: 0, // 目标颜色的色调 (0=红, 120=绿, 240=蓝)
     targetHueTolerance: 30, // 色调容差
@@ -179,7 +181,7 @@ function createPlane(
 
   return new Object(points);
 }
-function createSphere(x0, y0, z0, radius = 1, numPoints = 50) {
+function createSphere(x0, y0, z0, radius = 5, numPoints = 5000) {
   const points = [];
   for (let i = 0; i < numPoints; i++) {
     const u = Math.random();
@@ -191,6 +193,68 @@ function createSphere(x0, y0, z0, radius = 1, numPoints = 50) {
     const z = radius * Math.cos(phi) + z0;
     points.push(new Point(x, y, z));
   }
+  return new Object(points);
+}
+
+function createSphereWithMeridians(
+  x0, 
+  y0, 
+  z0, 
+  radius = 2.5, 
+  numMeridians = 12,     // 每组大圆的数量（实际每组只有1个，但可旋转生成多个）
+  pointsPerCircle = 50
+) {
+  const points = [];
+
+  // 1. XY 平面大圆（绕Z轴）及其旋转副本
+  const angleStep = (2 * Math.PI) / numMeridians;
+  for (let i = 0; i < numMeridians; i++) {
+    const angle = i * angleStep;
+    for (let p = 0; p <= pointsPerCircle; p++) {
+      const theta = (p / pointsPerCircle) * 2 * Math.PI;
+      // 基础圆在 XY 平面
+      let x = radius * Math.cos(theta);
+      let y = radius * Math.sin(theta);
+      let z = 0;
+      // 绕 Z 轴旋转 angle（其实不需要，因为XY平面圆绕Z轴旋转还是自己）
+      // 但为了生成多条，我们可以绕其他轴旋转这个圆
+      // 更好的方式：直接生成三个坐标平面的圆
+
+      // 实际上，我们只需要三个正交圆，然后可以旋转它们
+    }
+  }
+
+  // 更简单：直接生成三个正交大圆
+  // 圆1: XY平面 (z=z0)
+  for (let p = 0; p <= pointsPerCircle; p++) {
+    const theta = (p / pointsPerCircle) * 2 * Math.PI;
+    points.push(new Point(
+      x0 + radius * Math.cos(theta),
+      y0 + radius * Math.sin(theta),
+      z0
+    ));
+  }
+
+  // 圆2: XZ平面 (y=y0)
+  for (let p = 0; p <= pointsPerCircle; p++) {
+    const theta = (p / pointsPerCircle) * 2 * Math.PI;
+    points.push(new Point(
+      x0 + radius * Math.cos(theta),
+      y0,
+      z0 + radius * Math.sin(theta)
+    ));
+  }
+
+  // 圆3: YZ平面 (x=x0)
+  for (let p = 0; p <= pointsPerCircle; p++) {
+    const theta = (p / pointsPerCircle) * 2 * Math.PI;
+    points.push(new Point(
+      x0,
+      y0 + radius * Math.cos(theta),
+      z0 + radius * Math.sin(theta)
+    ));
+  }
+
   return new Object(points);
 }
 
@@ -324,8 +388,10 @@ const SystemState = {
   ifControl: true,
   // 对象列表
   objects: [
-    createCube(2, Math.floor(CONFIG.cubePoints), 0, 0, 8.7, 45, false),
+    // createSphereWithMeridians(),
+    // createCube(2.5, Math.floor(CONFIG.cubePoints), -10, 0, 8.7, 30, true),
     // createPlane()
+    createSphere(0, -5, 8.7)
   ],
   otherObjects: [], // 例如光源点
 
@@ -583,16 +649,16 @@ async function init() {
     "light",
   );
   SystemState.mainWindow = new Window(
-    SystemState.screenWidthPx,
-    SystemState.screenHeightPx,
-    CONFIG.screenXLengthCm,
-    CONFIG.screenYLengthCm,
+    window.innerWidth,
+    window.innerHeight,
+    (window.innerWidth / CONFIG.screenWidth) * CONFIG.screenXLengthCm,
+    (window.innerHeight / CONFIG.screenHeight) * CONFIG.screenYLengthCm,
     "main",
   );
   SystemState.mainWindow.direction = new Vector(0, 0, 0);
   SystemState.mainWindow.direction.normalInit(0, 0, 8.7, 0, 1, 8.7);
   SystemState.mainWindow.capital =
-    SystemState.mainWindow.direction.getPoint(-50);
+    SystemState.mainWindow.direction.getPoint(-(CONFIG.screenWidth * 1.5));
 
   // 估算法向量
   estimateNormals();
@@ -690,7 +756,7 @@ function updateCamera() {
 // ========================// 1. 预计算固定色相的RGB颜色表（仅初始化一次，避免循环内复杂计算）
 // 色相：红(0)、蓝(240)、紫(285)；饱和度：红/蓝(100%)、紫(90%)
 const COLOR_LUT = (() => {
-  const factor = 100; // 用于将小数亮度转换为数组索引的因子
+  const factor = 10; // 用于将小数亮度转换为数组索引的因子
   const maxBrightnessRed = 35; // 对应 baseLight = 35
   const maxBrightnessBluePurple = 50; // 对应 baseLight = 50
 
@@ -807,7 +873,7 @@ function render() {
     const mainBrightnessVal = light * baseLight;
     const mainLutIndex = Math.max(
       0,
-      Math.min(maxLutIndex, Math.round(mainBrightnessVal * 100)),
+      Math.min(maxLutIndex, Math.round(mainBrightnessVal * 10)),
     );
     const [rMain, gMain, bMain] = COLOR_LUT[colorType][mainLutIndex] || [
       0, 0, 0,
@@ -837,7 +903,7 @@ function render() {
       const nbBrightnessVal = light * baseLight * ratio;
       const nbLutIndex = Math.max(
         0,
-        Math.min(maxLutIndex, Math.round(nbBrightnessVal * 100)),
+        Math.min(maxLutIndex, Math.round(nbBrightnessVal * 10)),
       );
       const [rNb, gNb, bNb] = COLOR_LUT[colorType][nbLutIndex] || [0, 0, 0];
 
@@ -849,7 +915,66 @@ function render() {
       pixelData[nbPixelIdx + 3] = 255;
     }
   }
+  function drawNonAdjacentPoints(params) {
+    const {
+      colorType,
+      x,
+      y,
+      light,
+      baseLight,
+      maxLutIndex,
+      pixelData,
+      width,
+      height,
+      // 保留参数结构，但不使用邻接相关逻辑
+      getNeighbors,
+    } = params;
 
+    // 1. 跳过无效坐标（同原逻辑：过滤边界外坐标）
+    if (x === 0 || y === 0 || x < 0 || x >= width || y < 0 || y >= height) {
+      return;
+    }
+
+    // 2. 计算主点亮度与颜色（复用原逻辑，仅处理主点）
+    const mainBrightnessVal = light * baseLight;
+    const mainLutIndex = Math.max(
+      0,
+      Math.min(maxLutIndex, Math.round(mainBrightnessVal * 10)),
+    );
+    const [rMain, gMain, bMain] = COLOR_LUT[colorType][mainLutIndex] || [0, 0, 0];
+
+    // 3. 仅绘制主点像素（移除所有邻接像素绘制逻辑）
+    const mainPixelIdx = (y * width + x) * 4;
+    pixelData[mainPixelIdx] = rMain; // R通道
+    pixelData[mainPixelIdx + 1] = gMain; // G通道
+    pixelData[mainPixelIdx + 2] = bMain; // B通道
+    pixelData[mainPixelIdx + 3] = 255; // A通道（不透明）
+  }
+
+  for (let index = 0; index < SystemState.mainWindow.windowObjects.length; index++) {
+    const element = SystemState.mainWindow.windowObjects[index];
+    for (let i = 0; i < element.points.length; i++) {
+      const p = element.points[i];
+      const commonParams = {
+        light: p.light,
+        pixelData,
+        width,
+        height,
+        getNeighbors,
+      };
+      if (p.xM !== 0 && p.yM !== 0) {
+        // 合并first为true/false的重复逻辑
+        drawNonAdjacentPoints({
+          ...commonParams,
+          colorType: "purple",
+          x: p.xM,
+          y: p.yM,
+          baseLight: 50,
+          maxLutIndex: 350,
+        });
+      }
+    }
+  }
   // 3. 遍历所有网格点（主循环）
   for (let gridX = 0; gridX < SystemState.mainWindow.grid.length; gridX++) {
     const gridCol = SystemState.mainWindow.grid[gridX];
@@ -880,7 +1005,7 @@ function render() {
               x: p.xL,
               y: p.yL,
               baseLight: 35,
-              maxLutIndex: 3500,
+              maxLutIndex: 350,
             });
           }
 
@@ -892,7 +1017,7 @@ function render() {
               x: p.xR,
               y: p.yR,
               baseLight: 50,
-              maxLutIndex: 5000,
+              maxLutIndex: 500,
             });
           }
           if (!first && p.xL !== 0 && p.yL !== 0) {
@@ -903,7 +1028,7 @@ function render() {
               x: p.xL,
               y: p.yL,
               baseLight: 35,
-              maxLutIndex: 3500,
+              maxLutIndex: 350,
             });
           }
         }
@@ -915,10 +1040,10 @@ function render() {
             drawColoredPoints({
               ...commonParams,
               colorType: "purple",
-              x: p.xL,
-              y: p.yL,
+              x: p.xM,
+              y: p.yM,
               baseLight: 50,
-              maxLutIndex: 5000,
+              maxLutIndex: 500,
             });
           }
         }
@@ -1072,11 +1197,11 @@ function setupEventListeners() {
       CONFIG.screenYLengthCm,
       "light",
     );
-    SystemState.mainWindow.update(
-      SystemState.screenWidthPx,
-      SystemState.screenHeightPx,
-      CONFIG.screenXLengthCm,
-      CONFIG.screenYLengthCm,
+    SystemState.mainWindow.resizeRefresh(
+        window.innerWidth,
+        window.innerHeight,
+        (window.innerWidth / CONFIG.screenWidth) * CONFIG.screenXLengthCm,
+        (window.innerHeight / CONFIG.screenHeight) * CONFIG.screenYLengthCm,
     );
     // 重新估算法向量（可选，可能耗时）
     // estimateNormals();
@@ -1087,10 +1212,11 @@ function setupEventListeners() {
 // 13. 调整画布大小
 // ========================
 function resizeCanvas() {
-  SystemState.screenWidthPx = window.innerWidth;
-  SystemState.screenHeightPx = window.innerHeight;
-  SystemState.canvas.width = SystemState.screenWidthPx;
-  SystemState.canvas.height = SystemState.screenHeightPx;
+  SystemState.canvas.width = window.innerWidth;
+  SystemState.canvas.height = window.innerHeight;
+  if (SystemState.mainWindow) {
+    SystemState.mainWindow.windowObjects.length = 0;
+  }
 }
 
 // ========================
@@ -1138,7 +1264,7 @@ function updateFromCamera(cameraData) {
 // ========================
 function gameLoop() {
   handleInput();
-  processCamera(); // 在主循环中处理摄像头
+//   processCamera(); // 在主循环中处理摄像头
   drawCameraFeedOnMainCanvas(SystemState.ctx);
   if (SystemState.ifControl) {
     updateLight(); // 每帧更新光源位置（如果需要动态光源）

@@ -1,4 +1,5 @@
 import { Point } from "./Point.js";
+import { Object } from "./Object.js";
 import { Vector } from "./Vector.js";
 export class Window {
   constructor(width, height, xlength, ylength, name) {
@@ -18,12 +19,20 @@ export class Window {
     this.disOfPointProjToPlaneYaxis = 0;
     this.gridsize = 8;
     this.name = name;
+    this.windowObjects = [];
 
     this.grid = Array.from({ length: this.width / this.gridsize }, () =>
       Array.from({ length: this.height / this.gridsize }, () => []),
     );
   }
-
+  resizeRefresh(width, height, xlength, ylength) {
+    this.width = width;
+    this.height = height;
+    this.xlength = xlength;
+    this.ylength = ylength;
+    this.DPIx = width / this.xlength;
+    this.DPIy = height / this.ylength;
+  }
   getAngle() {
     const hcdx = this.direction.start.x - this.capital.x;
     const hcdy = this.direction.start.y - this.capital.y;
@@ -91,6 +100,7 @@ export class Window {
   calculate(head, eyeD, direction, objects, light, otherObjects) {
     this.direction = direction;
     this.capital = head;
+    this.eyeD = eyeD;
     this.getAngle();
     this.calculatePointToCenter(head, direction);
 
@@ -100,7 +110,30 @@ export class Window {
         this.grid[i][j].length = 0;
       }
     }
-
+    if (this.eyeD && this.windowObjects.length == 0) {
+      const gridConfig = 
+      {
+        DPIx: this.DPIx,
+        DPIy: this.DPIy,
+        width: this.width,
+        height: this.height,
+        screenWidthCm: this.xlength,
+        screenHeightCm: this.ylength,
+        horizontalInterval: 1, // 横向间距2cm
+        verticalInterval: 1, // 纵向间距2cm
+        gridWidth: 20, // 网格区域宽20cm（左右各10cm）
+        gridHeight: 10, // 网格区域高16cm（上下各8cm）
+        centerPosCm: { x: 0, y: 0 }, // 中心交点在屏幕物理中心
+        dashPattern: [0.1, 0.4], // 实长1cm，虚长0.5cm
+        light: 0.5
+      };
+      const result = this.createGridObject(gridConfig);
+      this.windowObjects = [
+        new Object(result.intersections),
+        new Object(result.centerLinePixels),
+        new Object(result.otherPixels)
+      ];
+    }
     // 处理 objects 集合（原 calculateAPoint 逻辑）
     for (let oi = 0; oi < objects.length; oi++) {
       const object = objects[oi];
@@ -138,7 +171,22 @@ export class Window {
         }
       }
     }
+    // if (this.windowObjects.length != 0) {
+    //   for (let index = 0; index < this.windowObjects.length; index++) {
+    //     const element = this.windowObjects[index];
+    //     for (let i = 0; i < element.points.length; i++) {
+    //       const e = element.points[i];
+    //       const x_grid = Math.floor(e.xM / this.gridsize);
+    //       const y_grid = Math.floor(e.yM / this.gridsize);
 
+    //       // 网格边界判断（公共：超出网格则点无效）
+    //       if (x_grid >= this.grid.length || y_grid >= this.grid[0].length) {
+    //         continue;
+    //       }
+    //       this.grid[x_grid][y_grid].push(e);
+    //     }
+    //   }
+    // }
     this.calculateNormal();
   }
 
@@ -174,7 +222,7 @@ export class Window {
 
     // 3. 平面距离判断（公共：超出阈值则点无效）
     const disOfPointToHeadPlane = direction.projL(hpdx, hpdy, hpdz);
-    if (this.disOfPointToPlane - disOfPointToHeadPlane > 5) {
+    if (this.disOfPointToPlane - disOfPointToHeadPlane > 7.5) {
       return null;
     }
 
@@ -327,16 +375,17 @@ export class Window {
         if (Math.abs(avg - firstDis) > 0.01) {
           // 假设 end 是起始前的索引，e 从 end + 1 开始处理
           let e = 1;
-          for (let i = points.length - 1; i > e; i--) {
+          for (let i = e; i < points.length; i++) {
+            points[i].light *= Math.pow(0.075, (i - 0));
             // 计算当前索引与 e 的差值：如果是奇数，说明是需要剔除的间隔元素
-            if ((i - e) % 2 === 1) {
-              points.splice(i, 1); // 从原数组中删除该元素
-            }
+            // if ((i - e) % 2 === 1) {
+              // points.splice(i, 1); // 从原数组中删除该元素
+            // }
           }
           // 剩余元素（e, e+2, e+4...）执行 light 乘以 0.75 的操作
-          for (let i = e; i < points.length; i++) {
-            points[i].light *= 0.75;
-          }
+          // for (let i = e; i < points.length; i++) {
+            // points[i].light *= 0.075;
+          // }
           // 前3个点深度差异大，跳过
           continue;
         }
@@ -355,14 +404,14 @@ export class Window {
         let e = end + 1;
         for (let i = points.length - 1; i > e; i--) {
           // 计算当前索引与 e 的差值：如果是奇数，说明是需要剔除的间隔元素
-          if ((i - e) % 2 === 1) {
+          // if ((i - e) % 2 === 1) {
             points.splice(i, 1); // 从原数组中删除该元素
-          }
+          // }
         }
         // 剩余元素（e, e+2, e+4...）执行 light 乘以 0.75 的操作
-        for (let i = e; i < points.length; i++) {
-          points[i].light *= 0.75;
-        }
+        // for (let i = e; i < points.length; i++) {
+          // points[i].light *= 0.075;
+        // }
         // 检查 XY 分布是否足够广（单位：像素）
         let xmin = Infinity,
           xmax = -Infinity;
@@ -396,5 +445,253 @@ export class Window {
         }
       }
     }
+  }
+
+  createGridObject(params) {
+    // --------------------------
+    // 1. 参数解构与常量预计算
+    // --------------------------
+    const {
+      DPIx,
+      DPIy,
+      width: pixelWidth,
+      height: pixelHeight,
+      horizontalInterval,
+      verticalInterval,
+      gridWidth,
+      gridHeight,
+      centerPosCm,
+      dashPattern,
+      light
+    } = params;
+    const [dashOnCm, dashOffCm] = dashPattern;
+    const { x: centerXcm, y: centerYcm } = centerPosCm;
+
+    const halfGridWidth = gridWidth / 2;
+    const halfGridHeight = gridHeight / 2;
+    const xMinCm = centerXcm - halfGridWidth;
+    const xMaxCm = centerXcm + halfGridWidth;
+    const yMinCm = centerYcm - halfGridHeight;
+    const yMaxCm = centerYcm + halfGridHeight;
+
+    const centerXPixel = Math.round(pixelWidth / 2 + centerXcm * DPIx);
+    const centerYPixel = Math.round(pixelHeight / 2 + centerYcm * DPIy);
+    const dashCycleCm = dashOnCm + dashOffCm;
+
+    // 全局像素Set：存储"x,y"字符串，用于去重
+    const globalPixelSet = new Set();
+    // 全局Point对象映射：key为"x,y"，value为Point实例
+    const globalPointMap = new Map();
+
+
+    // --------------------------
+    // 2. 提前生成网格线列表（修复变量声明顺序问题）
+    // 关键：在使用前先声明并初始化horizontalLinesYcm和verticalLinesXcm
+    // --------------------------
+    const horizontalLinesYcm = [];
+    if (verticalInterval > 0) {
+      const maxStepsUp = Math.floor((centerYcm - yMinCm) / verticalInterval);
+      const maxStepsDown = Math.floor((yMaxCm - centerYcm) / verticalInterval);
+      for (let i = 0; i <= maxStepsUp; i++) {
+        horizontalLinesYcm.push(centerYcm - i * verticalInterval);
+      }
+      for (let i = 1; i <= maxStepsDown; i++) {
+        horizontalLinesYcm.push(centerYcm + i * verticalInterval);
+      }
+    }
+
+    const verticalLinesXcm = [];
+    if (horizontalInterval > 0) {
+      const maxStepsLeft = Math.floor((centerXcm - xMinCm) / horizontalInterval);
+      const maxStepsRight = Math.floor((xMaxCm - centerXcm) / horizontalInterval);
+      for (let i = 0; i <= maxStepsLeft; i++) {
+        verticalLinesXcm.push(centerXcm - i * horizontalInterval);
+      }
+      for (let i = 1; i <= maxStepsRight; i++) {
+        verticalLinesXcm.push(centerXcm + i * horizontalInterval);
+      }
+    }
+
+
+    // --------------------------
+    // 3. 工具函数（坐标转换+像素生成）
+    // --------------------------
+    // 坐标转换：cm→像素
+    const cmToPixelX = (xCm) => Math.round(pixelWidth / 2 + xCm * DPIx);
+    const cmToPixelY = (yCm) => Math.round(pixelHeight / 2 + yCm * DPIy);
+
+    // 生成Point实例（去重）
+    const createUniquePoint = (x, y) => {
+      const key = `${x},${y}`;
+      if (globalPointMap.has(key)) {
+        return globalPointMap.get(key);
+      }
+      const point = new Point(0, 0, 0);
+      point.xM = point.xL = point.xR = x;
+      point.yM = point.yL = point.yR = y;
+      point.light *= light;
+      globalPointMap.set(key, point);
+      globalPixelSet.add(key);
+      return point;
+    };
+
+    // 生成实线段像素（先实后虚，去重添加）
+    const addSolidPixels = (isHorizontal, fixedPosCm, startBoundCm, endBoundCm) => {
+      const ranges = getSolidRanges(
+        isHorizontal ? centerXcm : centerYcm,
+        startBoundCm,
+        endBoundCm,
+        dashOnCm,
+        dashOffCm,
+        dashCycleCm
+      );
+
+      if (isHorizontal) {
+        const fixedYPixel = cmToPixelY(fixedPosCm);
+        ranges.forEach(({ start, end }) => {
+          const xStart = cmToPixelX(start);
+          const xEnd = cmToPixelX(end);
+          for (let x = xStart; x <= xEnd; x++) {
+            createUniquePoint(x, fixedYPixel);
+          }
+        });
+      } else {
+        const fixedXPixel = cmToPixelX(fixedPosCm);
+        ranges.forEach(({ start, end }) => {
+          const yStart = cmToPixelY(start);
+          const yEnd = cmToPixelY(end);
+          for (let y = yStart; y <= yEnd; y++) {
+            createUniquePoint(fixedXPixel, y);
+          }
+        });
+      }
+    };
+
+
+    // --------------------------
+    // 4. 分步生成像素（严格按顺序，无重复）
+    // --------------------------
+    // 4.1 第一步：生成中心点
+    const centerPoint = createUniquePoint(centerXPixel, centerYPixel);
+
+    // 4.2 第二步：从中心点向四方向画中心线（先实后虚，去重）
+    // 纵向中心线（x=中心x，上→下）
+    addSolidPixels(false, centerXcm, yMinCm, yMaxCm);
+    // 横向中心线（y=中心y，左→右）
+    addSolidPixels(true, centerYcm, xMinCm, xMaxCm);
+
+    // 4.3 第三步：从中心线向两侧画普通线（先实后虚，去重）
+    // 普通横向线（排除中心线y）
+    const normalHorizontalLines = horizontalLinesYcm.filter(yCm => yCm !== centerYcm);
+    normalHorizontalLines.forEach(yCm => addSolidPixels(true, yCm, xMinCm, xMaxCm));
+    // 普通纵向线（排除中心线x）
+    const normalVerticalLines = verticalLinesXcm.filter(xCm => xCm !== centerXcm);
+    normalVerticalLines.forEach(xCm => addSolidPixels(false, xCm, yMinCm, yMaxCm));
+
+
+    // --------------------------
+    // 5. 分类生成最终列表（从全局像素集中筛选，无重复）
+    // --------------------------
+    // 5.1 生成交点列表：先筛选已有交点，再补足缺失交点
+    const intersections = [];
+    const intersectionKeySet = new Set();
+
+    // 步骤1：筛选全局像素集中已存在的交点
+    horizontalLinesYcm.forEach(yCm => {
+      const yPixel = cmToPixelY(yCm);
+      verticalLinesXcm.forEach(xCm => {
+        const xPixel = cmToPixelX(xCm);
+        const key = `${xPixel},${yPixel}`;
+        if (globalPixelSet.has(key)) {
+          const point = globalPointMap.get(key);
+          intersections.push(point);
+          intersectionKeySet.add(key);
+        }
+      });
+    });
+
+    // 步骤2：补足“应存在但未生成”的交点
+    horizontalLinesYcm.forEach(yCm => {
+      const yPixel = cmToPixelY(yCm);
+      verticalLinesXcm.forEach(xCm => {
+        const xPixel = cmToPixelX(xCm);
+        const key = `${xPixel},${yPixel}`;
+        if (!intersectionKeySet.has(key)) {
+          const point = createUniquePoint(xPixel, yPixel);
+          intersections.push(point);
+          intersectionKeySet.add(key);
+        }
+      });
+    });
+
+    // 确保中心点在交点列表第一个
+    const centerKey = `${centerXPixel},${centerYPixel}`;
+    const centerIndex = intersections.findIndex(p => `${p.xM},${p.yM}` === centerKey);
+    if (centerIndex > 0) {
+      [intersections[0], intersections[centerIndex]] = [intersections[centerIndex], intersections[0]];
+    }
+
+    // 5.2 生成中心线像素列表（排除交点）
+    const centerLinePixels = [];
+    const centerLineKeySet = new Set();
+    const centerXKeyPrefix = `${centerXPixel},`;
+    const centerYKeySuffix = `,${centerYPixel}`;
+
+    globalPixelSet.forEach(key => {
+      if (
+        (key.startsWith(centerXKeyPrefix) || key.endsWith(centerYKeySuffix)) &&
+        !intersectionKeySet.has(key) &&
+        !centerLineKeySet.has(key)
+      ) {
+        centerLinePixels.push(globalPointMap.get(key));
+        centerLineKeySet.add(key);
+      }
+    });
+
+    // 5.3 生成其他普通像素列表（排除交点和中心线）
+    const otherPixels = [];
+    globalPixelSet.forEach(key => {
+      if (
+        !intersectionKeySet.has(key) &&
+        !centerLineKeySet.has(key)
+      ) {
+        otherPixels.push(globalPointMap.get(key));
+      }
+    });
+
+
+    // --------------------------
+    // 6. 工具函数：实线段范围计算
+    // --------------------------
+    function getSolidRanges(startCm, minCm, maxCm, onCm, offCm, cycleCm) {
+      const ranges = [];
+      if (cycleCm <= 0) return ranges;
+
+      // 正方向（右/下）：先实后虚
+      for (let n = 0; ; n++) {
+        const segStart = startCm + n * cycleCm;
+        const segEnd = segStart + onCm;
+        if (segStart > maxCm) break;
+        ranges.push({ start: Math.max(segStart, startCm), end: Math.min(segEnd, maxCm) });
+      }
+
+      // 负方向（左/上）：先实后虚
+      for (let n = 1; ; n++) {
+        const segEnd = startCm - (n - 1) * cycleCm;
+        const segStart = segEnd - onCm;
+        if (segEnd < minCm) break;
+        ranges.push({ start: Math.max(segStart, minCm), end: Math.min(segEnd, startCm) });
+      }
+
+      // 按距离中心由近及远排序
+      return ranges.sort((a, b) => {
+        const distA = Math.min(Math.abs(a.start - startCm), Math.abs(a.end - startCm));
+        const distB = Math.min(Math.abs(b.start - startCm), Math.abs(b.end - startCm));
+        return distA - distB;
+      });
+    }
+
+
+    return { intersections, centerLinePixels, otherPixels };
   }
 }
