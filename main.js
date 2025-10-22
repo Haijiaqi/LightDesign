@@ -656,9 +656,9 @@ async function init() {
     "main",
   );
   SystemState.mainWindow.direction = new Vector(0, 0, 0);
-  SystemState.mainWindow.direction.normalInit(0, 0, 8.7, 0, 1, 8.7);
+  SystemState.mainWindow.direction.normalInit(0, 0, CONFIG.screenWidth / 2, 0, 1, CONFIG.screenWidth / 2);
   SystemState.mainWindow.capital =
-    SystemState.mainWindow.direction.getPoint(-(CONFIG.screenWidth * 1.5));
+    SystemState.mainWindow.direction.getPoint(-CONFIG.screenWidth);
 
   // 估算法向量
   estimateNormals();
