@@ -1,224 +1,216 @@
 import { TinyMatrix } from './TinyMath.js';
 
-/**
- * 笛卡尔坐标转球坐标
- * @param {number} x - x坐标
- * @param {number} y - y坐标
- * @param {number} z - z坐标
- * @param {Object} origin - 原点 {x, y, z}
- * @returns {{r: number, theta: number, phi: number}} 球坐标
- */
-function cartesianToSpherical(x, y, z, origin) {
-  // 平移到局部坐标系
+// =============== 球坐标转换 ===============
+const EPSILON = 1e-8;
+
+export function cartesianToSpherical(x, y, z, origin) {
   const dx = x - origin.x;
   const dy = y - origin.y;
   const dz = z - origin.z;
   
   const r = Math.sqrt(dx*dx + dy*dy + dz*dz);
-  const theta = Math.acos(dz / r); // 极角 θ ∈ [0, π]
-  let phi = Math.atan2(dy, dx);    // 方位角 φ ∈ [-π, π]
-  if (phi < 0) phi += 2 * Math.PI; // 转换为 [0, 2π)
+  if (r < EPSILON) {
+    console.warn('点与原点重合，使用安全默认值');
+    return { r: EPSILON, theta: 0, phi: 0 };
+  }
+  
+  const theta = Math.acos(dz / r);
+  let phi = Math.atan2(dy, dx);
+  if (phi < 0) phi += 2 * Math.PI;
   
   return { r, theta, phi };
 }
 
-/**
- * 球坐标转笛卡尔坐标
- * @param {number} r - 半径
- * @param {number} theta - 极角
- * @param {number} phi - 方位角
- * @param {Object} origin - 原点 {x, y, z}
- * @returns {{x: number, y: number, z: number}} 笛卡尔坐标
- */
-function sphericalToCartesian(r, theta, phi, origin) {
-  const x = r * Math.sin(theta) * Math.cos(phi) + origin.x;
-  const y = r * Math.sin(theta) * Math.sin(phi) + origin.y;
+export function sphericalToCartesian(r, theta, phi, origin) {
+  const sinTheta = Math.sin(theta);
+  const x = r * sinTheta * Math.cos(phi) + origin.x;
+  const y = r * sinTheta * Math.sin(phi) + origin.y;
   const z = r * Math.cos(theta) + origin.z;
   return { x, y, z };
 }
 
-/**
- * 计算实数形式球谐函数 (L_max=3)
- * @param {number} l - 阶数
- * @param {number} m - 阶次
- * @param {number} theta - 极角
- * @param {number} phi - 方位角
- * @returns {number} Y_l^m(theta, phi) 的实数值
- */
-function realSphericalHarmonic(l, m, theta, phi) {
-  // 预计算三角函数值
+// =============== 球谐函数（L_max=3） ===============
+const SQRT_PI = Math.sqrt(Math.PI);
+const PRECOMPUTED_COEFFS = {
+  c00: 0.5 * Math.sqrt(1 / Math.PI),
+  c10: 0.5 * Math.sqrt(3 / Math.PI),
+  c11: -0.5 * Math.sqrt(3 / (2 * Math.PI)),
+  c20: 0.25 * Math.sqrt(5 / Math.PI),
+  c21: -0.5 * Math.sqrt(15 / (2 * Math.PI)),
+  c22: 0.25 * Math.sqrt(15 / (2 * Math.PI)),
+  c30: 0.25 * Math.sqrt(7 / Math.PI),
+  c31: -0.25 * Math.sqrt(21 / (2 * Math.PI)),
+  c32: 0.25 * Math.sqrt(105 / (2 * Math.PI)),
+  c33: -0.25 * Math.sqrt(35 / (2 * Math.PI))
+};
+
+export function evaluateHarmonics(theta, phi, L_max = 3) {
+  const values = new Float64Array((L_max + 1) * (L_max + 1));
   const cosTheta = Math.cos(theta);
   const sinTheta = Math.sin(theta);
   const cosPhi = Math.cos(phi);
   const sinPhi = Math.sin(phi);
+  let idx = 0;
+
+  // l=0
+  values[idx++] = PRECOMPUTED_COEFFS.c00; // Y00
+
+  // l=1
+  values[idx++] = PRECOMPUTED_COEFFS.c10 * cosTheta; // Y10
+  values[idx++] = PRECOMPUTED_COEFFS.c11 * sinTheta * cosPhi; // Y11
+  values[idx++] = PRECOMPUTED_COEFFS.c11 * sinTheta * sinPhi; // Y1-1
+
+  // l=2
+  const cos2Theta = cosTheta * cosTheta;
+  const sin2Theta = sinTheta * sinTheta;
+  const cos2Phi = Math.cos(2 * phi);
+  const sin2Phi = Math.sin(2 * phi);
   
-  // 根据阶数(l)和阶次(m)返回解析表达式
-  switch (l) {
-    case 0:
-      return 0.5 * Math.sqrt(1 / Math.PI); // Y_0^0
+  values[idx++] = PRECOMPUTED_COEFFS.c20 * (3 * cos2Theta - 1); // Y20
+  values[idx++] = PRECOMPUTED_COEFFS.c21 * sinTheta * cosTheta * cosPhi; // Y21
+  values[idx++] = PRECOMPUTED_COEFFS.c21 * sinTheta * cosTheta * sinPhi; // Y2-1
+  values[idx++] = PRECOMPUTED_COEFFS.c22 * sin2Theta * cos2Phi; // Y22
+  values[idx++] = PRECOMPUTED_COEFFS.c22 * sin2Theta * sin2Phi; // Y2-2
+
+  // l=3
+  if (L_max >= 3) {
+    const cos3Theta = cosTheta * cos2Theta;
+    const sin3Theta = sinTheta * sin2Theta;
+    const cos3Phi = Math.cos(3 * phi);
+    const sin3Phi = Math.sin(3 * phi);
     
-    case 1:
-      if (m === 0) return 0.5 * Math.sqrt(3 / Math.PI) * cosTheta; // Y_1^0
-      if (m === 1) return -0.5 * Math.sqrt(3 / (2 * Math.PI)) * sinTheta * cosPhi; // Y_1^1 (实部)
-      if (m === -1) return -0.5 * Math.sqrt(3 / (2 * Math.PI)) * sinTheta * sinPhi; // Y_1^{-1} (实部)
-      break;
-    
-    case 2:
-      if (m === 0) return 0.25 * Math.sqrt(5 / Math.PI) * (3 * cosTheta * cosTheta - 1); // Y_2^0
-      if (m === 1) return -0.5 * Math.sqrt(15 / (2 * Math.PI)) * sinTheta * cosTheta * cosPhi; // Y_2^1
-      if (m === -1) return -0.5 * Math.sqrt(15 / (2 * Math.PI)) * sinTheta * cosTheta * sinPhi; // Y_2^{-1}
-      if (m === 2) return 0.25 * Math.sqrt(15 / (2 * Math.PI)) * sinTheta * sinTheta * Math.cos(2 * phi); // Y_2^2
-      if (m === -2) return 0.25 * Math.sqrt(15 / (2 * Math.PI)) * sinTheta * sinTheta * Math.sin(2 * phi); // Y_2^{-2}
-      break;
-    
-    case 3:
-      if (m === 0) return 0.25 * Math.sqrt(7 / Math.PI) * (5 * Math.pow(cosTheta, 3) - 3 * cosTheta); // Y_3^0
-      if (m === 1) return -0.25 * Math.sqrt(21 / (2 * Math.PI)) * (5 * Math.pow(cosTheta, 2) - 1) * sinTheta * cosPhi; // Y_3^1
-      if (m === -1) return -0.25 * Math.sqrt(21 / (2 * Math.PI)) * (5 * Math.pow(cosTheta, 2) - 1) * sinTheta * sinPhi; // Y_3^{-1}
-      if (m === 2) return 0.25 * Math.sqrt(105 / (2 * Math.PI)) * cosTheta * sinTheta * sinTheta * Math.cos(2 * phi); // Y_3^2
-      if (m === -2) return 0.25 * Math.sqrt(105 / (2 * Math.PI)) * cosTheta * sinTheta * sinTheta * Math.sin(2 * phi); // Y_3^{-2}
-      if (m === 3) return -0.25 * Math.sqrt(35 / (2 * Math.PI)) * Math.pow(sinTheta, 3) * Math.cos(3 * phi); // Y_3^3
-      if (m === -3) return -0.25 * Math.sqrt(35 / (2 * Math.PI)) * Math.pow(sinTheta, 3) * Math.sin(3 * phi); // Y_3^{-3}
-      break;
+    values[idx++] = PRECOMPUTED_COEFFS.c30 * (5 * cos3Theta - 3 * cosTheta); // Y30
+    values[idx++] = PRECOMPUTED_COEFFS.c31 * (5 * cos2Theta - 1) * sinTheta * cosPhi; // Y31
+    values[idx++] = PRECOMPUTED_COEFFS.c31 * (5 * cos2Theta - 1) * sinTheta * sinPhi; // Y3-1
+    values[idx++] = PRECOMPUTED_COEFFS.c32 * cosTheta * sin2Theta * cos2Phi; // Y32
+    values[idx++] = PRECOMPUTED_COEFFS.c32 * cosTheta * sin2Theta * sin2Phi; // Y3-2
+    values[idx++] = PRECOMPUTED_COEFFS.c33 * sin3Theta * cos3Phi; // Y33
+    values[idx++] = PRECOMPUTED_COEFFS.c33 * sin3Theta * sin3Phi; // Y3-3
   }
-  
-  throw new Error(`Unsupported harmonic: l=${l}, m=${m}`);
+
+  return values;
 }
 
-/**
- * 生成Fibonacci球面采样点（均匀分布）
- * @param {number} numPoints - 采样点数量
- * @returns {Array<{theta: number, phi: number}>} 球坐标角度列表
- */
-function fibonacciSphere(numPoints) {
-  const points = [];
+// =============== Fibonacci 采样 ===============
+export function fibonacciSphere(numPoints) {
+  if (numPoints <= 0) return { thetas: new Float32Array(0), phis: new Float32Array(0), count: 0 };
+  
+  const thetas = new Float32Array(numPoints);
+  const phis = new Float32Array(numPoints);
   const goldenRatio = (1 + Math.sqrt(5)) / 2;
   const angleIncrement = 2 * Math.PI * goldenRatio;
   
   for (let i = 0; i < numPoints; i++) {
-    const y = 1 - (i / (numPoints - 1)) * 2; // y ∈ [-1, 1]
-    const radius = Math.sqrt(1 - y * y);     // 当前纬度半径
-    
-    const theta = Math.acos(y);              // 极角 θ
-    const phi = (i * angleIncrement) % (2 * Math.PI); // 方位角 φ
-    
-    points.push({ theta, phi });
+    const y = 1 - (i / (numPoints - 1)) * 2;
+    const radius = Math.sqrt(Math.max(0, 1 - y * y));
+    thetas[i] = Math.acos(y);
+    phis[i] = (i * angleIncrement) % (2 * Math.PI);
   }
   
-  return points;
+  return { thetas, phis, count: numPoints };
 }
 
-/**
- * 球谐函数拟合（最小二乘）
- * @param {Array<Point>} controlPoints - 控制点列表
- * @param {number} L_max - 最大阶数 (3)
- * @param {Object} origin - 原点 {x, y, z}
- * @returns {Array<number>} 球谐系数 [c00, c10, c11, c1-1, c20, ...]
- */
+// =============== 球谐拟合（核心） ===============
 export function fitSphericalHarmonics(controlPoints, L_max = 3, origin) {
-  // ===== 1. 准备数据：计算每个控制点的球坐标 =====
-  const sphericalPoints = controlPoints.map(p => 
-    cartesianToSpherical(p.x, p.y, p.z, origin)
-  );
+  // 1. 验证控制点数量
+  const minPoints = (L_max + 1) * (L_max + 1);
+  if (controlPoints.length < minPoints) {
+    throw new Error(
+      `控制点不足: 需要至少 ${minPoints} 个点 (当前 ${controlPoints.length} 个)`
+    );
+  }
+
+  // 2. 预计算球坐标
+  const sphericalPoints = new Array(controlPoints.length);
+  const rs = new Float64Array(controlPoints.length);
   
-  // ===== 2. 确定参数数量 =====
-  // 对于实数球谐，参数数量 = (L_max + 1)^2
-  const numParams = (L_max + 1) * (L_max + 1); // L_max=3 → 16个参数
-  
-  // ===== 3. 构建设计矩阵 A 和观测向量 b =====
+  for (let i = 0; i < controlPoints.length; i++) {
+    const p = controlPoints[i];
+    sphericalPoints[i] = cartesianToSpherical(p.x, p.y, p.z, origin);
+    rs[i] = sphericalPoints[i].r;
+  }
+
+  // 3. 构建设计矩阵 (n_points x n_params)
   const n = controlPoints.length;
-  const A = new Matrix(n, numParams);
-  const b = new Matrix(n, 1);
+  const nParams = (L_max + 1) * (L_max + 1);
+  const A = new Float64Array(n * nParams);
   
-  // 遍历每个控制点
+  // 向量化填充矩阵
   for (let i = 0; i < n; i++) {
     const { theta, phi } = sphericalPoints[i];
-    b.set(i, 0, sphericalPoints[i].r); // 观测值 = 径向距离
+    const harmonics = evaluateHarmonics(theta, phi, L_max);
+    const rowOffset = i * nParams;
     
-    // 遍历所有球谐基函数 (l, m)
-    let paramIndex = 0;
-    for (let l = 0; l <= L_max; l++) {
-      for (let m = -l; m <= l; m++) {
-        // 计算该基函数在(θ,φ)处的值
-        const ylm = realSphericalHarmonic(l, m, theta, phi);
-        A.set(i, paramIndex, ylm);
-        paramIndex++;
-      }
+    for (let j = 0; j < nParams; j++) {
+      A[rowOffset + j] = harmonics[j];
     }
   }
+
+  // 4. 计算 ATA 和 ATb (利用对称性)
+  const ATA = new Float64Array(nParams * nParams);
+  const ATb = new Float64Array(nParams);
   
-  // ===== 4. 求解最小二乘问题：min ||Ax - b||^2 =====
-  // 标准解法：(AᵀA)x = Aᵀb
-  // 使用ml-matrix的solve函数（内部使用LU分解，数值稳定）
-  /*
-   * 关键注释：此处为最小二乘核心步骤
-   * 
-   * 正规方程： (AᵀA)x = Aᵀb
-   * 其中：
-   *   A: [n_points × n_params] 设计矩阵
-   *   b: [n_points × 1] 观测向量（径向距离）
-   *   x: [n_params × 1] 待求系数（球谐参数）
-   * 
-   * 数值稳定性说明：
-   *   - 当AᵀA接近奇异时（控制点分布不均），解可能不稳定
-   *   - 后续可在此处加入：
-   *       1. Tikhonov正则化： (AᵀA + λI)x = Aᵀb
-   *       2. RANSAC：迭代加权最小二乘
-   *       3. Huber损失：替换L2损失为鲁棒损失
-   * 
-   * 当前使用直接求解，适用于良好分布的控制点
-   */
-
-  // 替换 fitSphericalHarmonics 中的求解部分
-  const AT = A.transpose();
-  const ATA = AT.mmul(A);
-  const ATb = AT.mmul(b);
-
-  // 使用自实现求解器
-  const coeffs = TinyMatrix.solve(ATA, ATb); // 注意：返回TinyMatrix对象
-  return coeffs.to1DArray(); // 转换为普通数组
-}
-
-/**
- * 从球谐参数生成表面点
- * @param {Array<number>} coeffs - 球谐系数
- * @param {number} numPoints - 生成点数
- * @param {Object} origin - 原点 {x, y, z}
- * @param {number} L_max - 最大阶数
- * @returns {Array<Point>} 表面点列表
- */
-export function generateSurfacePoints(coeffs, numPoints, origin, L_max = 3) {
-  const points = [];
-  const sphericalAngles = fibonacciSphere(numPoints);
-  
-  // 遍历每个采样方向
-  sphericalAngles.forEach(({ theta, phi }) => {
-    // 计算该方向的径向距离 r(θ,φ) = Σ c_lm * Y_lm(θ,φ)
-    let r = 0;
-    let paramIndex = 0;
-    
-    for (let l = 0; l <= L_max; l++) {
-      for (let m = -l; m <= l; m++) {
-        const ylm = realSphericalHarmonic(l, m, theta, phi);
-        r += coeffs[paramIndex] * ylm;
-        paramIndex++;
+  // 手动计算 ATA (对称矩阵)
+  for (let i = 0; i < nParams; i++) {
+    for (let j = i; j < nParams; j++) { // 仅上三角
+      let sum = 0;
+      const col1 = i * n;
+      const col2 = j * n;
+      
+      for (let k = 0; k < n; k++) {
+        sum += A[k * nParams + i] * A[k * nParams + j];
       }
+      
+      ATA[i * nParams + j] = sum;
+      ATA[j * nParams + i] = sum; // 对称填充
     }
     
-    // 防止负半径（物理上无效）
-    r = Math.max(r, 0.01);
+    // 计算 ATb
+    let sumB = 0;
+    for (let k = 0; k < n; k++) {
+      sumB += A[k * nParams + i] * rs[k];
+    }
+    ATb[i] = sumB;
+  }
+
+  // 5. 求解线性系统
+  const coeffs = TinyMatrix.solveSymmetric(ATA, ATb, nParams);
+  return coeffs;
+}
+
+// =============== 生成表面点 ===============
+export function generateSurfacePoints(coeffs, numPoints, origin, L_max = 3) {
+  const points = new Array(numPoints);
+  const spherical = fibonacciSphere(numPoints);
+  const MIN_RADIUS = 0.05; // 物理最小半径
+  
+  // 预计算系数映射
+  const nParams = (L_max + 1) * (L_max + 1);
+  
+  for (let i = 0; i < spherical.count; i++) {
+    const theta = spherical.thetas[i];
+    const phi = spherical.phis[i];
     
-    // 转换回笛卡尔坐标
+    // 1. 计算径向距离 r(θ,φ) = Σ c_lm * Y_lm(θ,φ)
+    let r = 0;
+    const harmonics = evaluateHarmonics(theta, phi, L_max);
+    
+    for (let j = 0; j < nParams; j++) {
+      r += coeffs[j] * harmonics[j];
+    }
+    
+    // 2. 安全半径处理（软阈值）
+    if (r < MIN_RADIUS) {
+      // 平滑过渡到最小半径
+      r = MIN_RADIUS * (1 + Math.exp(-10 * (MIN_RADIUS - r)));
+    }
+    
+    // 3. 转换回笛卡尔坐标
     const { x, y, z } = sphericalToCartesian(r, theta, phi, origin);
-    
-    // 创建点对象
     const p = new Point(x, y, z);
-    p.dis = r; // 记录径向距离
-    points.push(p);
-  });
+    p.dis = r;
+    points[i] = p;
+  }
   
   return points;
 }
-
-// 导出工具函数（可选）
-export { cartesianToSpherical, sphericalToCartesian, fibonacciSphere };

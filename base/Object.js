@@ -1,25 +1,22 @@
 import { Point } from "./Point.js";
 import { fitSphericalHarmonics, generateSurfacePoints } from '../math/sphericalHarmonics.js';
+import { Quaternion, rotatePoint } from './quaternion.js';
 
 export class Object {
-  /**
-   * @param {Point[]} controlpoints - 控制点列表
-   */
   constructor(controlpoints = []) {
     this.controlpoints = controlpoints;
-    this.points = []; // 用于存储拟合生成的表面点
+    this.points = [];
     
-    // ===== 新增球谐拟合参数 =====
-    this.L_max = 3; // 最大阶数
-    this.shParams = []; // 球谐系数 [c00, c10, c11, ...]
-    this.origin = { x: 0, y: 0, z: 0 }; // 拟合原点（质心）
-    this.isFitted = false; // 标记是否已完成拟合
+    // 球谐参数
+    this.L_max = 3;
+    this.shParams = null; // Float64Array
+    this.origin = { x: 0, y: 0, z: 0 };
+    this.isFitted = false;
+    
+    // 旋转状态（四元数）
+    this.rotation = new Quaternion();
   }
 
-  /**
-   * 计算控制点质心作为原点
-   * @returns {Object} 质心坐标 {x, y, z}
-   */
   calculateCentroid() {
     if (this.controlpoints.length === 0) return { x: 0, y: 0, z: 0 };
     
@@ -38,43 +35,29 @@ export class Object {
     };
   }
 
-  /**
-   * 从控制点拟合球谐函数
-   */
   fitFromControlPoints() {
-    if (this.controlpoints.length < 10) {
-      console.warn('警告：控制点数量过少（<10），拟合结果可能不稳定');
-    }
-    
-    // 1. 计算质心作为原点
     this.origin = this.calculateCentroid();
-    
-    // 2. 执行球谐拟合
     this.shParams = fitSphericalHarmonics(
       this.controlpoints,
       this.L_max,
       this.origin
     );
-    
     this.isFitted = true;
     console.log('球谐拟合完成，系数:', this.shParams);
   }
 
-  /**
-   * 生成表面点（均匀分布）
-   * @param {number} numPoints - 生成点数（默认1000）
-   */
-  generateSurfacePoints(numPoints = 1000) {
+  generateSurfacePoints(numPoints = null) {
     if (!this.isFitted) {
       throw new Error('必须先调用 fitFromControlPoints() 进行拟合');
     }
     
-    // 动态计算点数：基于阶数 (4 * L_max^2)
+    // 动态计算点数
     if (numPoints === null || numPoints === undefined) {
-      numPoints = 4 * this.L_max * this.L_max * 10; // L_max=3 → 360点
+      numPoints = Math.max(100, 4 * this.L_max * this.L_max * 10);
     }
     
-    // 生成点
+    // 清理旧点防止内存泄漏
+    this.points = [];
     this.points = generateSurfacePoints(
       this.shParams,
       numPoints,
@@ -85,70 +68,60 @@ export class Object {
     console.log(`生成 ${this.points.length} 个表面点`);
   }
 
-  /**
-   * 平移整个物体
-   * @param {number} dx - x方向偏移
-   * @param {number} dy - y方向偏移
-   * @param {number} dz - z方向偏移
-   */
   translate(dx, dy, dz) {
-    // 1. 平移原点
+    // 平移原点
     this.origin.x += dx;
     this.origin.y += dy;
     this.origin.z += dz;
     
-    // 2. 平移所有控制点
-    this.controlpoints.forEach(p => {
+    // 平移控制点
+    for (const p of this.controlpoints) {
       p.x += dx;
       p.y += dy;
       p.z += dz;
-    });
-    
-    // 3. 如果已有表面点，平移它们
-    if (this.points) {
-      this.points.forEach(p => {
-        p.x += dx;
-        p.y += dy;
-        p.z += dz;
-      });
     }
     
-    // 注意：球谐参数 shParams 保持不变！
+    // 平移表面点（如果存在）
+    for (const p of this.points) {
+      p.x += dx;
+      p.y += dy;
+      p.z += dz;
+    }
   }
 
-  /**
-   * 绕原点旋转物体
-   * @param {number} angleX - x轴旋转角度（弧度）
-   * @param {number} angleY - y轴旋转角度（弧度）
-   * @param {number} angleZ - z轴旋转角度（弧度）
-   */
   rotate(angleX = 0, angleY = 0, angleZ = 0) {
-    // 旋转控制点
-    this.controlpoints = this.controlpoints.map(p => 
-      rotatePointAroundOrigin(p, this.origin, angleX, angleY, angleZ)
-    );
+    // 1. 更新旋转状态
+    const deltaRot = Quaternion.fromEuler(angleX, angleY, angleZ);
+    this.rotation = deltaRot.multiply(this.rotation);
     
-    // 旋转表面点（如果存在）
-    if (this.points.length > 0) {
-      this.points = this.points.map(p => 
-        rotatePointAroundOrigin(p, this.origin, angleX, angleY, angleZ)
+    // 2. 旋转所有点（四元数版）
+    for (let i = 0; i < this.controlpoints.length; i++) {
+      this.controlpoints[i] = rotatePoint(
+        this.controlpoints[i], 
+        this.origin, 
+        this.rotation
       );
     }
     
-    // 重要：球谐参数 shParams 保持不变！
-    // 因为旋转对称性，球谐函数在旋转下具有不变性
+    for (let i = 0; i < this.points.length; i++) {
+      this.points[i] = rotatePoint(
+        this.points[i], 
+        this.origin, 
+        this.rotation
+      );
+    }
+    
+    // 3. 重要：球谐参数保持不变！
   }
 
-  /**
-   * 获取物体边界框
-   * @returns {{min: Point, max: Point}} 边界框
-   */
   getBoundingBox() {
     const allPoints = [...this.controlpoints, ...this.points];
-    if (allPoints.length === 0) return {
-      min: new Point(0,0,0),
-      max: new Point(0,0,0)
-    };
+    if (allPoints.length === 0) {
+      return {
+        min: new Point(0, 0, 0),
+        max: new Point(0, 0, 0)
+      };
+    }
     
     let minX = Infinity, minY = Infinity, minZ = Infinity;
     let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
@@ -167,61 +140,38 @@ export class Object {
       max: new Point(maxX, maxY, maxZ)
     };
   }
-}
 
-/**
- * 绕原点旋转点（内部工具函数）
- * @param {Point} point - 要旋转的点
- * @param {Object} origin - 旋转中心 {x, y, z}
- * @param {number} angleX - x轴旋转角（弧度）
- * @param {number} angleY - y轴旋转角（弧度）
- * @param {number} angleZ - z轴旋转角（弧度）
- * @returns {Point} 旋转后的点
- */
-function rotatePointAroundOrigin(point, origin, angleX, angleY, angleZ) {
-  // 1. 平移到局部坐标系
-  const dx = point.x - origin.x;
-  const dy = point.y - origin.y;
-  const dz = point.z - origin.z;
-  
-  // 2. 应用旋转（按Z-Y-X顺序）
-  let [x, y, z] = [dx, dy, dz];
-  
-  // 绕Z轴旋转
-  if (angleZ !== 0) {
-    const cosZ = Math.cos(angleZ);
-    const sinZ = Math.sin(angleZ);
-    const newX = x * cosZ - y * sinZ;
-    const newY = x * sinZ + y * cosZ;
-    x = newX;
-    y = newY;
+  /**
+   * 重置旋转状态（保留当前形状）
+   */
+  resetRotation() {
+    this.rotation = new Quaternion();
+    // 注意：点坐标已旋转，此处不重置
   }
-  
-  // 绕Y轴旋转
-  if (angleY !== 0) {
-    const cosY = Math.cos(angleY);
-    const sinY = Math.sin(angleY);
-    const newX = x * cosY + z * sinY;
-    const newZ = -x * sinY + z * cosY;
-    x = newX;
-    z = newZ;
+
+  /**
+   * 获取当前旋转角度（欧拉角表示）
+   * @returns {{x: number, y: number, z: number}}
+   */
+  getEulerAngles() {
+    // 四元数转欧拉角（简化版）
+    const { w, x, y, z } = this.rotation;
+    const sinr = 2 * (w * x + y * z);
+    const cosr = 1 - 2 * (x * x + y * y);
+    const pitch = Math.atan2(sinr, cosr);
+    
+    const sinp = 2 * (w * y - z * x);
+    let roll;
+    if (Math.abs(sinp) >= 1) {
+      roll = Math.sign(sinp) * Math.PI / 2;
+    } else {
+      roll = Math.asin(sinp);
+    }
+    
+    const siny = 2 * (w * z + x * y);
+    const cosy = 1 - 2 * (y * y + z * z);
+    const yaw = Math.atan2(siny, cosy);
+    
+    return { x: pitch, y: yaw, z: roll };
   }
-  
-  // 绕X轴旋转
-  if (angleX !== 0) {
-    const cosX = Math.cos(angleX);
-    const sinX = Math.sin(angleX);
-    const newY = y * cosX - z * sinX;
-    const newZ = y * sinX + z * cosX;
-    y = newY;
-    z = newZ;
-  }
-  
-  // 3. 平移回世界坐标系
-  const p = point.clone();
-  p.x = x + origin.x;
-  p.y = y + origin.y;
-  p.z = z + origin.z;
-  
-  return p;
 }
