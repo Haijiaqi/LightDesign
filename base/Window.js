@@ -122,7 +122,7 @@ export class Window {
         horizontalInterval: 1, // 横向间距2cm
         verticalInterval: 1, // 纵向间距2cm
         gridWidth: 20, // 网格区域宽20cm（左右各10cm）
-        gridHeight: 20, // 网格区域高16cm（上下各8cm）
+        gridHeight: 10, // 网格区域高16cm（上下各8cm）
         centerPosCm: { x: 0, y: 0 }, // 中心交点在屏幕物理中心
         dashPattern: [0.1, 0.4], // 实长1cm，虚长0.5cm
         light: 0.5
@@ -130,7 +130,7 @@ export class Window {
       const result = this.createGridObject(gridConfig);
       this.windowObjects = [
         new Object(result.intersections),
-        // new Object(result.centerLinePixels),
+        new Object(result.centerLinePixels),
         new Object(result.otherPixels)
       ];
     }
