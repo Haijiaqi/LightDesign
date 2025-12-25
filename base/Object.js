@@ -1,31 +1,6 @@
 import { Point } from "./Point.js";
 
-/**
- * ================================================================================
- * Object 类 - 几何对象管理（职责重构版）
- * ================================================================================
- * 
- * 职责（重构后）：
- * 1. 点集管理（控制点、表面采样点、内部虚点）
- * 2. 金刚石网络拓扑生成
- * 3. 拟合接口协调
- * 4. 几何量查询接口（转发给球谐类）
- * 5. 物理接口提供
- * 
- * 不关心：
- * - 球谐函数的数学细节
- * - 积分公式、数值导数
- * - θ/φ 网格、eps/steps 参数
- * 
- * 核心原则：
- * - Object 对"球谐数学"完全无感
- * - 只知道这是一个"参数化闭合体"
- * - 所有几何计算委托给 SphericalHarmonics
- */
-
-/**
- * 简化缓存（仅球谐拟合）
- */
+// SimpleFitCache - 球谐拟合缓存
 class SimpleFitCache {
   constructor() {
     this._cache = null;
@@ -51,340 +26,639 @@ class SimpleFitCache {
   }
 }
 
-// ================================================================================
-// Object 类主体
-// ================================================================================
-
-/**
- * Object - 通用几何与物理对象
- * 
- * ⚠️ 几何表示语义规则：
- * 
- * 1. sphericalHarmonics 表示：
- *    - ✅ 用途：刚体、静态几何、碰撞参考
- *    - ❌ 禁止：软体形变、布料物理的实时几何更新
- *    - 原因：球谐是参数化表示，不跟踪拓扑变化
- * 
- * 2. 物理形变对象：
- *    - ✅ representation.type 必须为 'mesh' 或 'cloth'
- *    - ✅ 几何属性（体积/面积）基于网格计算
- *    - ❌ 禁止使用球谐几何函数解释形变后的点集
- * 
- * 3. 类型切换：
- *    - 刚体 → 软体：调用 convertToMesh() 或 initClothEditState()
- *    - 软体 → 刚体：重新拟合球谐 fitSphericalHarmonics()
- * 
- * ⚠️ 物理接口迁移：
- * 
- * 现代接口（推荐）：
- * - getPhysicsView() + commit() - 零拷贝，XPBD 友好
- * 
- * 旧接口（已废弃）：
- * - getPhysicsData() + applyPhysicsUpdate() - 拷贝数据，破坏物理状态
- * 
- * 问题对比：
- * | 问题 | 旧接口 | 现代接口 |
- * |------|--------|---------|
- * | GC 压力 | ❌ 每帧 new | ✅ 零拷贝 |
- * | 速度精确 | ❌ 反算覆盖 | ✅ 保留精确值 |
- * | XPBD lambda | ❌ 无法累积 | ✅ 跨帧复用 |
- */
+// Object - 几何对象与物理管理
 export class Object {
+  /**
+   * Object 构造函数
+   * 
+   * ⭐ 数据分层架构：
+   * 
+   * 1. controlPoints（控制点）：
+   *    - Source of Truth for Shape Fitting
+   *    - 用户编辑的稀疏点集
+   *    - 驱动球谐拟合
+   * 
+   * 2. surfacePoints（表面点）：
+   *    - 物理模拟和渲染的密集网格
+   *    - 初始时：引用 controlPoints（朴素模式）
+   *    - 生成体积后：指向气泡生成的高密度表面
+   * 
+   * @param {Array} points - 初始点集
+   * @param {Object} options - 配置选项
+   */
   constructor(points = [], options = {}) {
-    // ====================================================
-    // 三类点分离
-    // ====================================================
-    
-    // 1️⃣ 控制点（用户编辑、参数化控制）
-    this.controlPoints = options.controlPoints ?? [];
+    // ⭐ 核心驱动源：控制点（用于拟合）
+    // 兼容性逻辑：如果未提供 controlPoints，则复制 points
+    if (options.controlPoints && options.controlPoints.length > 0) {
+      this.controlPoints = options.controlPoints;
+    } else if (points.length > 0) {
+      // 深度复制：避免外部修改影响内部状态
+      this.controlPoints = points.map(p => new Point(p.x, p.y, p.z));
+    } else {
+      this.controlPoints = [];
+    }
     this._controlPointVersion = 0;
     
-    // 2️⃣ 表面采样点（主要点集）
-    this.surfacePoints = points;
+    // ⭐ 物理/渲染表面点
+    // 初始时：引用 controlPoints（朴素模式，避免内存浪费）
+    // 生成体积后：指向高密度网格（与 controlPoints 分离）
+    if (points.length > 0 && (!options.controlPoints || options.controlPoints.length === 0)) {
+      // 朴素模式：直接使用传入的 points
+      this.surfacePoints = points;
+    } else if (this.controlPoints.length > 0) {
+      // 如果有独立的 controlPoints，表面点也初始化为控制点
+      this.surfacePoints = this.controlPoints;
+    } else {
+      this.surfacePoints = [];
+    }
     this._surfacePointVersion = 0;
     
-    // 3️⃣ 内部虚点（金刚石网络，临时数据）
-    this._internalNodes = null;
+    // ⭐ 状态标记：是否已生成体积网格
+    // true: surfacePoints 已与 controlPoints 分离（高密度网格）
+    // false: surfacePoints 引用 controlPoints（朴素模式）
+    this._isVolumetric = false;
     
-    // 固定中心
-    this.center = options.center ?? this._computeCenter(this.surfacePoints);
+    // 显式状态机：控制物理访问权限
+    // 'parametric' - 球谐/拟合/编辑态（不可物理）
+    // 'discrete'   - mesh/cloth/line（可物理）
+    // 'hybrid'     - 参数参考 + 局部离散（预留）
+    this.mode = 'parametric';
+    
+    // 中心版本号：用于标记 _sphericalCoords 失效
+    this._centerVersion = 0;
+    
+    // 几何中心
+    this.center = options.center ?? this._computeCenter(this.controlPoints);
     
     // 边界盒
     this._boundingBox = null;
     this._boundingBoxDirty = true;
 
-    // ====================================================
     // 几何表示
-    // ====================================================
-    
     this.representation = {
-      type: 'points',  // 'points' | 'sphericalHarmonics' | 'cloth' | 'springMass'
+      type: 'points',
       isClosed: false,
-      
-      // 几何数据
       data: null,
       
-      // 拓扑数据
+      // 零拷贝物理状态
+      physicsState: {
+        physicsModel: options.physicsModel ?? 'pbd',
+        particles: [],
+        constraints: [],
+        surfaceStartIndex: 0,
+        internalStartIndex: 0,
+        surfaceCount: 0,
+        internalCount: 0
+      },
+      
       topology: {
         triangles: [],
         edges: [],
+        internalEdges: [],
         adjacency: null,
         degree: null
       },
       
-      // 几何量缓存（可选）
+      editState: null,
+      
       geometryCache: {
         volume: null,
         surfaceArea: null,
-        sections: new Map()  // plane key -> {perimeter, area, points}
+        sections: new Map()
       },
       
-      // 材料参数（不均质）
       material: {
         uniform: true,
-        properties: null  // (theta, phi) => {stiffness, damping, mass}
+        properties: null
       },
       
       metadata: {}
     };
 
-    // ====================================================
-    // 金刚石网络配置
-    // ====================================================
-    
-    this.diamondConfig = {
-      enabled: options.diamondEnabled ?? false,
-      spacing: options.diamondSpacing ?? 0.1,
-      surfaceThreshold: options.surfaceThreshold ?? 0.05,
-      maxDepth: options.maxDepth ?? 10
-    };
-
-    // ====================================================
-    // 缓存（仅球谐拟合）
-    // ====================================================
-    
+    // 缓存
     this._fitCache = new SimpleFitCache();
-
-    // ====================================================
-    // 物理状态
-    // ====================================================
     
+    // ⭐ 增量拟合状态栈（用于断点续传）
+    this._fitStack = [];
+
+    // 物理状态
     this.physics = {
       enabled: false,
       mass: 1.0,
       velocity: { x: 0, y: 0, z: 0 },
-      
-      // ⭐⭐⭐ 物理模式选择 ⭐⭐⭐
-      // 'pbd': Position-Based Dynamics (默认)
-      //   - 生成 type: 'distance' 约束
-      //   - 使用 compliance (XPBD 柔度)
-      //   - 时间步无关、无条件稳定
-      //   - 适合：刚性结构、布料、几何保持
-      // 
-      // 'force': Force-Based / Mass-Spring System
-      //   - 生成 type: 'spring' 约束
-      //   - 使用 stiffness + damping
-      //   - 时间步依赖、能量守恒可控
-      //   - 适合：弹性器件、软Q弹效果、显式交互
       model: options.physicsModel ?? 'pbd'
     };
 
-    // ====================================================
     // 元数据
-    // ====================================================
-    
     this.metadata = {
       name: options.name ?? 'Untitled',
       created: Date.now(),
       modified: Date.now()
     };
+
+    // 调试选项
+    this.verbose = options.verbose ?? false;
+
+    if (this.surfacePoints.length > 0) {
+      this._onSurfacePointsChanged();
+    }
   }
 
-  // ====================================================
-  // 表面点管理
-  // ====================================================
-
+  // === 点集管理 ===
+  
   /**
    * 添加表面点
-   * ⭐ 增强：确保点对象标准化
+   * 
+   * ⭐ 生命周期限制：
+   * - 朴素模式：允许添加
+   * - 体积模式：禁止添加（物理网格拓扑固定）
+   * 
+   * @param {Number} x - x 坐标
+   * @param {Number} y - y 坐标
+   * @param {Number} z - z 坐标
+   * @returns {Number} 新点的索引，如果失败返回 -1
    */
-  addSurfacePoint(point) {
-    // 标准化为 Point 实例
-    const normalizedPoint = this._normalizePoint(point);
-    this.surfacePoints.push(normalizedPoint);
+  addSurfacePoint(x, y, z) {
+    // ⭐ 体积模式检查
+    if (this._isVolumetric) {
+      console.error('[Object] Cannot add surface points in volumetric mode. The physical mesh topology is fixed.');
+      console.error('[Object] To modify the mesh, either:');
+      console.error('[Object]   1. Use updateSurfacePoint() to move existing points');
+      console.error('[Object]   2. Use updateControlPoint() to reshape via spherical harmonics');
+      console.error('[Object]   3. Regenerate the volumetric mesh with generateVolumetricMesh()');
+      return -1;
+    }
+    
+    const point = new Point(x, y, z);
+    this.surfacePoints.push(point);
     this._onSurfacePointsChanged();
+    return this.surfacePoints.length - 1;
   }
 
+  /**
+   * 删除表面点
+   * 
+   * ⭐ 生命周期限制：
+   * - 朴素模式：允许删除
+   * - 体积模式：禁止删除（物理网格拓扑固定）
+   * 
+   * @param {Number} index - 点索引
+   * @returns {Boolean} 是否成功删除
+   */
   removeSurfacePoint(index) {
+    // ⭐ 体积模式检查
+    if (this._isVolumetric) {
+      console.error('[Object] Cannot remove surface points in volumetric mode. The physical mesh topology is fixed.');
+      console.error('[Object] To modify the mesh, either:');
+      console.error('[Object]   1. Use updateSurfacePoint() to move existing points');
+      console.error('[Object]   2. Use updateControlPoint() to reshape via spherical harmonics');
+      console.error('[Object]   3. Regenerate the volumetric mesh with generateVolumetricMesh()');
+      return false;
+    }
+    
     if (index >= 0 && index < this.surfacePoints.length) {
       this.surfacePoints.splice(index, 1);
       this._onSurfacePointsChanged();
+      return true;
     }
+    
+    return false;
   }
 
+  /**
+   * 更新表面点坐标
+   * 
+   * ⭐ 生命周期分支：
+   * 
+   * 【朴素模式】(!this._isVolumetric)
+   * - surfacePoints 与 controlPoints 引用相同
+   * - 使用 Swap-to-End 策略
+   * - 操作 _fitStack（增量拟合）
+   * - 允许交换顺序（点云无拓扑）
+   * 
+   * 【体积模式】(this._isVolumetric)
+   * - surfacePoints 是物理网格（索引绑定约束）
+   * - 禁止交换顺序（破坏物理拓扑）
+   * - 禁止操作 _fitStack（属于控制点）
+   * - 仅更新坐标 + 同步物理粒子
+   * 
+   * @param {Number} index - 点索引
+   * @param {Number} x - 新的 x 坐标
+   * @param {Number} y - 新的 y 坐标
+   * @param {Number} z - 新的 z 坐标
+   */
   updateSurfacePoint(index, x, y, z) {
-    if (index >= 0 && index < this.surfacePoints.length) {
-      this.surfacePoints[index].x = x;
-      this.surfacePoints[index].y = y;
-      this.surfacePoints[index].z = z;
-      this._onSurfacePointsChanged();
+    if (index < 0 || index >= this.surfacePoints.length) {
+      console.warn(`[Object] Invalid surface point index: ${index}`);
+      return;
+    }
+    
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // ⭐ 分支 1: 朴素模式（点云，无物理网格）
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    if (!this._isVolumetric) {
+      const lastIndex = this.surfacePoints.length - 1;
+      
+      // ⭐ Swap-to-End 策略（脏数据后置）
+      if (index !== lastIndex) {
+        // 情况 1: 修改的不是最后一个点
+        
+        // 交换当前点与末尾点
+        const temp = this.surfacePoints[index];
+        this.surfacePoints[index] = this.surfacePoints[lastIndex];
+        this.surfacePoints[lastIndex] = temp;
+        
+        // 更新末尾点的坐标（原 index 位置的点）
+        this.surfacePoints[lastIndex].x = x;
+        this.surfacePoints[lastIndex].y = y;
+        this.surfacePoints[lastIndex].z = z;
+        
+        // ⭐ 截断状态栈（增量拟合复用）
+        this._fitStack.length = index;
+        
+        if (this.verbose) {
+          console.log(`[Object] [Naive Mode] Swapped point ${index} ↔ ${lastIndex}, truncated fitStack to ${index}`);
+        }
+      } else {
+        // 情况 2: 修改的是最后一个点
+        
+        // 直接更新坐标
+        this.surfacePoints[index].x = x;
+        this.surfacePoints[index].y = y;
+        this.surfacePoints[index].z = z;
+        
+        // ⭐ 回退状态栈一步
+        if (this._fitStack.length > 0) {
+          this._fitStack.length = this.surfacePoints.length - 1;
+        }
+        
+        if (this.verbose) {
+          console.log(`[Object] [Naive Mode] Updated last point ${index}, truncated fitStack to ${this._fitStack.length}`);
+        }
+      }
+      
+      // 更新边界盒和元数据
+      this._boundingBoxDirty = true;
+      this.metadata.modified = Date.now();
+      return;
+    }
+    
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // ⭐ 分支 2: 体积/物理模式（物理网格，拓扑固定）
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    const point = this.surfacePoints[index];
+    
+    // ⭐ 禁止交换顺序（物理约束依赖索引）
+    // 仅更新坐标
+    point.x = x;
+    point.y = y;
+    point.z = z;
+    
+    // ⭐ 同步物理粒子（如果绑定）
+    if (point._physicsData) {
+      // 更新物理粒子的位置
+      point._physicsData.position.x = x;
+      point._physicsData.position.y = y;
+      point._physicsData.position.z = z;
+      
+      // 同步前一帧位置（避免突变产生大速度）
+      point._physicsData.prevPosition.x = x;
+      point._physicsData.prevPosition.y = y;
+      point._physicsData.prevPosition.z = z;
+      
+      if (this.verbose) {
+        console.log(`[Object] [Volumetric Mode] Updated surface point ${index} and synced physics particle`);
+      }
+    }
+    
+    // ⭐ 同步 physicsState.particles（零拷贝架构）
+    if (this.representation.physicsState?.particles?.[index]) {
+      const particle = this.representation.physicsState.particles[index];
+      particle.position.x = x;
+      particle.position.y = y;
+      particle.position.z = z;
+      
+      // 同步前一帧（避免速度突变）
+      particle.prevPosition.x = x;
+      particle.prevPosition.y = y;
+      particle.prevPosition.z = z;
+    }
+    
+    // ⭐ 禁止操作 _fitStack
+    // 原因：_fitStack 属于控制点的增量拟合缓存，表面点变化不应影响
+    
+    // 更新边界盒和元数据
+    this._boundingBoxDirty = true;
+    this.metadata.modified = Date.now();
+    
+    if (this.verbose) {
+      console.log(`[Object] [Volumetric Mode] Updated surface point ${index} in-place (no swap, no fitStack change)`);
     }
   }
 
-  /**
-   * 替换表面点
-   * ⭐ 增强：批量标准化
-   */
-  replaceSurfacePoints(newPoints) {
-    // 标准化所有点
-    this.surfacePoints = newPoints.map(p => this._normalizePoint(p));
-    this._onSurfacePointsChanged();
+  addControlPoint(x, y, z) {
+    const point = new Point(x, y, z);
+    this.controlPoints.push(point);
+    this._onControlPointsChanged();
+    return this.controlPoints.length - 1;
   }
 
   /**
-   * ⭐ 新增：标准化点对象
+   * 更新控制点坐标
    * 
-   * 确保点：
-   * 1. 是 Point 实例（如果不是则转换）
-   * 2. 有 x, y, z 属性
-   * 3. 属性可变（支持物理修改）
+   * ⭐ Swap-to-End 策略（脏数据后置）：
+   * - 将被修改的点移动到数组末尾
+   * - 保持前缀不变，便于增量拟合复用
    * 
-   * @private
+   * ⭐ 级联更新：
+   * - 修改控制点 → 重新拟合球谐 → 更新物理几何
+   * 
+   * @param {Number} index - 控制点索引
+   * @param {Number} x - 新的 x 坐标
+   * @param {Number} y - 新的 y 坐标
+   * @param {Number} z - 新的 z 坐标
+   * @param {Object} options - 选项
+   * @param {Boolean} options.autoRefit - 是否自动重新拟合（默认 true）
+   * @param {Boolean} options.updatePhysics - 是否更新物理几何（默认 true）
    */
-  _normalizePoint(point) {
-    // 如果已经是 Point 实例，直接返回
-    if (point instanceof Point) {
-      return point;
+  updateControlPoint(index, x, y, z, options = {}) {
+    if (index < 0 || index >= this.controlPoints.length) {
+      console.warn(`[Object] Invalid control point index: ${index}`);
+      return;
     }
     
-    // 如果是字面量对象，转换为 Point
-    if (point && typeof point === 'object' && 
-        'x' in point && 'y' in point && 'z' in point) {
-      return new Point(point.x, point.y, point.z);
+    const autoRefit = options.autoRefit ?? true;
+    const updatePhysics = options.updatePhysics ?? true;
+    
+    const lastIndex = this.controlPoints.length - 1;
+    
+    // ⭐ Swap-to-End 策略
+    if (index !== lastIndex) {
+      // 情况 1: 修改的不是最后一个点
+      
+      // 交换当前点与末尾点
+      const temp = this.controlPoints[index];
+      this.controlPoints[index] = this.controlPoints[lastIndex];
+      this.controlPoints[lastIndex] = temp;
+      
+      // 更新末尾点的坐标
+      this.controlPoints[lastIndex].x = x;
+      this.controlPoints[lastIndex].y = y;
+      this.controlPoints[lastIndex].z = z;
+      
+      // ⭐ 截断状态栈（index 之后的状态失效）
+      this._fitStack.length = index;
+      
+      if (this.verbose) {
+        console.log(`[Object] Swapped control point ${index} with ${lastIndex}, truncated fitStack to ${index}`);
+      }
+    } else {
+      // 情况 2: 修改的是最后一个点
+      
+      // 直接更新坐标
+      this.controlPoints[index].x = x;
+      this.controlPoints[index].y = y;
+      this.controlPoints[index].z = z;
+      
+      // ⭐ 回退状态栈一步
+      if (this._fitStack.length > 0) {
+        this._fitStack.length = this.controlPoints.length - 1;
+      }
+      
+      if (this.verbose) {
+        console.log(`[Object] Updated last control point ${index}, truncated fitStack to ${this._fitStack.length}`);
+      }
     }
     
-    // 兜底：创建原点
-    console.warn('Invalid point object, creating origin point');
-    return new Point(0, 0, 0);
+    // 更新版本号
+    this._onControlPointsChanged();
+    this._boundingBoxDirty = true;
+    this.metadata.modified = Date.now();
+    
+    // ⭐ 级联更新：控制点 → 球谐系数 → 物理几何
+    if (autoRefit && this.representation.type === 'sphericalHarmonics') {
+      try {
+        // 重新拟合球谐（使用增量拟合）
+        this.fitSphericalHarmonics({
+          order: this.representation.data.order,
+          fitter: this._fittingCalculator?.constructor,
+          Matrix: this._matrixClass,
+          sphericalHarmonics: this.representation.data.sphericalHarmonics,
+          useIncremental: true
+        });
+        
+        // 更新物理几何（如果已生成体积网格）
+        if (updatePhysics && this._isVolumetric) {
+          this.updatePhysicsGeometry();
+        }
+      } catch (err) {
+        console.error('[Object] Failed to update after control point change:', err.message);
+      }
+    }
   }
 
   _onSurfacePointsChanged() {
     this._surfacePointVersion++;
-    this._fitCache.clear();
     this._boundingBoxDirty = true;
-    this._internalNodes = null;
-    this.representation.topology.triangles = [];
+    this._fitCache.clear();
     
-    // 清空几何量缓存
+    // ⭐ 清空增量拟合状态栈（结构变化，全量重算）
+    this._fitStack = [];
+    
+    this.representation.topology = {
+      triangles: [],
+      edges: [],
+      internalEdges: [],
+      adjacency: null,
+      degree: null
+    };
     this.representation.geometryCache.volume = null;
     this.representation.geometryCache.surfaceArea = null;
     this.representation.geometryCache.sections.clear();
-    
     this.metadata.modified = Date.now();
-  }
-
-  // ====================================================
-  // 控制点管理
-  // ====================================================
-
-  addControlPoint(point) {
-    this.controlPoints.push(point);
-    this._onControlPointsChanged();
-  }
-
-  updateControlPoint(index, x, y, z) {
-    if (index >= 0 && index < this.controlPoints.length) {
-      this.controlPoints[index].x = x;
-      this.controlPoints[index].y = y;
-      this.controlPoints[index].z = z;
-      this._onControlPointsChanged();
-    }
   }
 
   _onControlPointsChanged() {
     this._controlPointVersion++;
-    this._fitCache.clear();
     this.metadata.modified = Date.now();
   }
 
-  // ====================================================
-  // 中心管理
-  // ====================================================
-
   _computeCenter(points) {
-    if (points.length === 0) return { x: 0, y: 0, z: 0 };
-    let cx = 0, cy = 0, cz = 0;
-    for (const p of points) {
-      cx += p.x;
-      cy += p.y;
-      cz += p.z;
-    }
-    const n = points.length;
-    return { x: cx / n, y: cy / n, z: cz / n };
-  }
-
-  setCenterFixed(x, y, z, adjustPoints = false) {
-    if (adjustPoints) {
-      const dx = x - this.center.x;
-      const dy = y - this.center.y;
-      const dz = z - this.center.z;
-      
-      for (const p of this.surfacePoints) {
-        p.x += dx;
-        p.y += dy;
-        p.z += dz;
-      }
-      
-      this._onSurfacePointsChanged();
+    if (points.length === 0) {
+      return { x: 0, y: 0, z: 0 };
     }
     
-    this.center = { x, y, z };
+    let sumX = 0, sumY = 0, sumZ = 0;
+    for (const p of points) {
+      sumX += p.x;
+      sumY += p.y;
+      sumZ += p.z;
+    }
+    
+    return {
+      x: sumX / points.length,
+      y: sumY / points.length,
+      z: sumZ / points.length
+    };
   }
 
-  // ====================================================
-  // 球谐拟合（适配器）
-  // ====================================================
-
-  fitSphericalHarmonics(dependencies, options = {}) {
-    const context = {
-      pointVersion: this._surfacePointVersion,
-      order: options.order,
-      criterion: options.criterion ?? 'residual'
-    };
-
-    // 检查缓存
-    const cached = this._fitCache.get(context);
-    if (cached) return cached;
-
-    // 验证依赖
-    const { SphericalFitter, SphericalHarmonics, FittingCalculator, Matrix } = dependencies;
-    if (!SphericalFitter || !SphericalHarmonics || !FittingCalculator || !Matrix) {
-      throw new Error('Missing required dependencies for spherical harmonics fitting');
+  getBoundingBox() {
+    if (!this._boundingBoxDirty && this._boundingBox) {
+      return this._boundingBox;
     }
 
-    // 创建拟合器
-    const fitter = new SphericalFitter({
-      SphericalHarmonics,
-      FittingCalculator,
-      Matrix,
-      maxOrder: options.maxOrder ?? 10,
-      minOrder: options.minOrder ?? 2,
-      criterion: options.criterion ?? 'residual',
-      verbose: options.verbose ?? false
-    });
+    if (this.surfacePoints.length === 0) {
+      return { min: { x: 0, y: 0, z: 0 }, max: { x: 0, y: 0, z: 0 } };
+    }
 
-    // 执行拟合
-    const fitOptions = {
-      improvementThreshold: options.improvementThreshold ?? 0.02,
-      symmetry: options.symmetry ?? 'none',
-      optimizeRotation: options.optimizeRotation ?? false
+    let minX = Infinity, minY = Infinity, minZ = Infinity;
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+
+    for (const p of this.surfacePoints) {
+      if (p.x < minX) minX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.z < minZ) minZ = p.z;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y > maxY) maxY = p.y;
+      if (p.z > maxZ) maxZ = p.z;
+    }
+
+    this._boundingBox = {
+      min: { x: minX, y: minY, z: minZ },
+      max: { x: maxX, y: maxY, z: maxZ }
+    };
+    this._boundingBoxDirty = false;
+
+    return this._boundingBox;
+  }
+
+  // === 球谐拟合 ===
+  
+  /**
+   * 拟合球谐函数
+   * 
+   * ⭐ 增量拟合策略：
+   * - 使用 FittingCalculator.fitIncrementalSpherical
+   * - 自动复用 this._fitStack 中的状态
+   * - 只计算新增或变化的点
+   * 
+   * @param {Object} options - 拟合选项
+   * @param {Number} options.order - 球谐阶数（可选，不指定则自动确定）
+   * @param {Object} options.fitter - FittingCalculator 实例（必需）
+   * @param {Boolean} options.force - 是否强制重新拟合（忽略缓存）
+   * @param {Boolean} options.useIncremental - 是否使用增量拟合（默认 true）
+   * @returns {Object} 拟合结果
+   */
+  /**
+   * 拟合球谐函数
+   * 
+   * ⭐ 强制数据源：永远使用 this.controlPoints
+   * 
+   * 核心原则：
+   * - 控制点是形状拟合的 Source of Truth
+   * - 禁止使用 surfacePoints 进行拟合（除非朴素模式）
+   * - 增量拟合自动复用 _fitStack
+   * 
+   * @param {Object} options - 拟合选项
+   * @returns {Object} 拟合结果
+   */
+  fitSphericalHarmonics(options = {}) {
+    // ⭐ 数据验证：使用控制点而非表面点
+    if (this.controlPoints.length === 0) {
+      throw new Error('No control points to fit');
+    }
+
+    const context = {
+      pointVersion: this._controlPointVersion,  // ⭐ 使用控制点版本
+      order: options.order
     };
 
+    // 检查缓存（仅在非增量模式或强制模式下）
+    const useIncremental = options.useIncremental ?? true;
+    
+    if (!useIncremental && !options.force) {
+      const cached = this._fitCache.get(context);
+      if (cached) {
+        return cached;
+      }
+    }
+
+    const FittingCalculator = options.fitter;
+    if (!FittingCalculator) {
+      throw new Error('FittingCalculator (fitter) required in options');
+    }
+
+    // 创建或复用 FittingCalculator 实例
+    if (!this._fittingCalculator) {
+      this._fittingCalculator = new FittingCalculator({
+        Matrix: options.Matrix,
+        verbose: this.verbose
+      });
+      
+      // 缓存 Matrix 类引用（用于 updateControlPoint）
+      this._matrixClass = options.Matrix;
+    }
+
+    const fitter = this._fittingCalculator;
+
+    // 获取 SphericalHarmonics 实例
+    let sphericalHarmonics = options.sphericalHarmonics;
+    
+    // 如果没有提供，尝试从之前的表示中获取
+    if (!sphericalHarmonics && this.representation.data?.sphericalHarmonics) {
+      sphericalHarmonics = this.representation.data.sphericalHarmonics;
+    }
+    
+    // 如果还没有，需要创建
+    if (!sphericalHarmonics) {
+      throw new Error('SphericalHarmonics instance required in options or previous representation');
+    }
+
+    const order = options.order ?? 3;  // 默认阶数 3
+
+    // ⭐ 计算中心：使用控制点
+    const center = this._computeCenter(this.controlPoints);
+
     let result;
-    if (options.order !== undefined) {
-      result = fitter.fit(this.surfacePoints, options.order, this.center, fitOptions);
+
+    // ⭐ 使用增量拟合（基于控制点）
+    if (useIncremental) {
+      try {
+        result = fitter.fitIncrementalSpherical(
+          this.controlPoints,  // ⭐ 强制使用控制点
+          this._fitStack,      // ⭐ 状态栈会被自动更新
+          center,
+          {
+            order,
+            sphericalHarmonics,
+            verbose: this.verbose
+          }
+        );
+
+        if (this.verbose) {
+          console.log(`[Object] Incremental fit: ${result.metadata.extensionsPerformed} extensions, fitStack size: ${this._fitStack.length}`);
+        }
+      } catch (err) {
+        console.error('[Object] Incremental fit failed, falling back to full fit:', err.message);
+        
+        // 清空状态栈，回退到完整拟合
+        this._fitStack = [];
+        
+        // 使用传统的 fit 方法（如果 fitter 支持）
+        if (typeof fitter.fit === 'function') {
+          result = fitter.fit(this.controlPoints, order, center, {});  // ⭐ 使用控制点
+        } else {
+          throw err;
+        }
+      }
     } else {
-      result = fitter.autoFit(this.surfacePoints, this.center, fitOptions);
+      // 传统拟合模式
+      if (typeof fitter.fit === 'function') {
+        result = fitter.fit(this.controlPoints, order, center, {});  // ⭐ 使用控制点
+      } else {
+        throw new Error('FittingCalculator does not support non-incremental fit');
+      }
     }
 
     // 更新表示
@@ -393,15 +667,18 @@ export class Object {
       isClosed: true,
       data: {
         coefficients: result.coefficients,
-        order: result.order,
-        sphericalHarmonics: result.sphericalHarmonics
+        order: result.order || order,
+        sphericalHarmonics: sphericalHarmonics
       },
+      physicsState: this.representation.physicsState,
       topology: {
         triangles: [],
         edges: [],
+        internalEdges: [],
         adjacency: null,
         degree: null
       },
+      editState: null,
       geometryCache: {
         volume: null,
         surfaceArea: null,
@@ -414,178 +691,130 @@ export class Object {
       metadata: {
         residual: result.residual,
         condition: result.condition,
-        pointCount: result.pointCount
+        pointCount: result.metadata?.pointCount || this.surfacePoints.length,
+        fitMethod: useIncremental ? 'incremental' : 'full',
+        stateStackSize: this._fitStack.length
       }
     };
 
-    // 写入缓存
-    this._fitCache.set(context, result);
+    // 更新中心
+    this.center = center;
+
+    // 拟合后进入编辑态（不可物理）
+    this.mode = 'parametric';
+    
+    // ⚠️ 中心改变，所有粒子上的 _sphericalCoords 失效
+    this._centerVersion++;
+
+    // 缓存结果（仅在非增量模式下）
+    if (!useIncremental) {
+      this._fitCache.set(context, result);
+    }
 
     return result;
   }
 
-  // ====================================================
-  // ⭐ 几何量计算（转发接口 - 核心重构）
-  // ====================================================
-
-  /**
-   * 获取体积
-   * @param {Object} options - 计算选项（传递给球谐类）
-   * @returns {number}
-   */
+  // === 几何量计算 ===
+  
   getVolume(options = {}) {
     if (this.representation.type !== 'sphericalHarmonics') {
-      throw new Error('Volume computation requires spherical harmonics representation');
+      throw new Error('Volume requires spherical harmonics');
     }
 
-    // 检查缓存
     if (this.representation.geometryCache.volume !== null) {
       return this.representation.geometryCache.volume;
     }
 
-    // 委托给球谐类计算
     const { coefficients, sphericalHarmonics } = this.representation.data;
-    const volume = sphericalHarmonics.computeVolume(
-      coefficients,
-      this.center,
-      options
-    );
-
-    // 缓存结果
+    const volume = sphericalHarmonics.computeVolume(coefficients, this.center, options);
     this.representation.geometryCache.volume = volume;
-
     return volume;
   }
 
-  /**
-   * 获取表面积
-   * @param {Object} options - 计算选项（传递给球谐类）
-   * @returns {number}
-   */
   getSurfaceArea(options = {}) {
     if (this.representation.type !== 'sphericalHarmonics') {
-      throw new Error('Surface area computation requires spherical harmonics representation');
+      throw new Error('Surface area requires spherical harmonics');
     }
 
-    // 检查缓存
     if (this.representation.geometryCache.surfaceArea !== null) {
       return this.representation.geometryCache.surfaceArea;
     }
 
-    // 委托给球谐类计算
     const { coefficients, sphericalHarmonics } = this.representation.data;
-    const area = sphericalHarmonics.computeSurfaceArea(
-      coefficients,
-      this.center,
-      options
-    );
-
-    // 缓存结果
+    const area = sphericalHarmonics.computeSurfaceArea(coefficients, this.center, options);
     this.representation.geometryCache.surfaceArea = area;
-
     return area;
   }
 
-  /**
-   * 获取任意平面截面
-   * @param {Object} plane - {normal: {x,y,z}, point: {x,y,z}}
-   * @param {Object} options - 计算选项（传递给球谐类）
-   * @returns {Object} - {perimeter, area, points}
-   */
   getSection(plane, options = {}) {
     if (this.representation.type !== 'sphericalHarmonics') {
-      throw new Error('Section computation requires spherical harmonics representation');
+      throw new Error('Section requires spherical harmonics');
     }
 
-    // 缓存键（基于平面参数）
     const planeKey = this._makePlaneKey(plane);
     
-    // 检查缓存
     if (this.representation.geometryCache.sections.has(planeKey)) {
       return this.representation.geometryCache.sections.get(planeKey);
     }
 
-    // 委托给球谐类计算
     const { coefficients, sphericalHarmonics } = this.representation.data;
-    const section = sphericalHarmonics.computeSection(
-      coefficients,
-      this.center,
-      plane,
-      options
-    );
-
-    // 缓存结果
+    const section = sphericalHarmonics.computeSection(coefficients, this.center, plane, options);
     this.representation.geometryCache.sections.set(planeKey, section);
-
     return section;
   }
 
-  /**
-   * 生成平面缓存键
-   * @private
-   */
   _makePlaneKey(plane) {
     const precision = 1000;
     return `${Math.round(plane.normal.x * precision)},${Math.round(plane.normal.y * precision)},${Math.round(plane.normal.z * precision)}:${Math.round(plane.point.x * precision)},${Math.round(plane.point.y * precision)},${Math.round(plane.point.z * precision)}`;
   }
 
-  /**
-   * 清空几何量缓存
-   */
   clearGeometryCache() {
     this.representation.geometryCache.volume = null;
     this.representation.geometryCache.surfaceArea = null;
     this.representation.geometryCache.sections.clear();
   }
 
-  // ====================================================
-  // ⭐ 布料系统（阶段 1: 编辑态）
-  // ====================================================
-
-  /**
-   * ⭐ 初始化布料编辑态
-   * 
-   * @param {Object} options
-   *   - width: 布料宽度
-   *   - height: 布料高度
-   *   - rows: UV 行数
-   *   - cols: UV 列数
-   *   - shape: 'rectangle' | 'circle'
-   */
+  // === 布料系统 ===
+  
   initClothEditState(options = {}) {
     const width = options.width ?? 1.0;
     const height = options.height ?? 1.0;
     const rows = options.rows ?? 20;
     const cols = options.cols ?? 20;
     const shape = options.shape ?? 'rectangle';
-    
-    // ⭐ 物理模式（PBD 或 Force）
     const physicsModel = options.physicsModel ?? 'pbd';
+    
     this.physics.model = physicsModel;
     
-    // 生成 2D 控制点（展平态）
-    const controlPoints = this._generateClothControlPoints(
-      width, height, rows, cols, shape
-    );
+    const controlPoints = this._generateClothControlPoints(width, height, rows, cols, shape);
     
-    // 更新表示
     this.representation = {
       type: 'cloth',
       isClosed: false,
+      data: null,
       
       editState: {
         controlPoints,
         uvGrid: { rows, cols, width, height },
         shape,
         constraints: [],
-        preview: null  // ⭐ 预览网格（初始为空）
+        preview: null
       },
       
-      physicsState: null,
+      physicsState: {
+        physicsModel,
+        particles: [],
+        constraints: [],
+        surfaceStartIndex: 0,
+        internalStartIndex: 0,
+        surfaceCount: 0,
+        internalCount: 0
+      },
       
       topology: {
         triangles: [],
         edges: [],
+        internalEdges: [],
         adjacency: null,
         degree: null
       },
@@ -607,22 +836,12 @@ export class Object {
     };
     
     this.controlPoints = controlPoints;
-    
-    // ⭐ 修正：立即生成初始预览网格
     this._rebuildEditStatePreview();
-    
     this._onSurfacePointsChanged();
     
-    return { 
-      controlPoints: controlPoints.length, 
-      uvGrid: { rows, cols } 
-    };
+    return { controlPoints: controlPoints.length, uvGrid: { rows, cols } };
   }
 
-  /**
-   * 生成布料控制点（2D）
-   * @private
-   */
   _generateClothControlPoints(width, height, rows, cols, shape) {
     const points = [];
     
@@ -631,12 +850,7 @@ export class Object {
         for (let j = 0; j <= cols; j++) {
           const u = j / cols;
           const v = i / rows;
-          
-          points.push(new Point(
-            (u - 0.5) * width,
-            (v - 0.5) * height,
-            0
-          ));
+          points.push(new Point((u - 0.5) * width, (v - 0.5) * height, 0));
         }
       }
     } else if (shape === 'circle') {
@@ -648,15 +862,9 @@ export class Object {
         for (let j = 0; j <= cols; j++) {
           const u = j / cols;
           const v = i / rows;
-          
           const theta = u * Math.PI * 2;
           const r = v * radius;
-          
-          points.push(new Point(
-            centerX + r * Math.cos(theta),
-            centerY + r * Math.sin(theta),
-            0
-          ));
+          points.push(new Point(centerX + r * Math.cos(theta), centerY + r * Math.sin(theta), 0));
         }
       }
     }
@@ -664,11 +872,6 @@ export class Object {
     return points;
   }
 
-  /**
-   * 更新布料控制点（编辑态）
-   * 
-   * ⭐ 修正：添加实时预览三角网
-   */
   updateClothControlPoint(index, x, y, z = 0) {
     if (this.representation.type !== 'cloth') {
       throw new Error('Not a cloth object');
@@ -682,24 +885,11 @@ export class Object {
       this.controlPoints[index].x = x;
       this.controlPoints[index].y = y;
       this.controlPoints[index].z = z;
-      
-      // ⭐ 修正：重建编辑态预览三角网
       this._rebuildEditStatePreview();
-      
       this._onControlPointsChanged();
     }
   }
 
-  /**
-   * ⭐ 新增：重建编辑态预览三角网
-   * 
-   * 功能：
-   * - 用户移动控制点后，立即重建三角网用于视觉预览
-   * - 不生成物理约束（仍在编辑态）
-   * - 不切换到物理态
-   * 
-   * @private
-   */
   _rebuildEditStatePreview() {
     if (this.representation.type !== 'cloth') return;
     if (this.representation.metadata.state !== 'edit') return;
@@ -707,14 +897,8 @@ export class Object {
     const { uvGrid } = this.representation.editState;
     const { rows, cols } = uvGrid;
     
-    // 1. 基于控制点生成预览顶点
-    const previewVertices = this.controlPoints.map(cp => ({
-      x: cp.x,
-      y: cp.y,
-      z: cp.z
-    }));
+    const previewVertices = this.controlPoints.map(cp => ({ x: cp.x, y: cp.y, z: cp.z }));
     
-    // 2. 生成预览三角面
     const previewFaces = [];
     for (let i = 0; i < rows; i++) {
       for (let j = 0; j < cols; j++) {
@@ -724,87 +908,101 @@ export class Object {
       }
     }
     
-    // 3. 生成预览边（用于线框渲染）
     const previewEdges = new Set();
     for (const [a, b, c] of previewFaces) {
       const e1 = [Math.min(a, b), Math.max(a, b)];
       const e2 = [Math.min(b, c), Math.max(b, c)];
       const e3 = [Math.min(a, c), Math.max(a, c)];
-      
       previewEdges.add(`${e1[0]}-${e1[1]}`);
       previewEdges.add(`${e2[0]}-${e2[1]}`);
       previewEdges.add(`${e3[0]}-${e3[1]}`);
     }
     
-    // 4. 存储预览数据（不影响物理态）
     this.representation.editState.preview = {
       vertices: previewVertices,
       faces: previewFaces,
       edges: Array.from(previewEdges).map(e => e.split('-').map(Number))
     };
-    
-    // 注意：不更新 surfacePoints（编辑态不使用）
-    // 注意：不生成约束（仍在编辑态）
-    // 注意：不切换状态（仍为 'edit'）
   }
 
-  // ====================================================
-  // ⭐ 线形态系统（一维）
-  // ====================================================
-
-  /**
-   * ⭐ 初始化线形态
-   * 
-   * 特点：
-   * - 一维结构（只有边，无三角面）
-   * - 使用 surfacePoints 表示离散点
-   * - topology 仅包含 edges
-   * - 物理约束：distance + bending
-   * - 复用 getPhysicsView / fixPoint / collider
-   * 
-   * @param {Object} options
-   *   - points: Point[] - 初始点数组
-   *   - segments: number - 段数（如果不提供 points）
-   *   - length: number - 总长度（如果不提供 points）
-   *   - shape: 'straight' | 'circle' | 'spiral'
-   */
+  // === 线系统 ===
+  
   initLineState(options = {}) {
     let points;
     
     if (options.points) {
-      // 使用用户提供的点
       points = options.points.map(p => this._normalizePoint(p));
     } else {
-      // 生成线形点
       const segments = options.segments ?? 20;
       const length = options.length ?? 1.0;
       const shape = options.shape ?? 'straight';
-      
       points = this._generateLinePoints(segments, length, shape);
     }
     
-    // 生成拓扑（仅边）
+    const physicsModel = options.physicsModel ?? this.physics.model ?? 'pbd';
+    this.physics.model = physicsModel;
+    
     const edges = [];
     for (let i = 0; i < points.length - 1; i++) {
       edges.push([i, i + 1]);
     }
     
-    // 闭合线（可选）
     if (options.closed) {
       edges.push([points.length - 1, 0]);
     }
     
-    // 更新表示
+    this.surfacePoints = points;
+    
+    const globalMassScale = this.physics.mass || 1.0;
+    const uniformMass = globalMassScale / points.length;
+    
+    const particles = points.map((point, index) => {
+      if (!point._physicsData) {
+        point._physicsData = {
+          position: { x: point.x, y: point.y, z: point.z },
+          prevPosition: { x: point.x, y: point.y, z: point.z },
+          velocity: { x: 0, y: 0, z: 0 },
+          fixed: false
+        };
+      }
+      
+      return {
+        position: point._physicsData.position,
+        prevPosition: point._physicsData.prevPosition,
+        velocity: point._physicsData.velocity,
+        mass: uniformMass,
+        invMass: uniformMass > 0 ? 1 / uniformMass : 0,
+        fixed: false,
+        _index: index
+      };
+    });
+    
+    const constraints = this._buildLineConstraintsFromEdges(edges, physicsModel);
+    
     this.representation = {
       type: 'line',
       isClosed: options.closed ?? false,
+      data: null,
+      
+      physicsState: {
+        physicsModel,
+        particles,
+        constraints,
+        surfaceStartIndex: 0,
+        internalStartIndex: particles.length,
+        surfaceCount: particles.length,
+        internalCount: 0
+      },
       
       topology: {
-        triangles: [],  // 线没有三角面
+        triangles: [],
         edges,
+        internalEdges: [],
         adjacency: this._buildLineAdjacency(edges, points.length),
         degree: null
       },
+      
+      editState: null,
       
       geometryCache: {
         volume: null,
@@ -818,69 +1016,53 @@ export class Object {
       },
       
       metadata: {
-        state: 'physics'  // 线直接进入物理态
+        state: 'physics'
       }
     };
     
-    this.surfacePoints = points;
     this._onSurfacePointsChanged();
     
     return {
       points: points.length,
-      edges: edges.length
+      edges: edges.length,
+      constraints: constraints.length
     };
   }
 
-  /**
-   * 生成线形点
-   * @private
-   */
   _generateLinePoints(segments, length, shape) {
     const points = [];
     
     if (shape === 'straight') {
-      // 直线
       for (let i = 0; i <= segments; i++) {
         const t = i / segments;
-        points.push(new Point(
-          t * length - length / 2,
-          0,
-          0
-        ));
+        points.push(new Point(t * length - length / 2, 0, 0));
       }
     } else if (shape === 'circle') {
-      // 圆形
       const radius = length / (2 * Math.PI);
       for (let i = 0; i <= segments; i++) {
         const theta = (i / segments) * 2 * Math.PI;
-        points.push(new Point(
-          radius * Math.cos(theta),
-          radius * Math.sin(theta),
-          0
-        ));
+        points.push(new Point(radius * Math.cos(theta), radius * Math.sin(theta), 0));
       }
     } else if (shape === 'spiral') {
-      // 螺旋
       const radius = 0.5;
       const height = length;
       for (let i = 0; i <= segments; i++) {
         const t = i / segments;
         const theta = t * 4 * Math.PI;
-        points.push(new Point(
-          radius * Math.cos(theta),
-          radius * Math.sin(theta),
-          t * height - height / 2
-        ));
+        points.push(new Point(radius * Math.cos(theta), radius * Math.sin(theta), t * height - height / 2));
       }
     }
     
     return points;
   }
 
-  /**
-   * 构建线的邻接关系
-   * @private
-   */
+  _normalizePoint(p) {
+    if (p instanceof Point) {
+      return p;
+    }
+    return new Point(p.x ?? 0, p.y ?? 0, p.z ?? 0);
+  }
+
   _buildLineAdjacency(edges, vertexCount) {
     const adjacency = new Map();
     
@@ -896,22 +1078,9 @@ export class Object {
     return adjacency;
   }
 
-  /**
-   * 构建线的约束
-   * @private
-   */
-  _buildLineConstraints() {
+  _buildLineConstraintsFromEdges(edges, physicsModel) {
     const constraints = [];
-    const { edges } = this.representation.topology;
     
-    // ⭐⭐⭐ 约束生成规范声明 ⭐⭐⭐
-    // 根据 physics.model 生成不同类型的约束：
-    // - 'pbd': 生成 type === 'distance'（PBD/XPBD 几何约束）
-    // - 'force': 生成 type === 'spring'（MSS 力学弹簧）
-    
-    const physicsModel = this.physics.model || 'pbd';
-    
-    // 1. 距离约束（沿线）
     for (const [i, j] of edges) {
       const p1 = this.surfacePoints[i];
       const p2 = this.surfacePoints[j];
@@ -921,7 +1090,6 @@ export class Object {
       const dz = p2.z - p1.z;
       const restLength = Math.sqrt(dx * dx + dy * dy + dz * dz);
       
-      // ⭐ 获取材料属性
       let avgStiffness = 1000;
       let avgDamping = 10;
       
@@ -932,54 +1100,99 @@ export class Object {
         avgDamping = (mat1.damping + mat2.damping) / 2;
       }
       
-      // ⭐ 根据物理模式生成约束
       if (physicsModel === 'pbd') {
-        // ✅ PBD 模式
         const compliance = avgStiffness > 0 ? 1 / avgStiffness : 0;
-        
         constraints.push({
-          type: 'distance',           // ⭐ PBD 几何约束
-          i, j,                       // ⭐ 主索引
-          particles: [i, j],          // 📋 辅助字段
+          type: 'distance',
+          i, j,
+          particles: [i, j],
           restLength,
           distance: restLength,
-          edgeType: 'structural',     // ⭐ 元数据
-          compliance                  // ⭐ XPBD 柔度
-          // ❌ 禁止：stiffness, damping
+          edgeType: 'structural',
+          compliance
         });
       } else if (physicsModel === 'force') {
-        // ✅ Force 模式
         constraints.push({
-          type: 'spring',             // ⭐ MSS 力学弹簧
+          type: 'spring',
           i, j,
           particles: [i, j],
           restLength,
           edgeType: 'structural',
-          stiffness: avgStiffness,    // ⭐ 弹簧刚度
-          damping: avgDamping         // ⭐ 弹簧阻尼
-          // ❌ 禁止：compliance
+          stiffness: avgStiffness,
+          damping: avgDamping
         });
       }
     }
     
-    // 2. 弯曲约束（三点共线）
-    // 对于线，弯曲约束是三个连续点
+    const tempTopology = this.representation.topology;
+    this.representation.topology = { edges };
+    const allConstraints = this._buildLineConstraints();
+    this.representation.topology = tempTopology;
+    
+    for (const c of allConstraints) {
+      if (c.type === 'line_bending' || (c.type === 'spring' && c.edgeType === 'bending')) {
+        constraints.push(c);
+      }
+    }
+    
+    return constraints;
+  }
+
+  _buildLineConstraints() {
+    const constraints = [];
+    const { edges } = this.representation.topology;
+    const physicsModel = this.physics.model || 'pbd';
+    
+    for (const [i, j] of edges) {
+      const p1 = this.surfacePoints[i];
+      const p2 = this.surfacePoints[j];
+      
+      const dx = p2.x - p1.x;
+      const dy = p2.y - p1.y;
+      const dz = p2.z - p1.z;
+      const restLength = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      
+      let avgStiffness = 1000;
+      let avgDamping = 10;
+      
+      if (!this.representation.material.uniform) {
+        const mat1 = this.getMaterialAt(p1);
+        const mat2 = this.getMaterialAt(p2);
+        avgStiffness = (mat1.stiffness + mat2.stiffness) / 2;
+        avgDamping = (mat1.damping + mat2.damping) / 2;
+      }
+      
+      if (physicsModel === 'pbd') {
+        const compliance = avgStiffness > 0 ? 1 / avgStiffness : 0;
+        constraints.push({
+          type: 'distance',
+          i, j,
+          particles: [i, j],
+          restLength,
+          distance: restLength,
+          edgeType: 'structural',
+          compliance
+        });
+      } else if (physicsModel === 'force') {
+        constraints.push({
+          type: 'spring',
+          i, j,
+          particles: [i, j],
+          restLength,
+          edgeType: 'structural',
+          stiffness: avgStiffness,
+          damping: avgDamping
+        });
+      }
+    }
+    
     for (let i = 0; i < this.surfacePoints.length - 2; i++) {
       const p0 = this.surfacePoints[i];
       const p1 = this.surfacePoints[i + 1];
       const p2 = this.surfacePoints[i + 2];
       
-      // 初始角度
-      const v1 = {
-        x: p1.x - p0.x,
-        y: p1.y - p0.y,
-        z: p1.z - p0.z
-      };
-      const v2 = {
-        x: p2.x - p1.x,
-        y: p2.y - p1.y,
-        z: p2.z - p1.z
-      };
+      const v1 = { x: p1.x - p0.x, y: p1.y - p0.y, z: p1.z - p0.z };
+      const v2 = { x: p2.x - p1.x, y: p2.y - p1.y, z: p2.z - p1.z };
       
       const mag1 = Math.sqrt(v1.x * v1.x + v1.y * v1.y + v1.z * v1.z);
       const mag2 = Math.sqrt(v2.x * v2.x + v2.y * v2.y + v2.z * v2.z);
@@ -988,19 +1201,14 @@ export class Object {
         const dot = (v1.x * v2.x + v1.y * v2.y + v1.z * v2.z) / (mag1 * mag2);
         const restAngle = Math.acos(Math.max(-1, Math.min(1, dot)));
         
-        // ⭐ 根据物理模式生成弯曲约束
         if (physicsModel === 'pbd') {
-          // ✅ PBD 模式：使用 line_bending 约束
           constraints.push({
-            type: 'line_bending',       // ⭐ PBD 线弯曲约束
+            type: 'line_bending',
             particles: [i, i + 1, i + 2],
             restAngle,
-            compliance: 0.05            // ⭐ 线弯曲通常较软
-            // ❌ 禁止：stiffness
+            compliance: 0.05
           });
         } else if (physicsModel === 'force') {
-          // ✅ Force 模式：用软弹簧模拟弯曲
-          // 连接 p0 和 p2（跳过中间点）
           const dx = p2.x - p0.x;
           const dy = p2.y - p0.y;
           const dz = p2.z - p0.z;
@@ -1012,33 +1220,23 @@ export class Object {
             particles: [i, i + 2],
             restLength: bendRestLength,
             edgeType: 'bending',
-            stiffness: 50,              // ⭐ 弯曲弹簧较软
+            stiffness: 50,
             damping: 5
           });
         }
       }
     }
     
-    // 3. 闭合线：添加首尾弯曲约束
     if (this.representation.isClosed && this.surfacePoints.length > 2) {
       const n = this.surfacePoints.length;
       
-      // ⭐ 首尾弯曲约束 1：倒数第二、最后、第一个点
       {
         const p0 = this.surfacePoints[n - 2];
         const p1 = this.surfacePoints[n - 1];
         const p2 = this.surfacePoints[0];
         
-        const v1 = {
-          x: p1.x - p0.x,
-          y: p1.y - p0.y,
-          z: p1.z - p0.z
-        };
-        const v2 = {
-          x: p2.x - p1.x,
-          y: p2.y - p1.y,
-          z: p2.z - p1.z
-        };
+        const v1 = { x: p1.x - p0.x, y: p1.y - p0.y, z: p1.z - p0.z };
+        const v2 = { x: p2.x - p1.x, y: p2.y - p1.y, z: p2.z - p1.z };
         
         const mag1 = Math.sqrt(v1.x * v1.x + v1.y * v1.y + v1.z * v1.z);
         const mag2 = Math.sqrt(v2.x * v2.x + v2.y * v2.y + v2.z * v2.z);
@@ -1073,41 +1271,32 @@ export class Object {
         }
       }
       
-      // ⭐ 首尾弯曲约束 2：最后、第一、第二个点
       {
-        const p1 = this.surfacePoints[n - 1];
-        const p2 = this.surfacePoints[0];
-        const p3 = this.surfacePoints[1];
+        const p0 = this.surfacePoints[n - 1];
+        const p1 = this.surfacePoints[0];
+        const p2 = this.surfacePoints[1];
         
-        const v3 = {
-          x: p2.x - p1.x,
-          y: p2.y - p1.y,
-          z: p2.z - p1.z
-        };
-        const v4 = {
-          x: p3.x - p2.x,
-          y: p3.y - p2.y,
-          z: p3.z - p2.z
-        };
+        const v1 = { x: p1.x - p0.x, y: p1.y - p0.y, z: p1.z - p0.z };
+        const v2 = { x: p2.x - p1.x, y: p2.y - p1.y, z: p2.z - p1.z };
         
-        const mag3 = Math.sqrt(v3.x * v3.x + v3.y * v3.y + v3.z * v3.z);
-        const mag4 = Math.sqrt(v4.x * v4.x + v4.y * v4.y + v4.z * v4.z);
+        const mag1 = Math.sqrt(v1.x * v1.x + v1.y * v1.y + v1.z * v1.z);
+        const mag2 = Math.sqrt(v2.x * v2.x + v2.y * v2.y + v2.z * v2.z);
         
-        if (mag3 > 1e-6 && mag4 > 1e-6) {
-          const dot2 = (v3.x * v4.x + v3.y * v4.y + v3.z * v4.z) / (mag3 * mag4);
-          const restAngle2 = Math.acos(Math.max(-1, Math.min(1, dot2)));
+        if (mag1 > 1e-6 && mag2 > 1e-6) {
+          const dot = (v1.x * v2.x + v1.y * v2.y + v1.z * v2.z) / (mag1 * mag2);
+          const restAngle = Math.acos(Math.max(-1, Math.min(1, dot)));
           
           if (physicsModel === 'pbd') {
             constraints.push({
               type: 'line_bending',
               particles: [n - 1, 0, 1],
-              restAngle: restAngle2,
+              restAngle,
               compliance: 0.05
             });
           } else if (physicsModel === 'force') {
-            const dx = p3.x - p1.x;
-            const dy = p3.y - p1.y;
-            const dz = p3.z - p1.z;
+            const dx = p2.x - p0.x;
+            const dy = p2.y - p0.y;
+            const dz = p2.z - p0.z;
             const bendRestLength = Math.sqrt(dx * dx + dy * dy + dz * dz);
             
             constraints.push({
@@ -1127,27 +1316,8 @@ export class Object {
     return constraints;
   }
 
-  /**
-   * 添加布料约束（编辑态）
-   */
-  addClothConstraint(constraint) {
-    if (this.representation.type !== 'cloth') {
-      throw new Error('Not a cloth object');
-    }
-    
-    this.representation.editState.constraints.push(constraint);
-  }
-
-  // ====================================================
-  // ⭐ 布料系统（阶段 2: 生成物理态）
-  // ====================================================
-
-  /**
-   * ⭐ 从编辑态生成物理态
-   * 
-   * @param {Object} options
-   *   - initialPosition: 'flat' | 'custom'
-   */
+  // === 布料物理态生成 ===
+  
   generateClothPhysicsState(options = {}) {
     if (this.representation.type !== 'cloth') {
       throw new Error('Not a cloth object');
@@ -1160,61 +1330,80 @@ export class Object {
     const { controlPoints, uvGrid } = this.representation.editState;
     const { rows, cols } = uvGrid;
     
-    // 1. 生成 3D 顶点
-    const vertices = controlPoints.map(cp => ({
-      x: cp.x,
-      y: cp.y,
-      z: cp.z
-    }));
+    const vertices = controlPoints.map(cp => ({ x: cp.x, y: cp.y, z: cp.z }));
     
-    // 2. 构建三角面
     const faces = [];
     for (let i = 0; i < rows; i++) {
       for (let j = 0; j < cols; j++) {
         const idx = i * (cols + 1) + j;
-        
-        // 每个四边形 → 两个三角形
         faces.push([idx, idx + 1, idx + cols + 2]);
         faces.push([idx, idx + cols + 2, idx + cols + 1]);
       }
     }
     
-    // 3. 构建拓扑
     const topology = this._buildClothTopology(faces, vertices.length);
     
-    // 4. 生成 UV 坐标
     const uvCoords = [];
     for (let i = 0; i <= rows; i++) {
       for (let j = 0; j <= cols; j++) {
-        uvCoords.push({
-          u: j / cols,
-          v: i / rows
-        });
+        uvCoords.push({ u: j / cols, v: i / rows });
       }
     }
     
-    // 5. 转换为 surfacePoints
-    this.surfacePoints = vertices.map(v => 
-      new Point(v.x, v.y, v.z)
-    );
+    this.surfacePoints = vertices.map(v => new Point(v.x, v.y, v.z));
     
-    // 6. ⭐ 修正：在这里生成约束（只生成一次）
+    const globalMassScale = this.physics.mass || 1.0;
+    const totalPointCount = this.surfacePoints.length;
+    const surfaceMass = globalMassScale / totalPointCount;
+    
+    const particles = this.surfacePoints.map((point, index) => {
+      if (!point._physicsData) {
+        point._physicsData = {
+          position: { x: point.x, y: point.y, z: point.z },
+          prevPosition: { x: point.x, y: point.y, z: point.z },
+          velocity: { x: 0, y: 0, z: 0 },
+          fixed: false
+        };
+      }
+      
+      let particleMass = surfaceMass;
+      if (!this.representation.material.uniform && this.representation.material.properties) {
+        const mat = this.getMaterialAt(point);
+        if (mat && mat.mass !== undefined) {
+          particleMass = mat.mass * globalMassScale / totalPointCount;
+        }
+      }
+      
+      return {
+        position: point._physicsData.position,
+        prevPosition: point._physicsData.prevPosition,
+        velocity: point._physicsData.velocity,
+        mass: particleMass,
+        invMass: particleMass > 0 ? 1 / particleMass : 0,
+        fixed: false,
+        _index: index,
+        _type: 'surface'
+      };
+    });
+    
     const constraints = this._buildClothConstraints();
     
-    // 7. 更新表示
     this.representation.physicsState = {
+      physicsModel: this.physics.model || 'pbd',
+      particles,
+      constraints,
+      surfaceStartIndex: 0,
+      internalStartIndex: particles.length,
+      surfaceCount: particles.length,
+      internalCount: 0,
       vertices,
       faces,
-      uvCoords,
-      constraints  // ⭐ 缓存约束
+      uvCoords
     };
     
     this.representation.topology = topology;
-    
-    // 8. 切换到物理态
     this.representation.metadata.state = 'physics';
     
-    // 手动维护状态
     this._surfacePointVersion++;
     this._boundingBoxDirty = true;
     this.metadata.modified = Date.now();
@@ -1223,14 +1412,11 @@ export class Object {
       vertices: vertices.length,
       faces: faces.length,
       constraints: constraints.length,
-      topology
+      topology,
+      mode: this.mode
     };
   }
 
-  /**
-   * 构建布料拓扑
-   * @private
-   */
   _buildClothTopology(faces, vertexCount) {
     const edges = new Set();
     const adjacency = new Map();
@@ -1259,32 +1445,17 @@ export class Object {
     return {
       triangles: faces,
       edges: Array.from(edges).map(e => e.split('-').map(Number)),
+      internalEdges: [],
       adjacency,
       degree: Array.from(adjacency.values()).map(n => n.length)
     };
   }
 
-  // ====================================================
-  // ⭐ 布料系统（阶段 3: 约束增强）
-  // ====================================================
-
-  /**
-   * 构建布料约束（距离 + 弯曲）
-   * @private
-   */
   _buildClothConstraints() {
     const constraints = [];
-    
     const { edges, triangles } = this.representation.topology;
-    
-    // ⭐⭐⭐ 约束生成规范声明 ⭐⭐⭐
-    // 根据 physics.model 生成不同类型的约束：
-    // - 'pbd': 生成 type === 'distance'（PBD/XPBD 几何约束）
-    // - 'force': 生成 type === 'spring'（MSS 力学弹簧）
-    
     const physicsModel = this.physics.model || 'pbd';
     
-    // 1. 结构边约束
     for (const [i, j] of edges) {
       const p1 = this.surfacePoints[i];
       const p2 = this.surfacePoints[j];
@@ -1294,7 +1465,6 @@ export class Object {
       const dz = p2.z - p1.z;
       const restLength = Math.sqrt(dx * dx + dy * dy + dz * dz);
       
-      // ⭐ 获取材料属性
       let avgStiffness = 1000;
       let avgDamping = 10;
       
@@ -1305,37 +1475,30 @@ export class Object {
         avgDamping = (mat1.damping + mat2.damping) / 2;
       }
       
-      // ⭐ 根据物理模式生成约束
       if (physicsModel === 'pbd') {
-        // ✅ PBD 模式
         const compliance = avgStiffness > 0 ? 1 / avgStiffness : 0;
-        
         constraints.push({
-          type: 'distance',           // ⭐ PBD 几何约束
-          i, j,                       // ⭐ 主索引
-          particles: [i, j],          // 📋 辅助字段
-          restLength,
-          distance: restLength,
-          edgeType: 'structural',     // ⭐ 元数据
-          compliance                  // ⭐ XPBD 柔度
-          // ❌ 禁止：stiffness, damping
-        });
-      } else if (physicsModel === 'force') {
-        // ✅ Force 模式
-        constraints.push({
-          type: 'spring',             // ⭐ MSS 力学弹簧
+          type: 'distance',
           i, j,
           particles: [i, j],
           restLength,
-          edgeType: 'structural',     // ⭐ 元数据（可用于调试）
-          stiffness: avgStiffness,    // ⭐ 弹簧刚度
-          damping: avgDamping         // ⭐ 弹簧阻尼
-          // ❌ 禁止：compliance
+          distance: restLength,
+          edgeType: 'structural',
+          compliance
+        });
+      } else if (physicsModel === 'force') {
+        constraints.push({
+          type: 'spring',
+          i, j,
+          particles: [i, j],
+          restLength,
+          edgeType: 'structural',
+          stiffness: avgStiffness,
+          damping: avgDamping
         });
       }
     }
     
-    // 2. 弯曲约束
     const processedEdges = new Set();
     
     for (const tri1 of triangles) {
@@ -1362,18 +1525,14 @@ export class Object {
                 this.surfacePoints[d]
               );
               
-              // ⭐ 弯曲约束：通常使用 PBD（更稳定）
-              // 注意：Force 模式不支持 bending 类型
               if (physicsModel === 'pbd') {
                 constraints.push({
-                  type: 'bending',        // ⭐ PBD 弯曲约束
+                  type: 'bending',
                   particles: [a, b, c, d],
                   restAngle: initialAngle,
-                  compliance: 0.1         // ⭐ 弯曲通常更软
+                  compliance: 0.1
                 });
               } else {
-                // Force 模式：可以用软弹簧模拟弯曲
-                // 连接对角顶点 c-d
                 const pc = this.surfacePoints[c];
                 const pd = this.surfacePoints[d];
                 const dx = pd.x - pc.x;
@@ -1387,7 +1546,7 @@ export class Object {
                   particles: [c, d],
                   restLength: bendRestLength,
                   edgeType: 'bending',
-                  stiffness: 100,         // ⭐ 弯曲弹簧较软
+                  stiffness: 100,
                   damping: 5
                 });
               }
@@ -1399,17 +1558,9 @@ export class Object {
       }
     }
     
-    // 3. ⭐ 修正：不在约束生成中调用 fixPoint
-    // 固定点约束作为标记返回，在 getPhysicsView() 中统一解析
-    // 这样保持约束生成函数为纯函数
-    
     return constraints;
   }
 
-  /**
-   * 计算二面角
-   * @private
-   */
   _computeDihedralAngle(pa, pb, pc, pd) {
     const ab = { x: pb.x - pa.x, y: pb.y - pa.y, z: pb.z - pa.z };
     const ac = { x: pc.x - pa.x, y: pc.y - pa.y, z: pc.z - pa.z };
@@ -1430,10 +1581,6 @@ export class Object {
     return Math.acos(Math.max(-1, Math.min(1, dot)));
   }
 
-  /**
-   * 3D 叉乘
-   * @private
-   */
   _cross3D(a, b) {
     return {
       x: a.y * b.z - a.z * b.y,
@@ -1442,542 +1589,1671 @@ export class Object {
     };
   }
 
-  // ====================================================
-  // ⭐ 布料系统（阶段 4: 碰撞体）
-  // ====================================================
-
-  /**
-   * ⭐ 设置碰撞体
-   * 
-   * @param {Object} collider
-   *   - containsPoint(x, y, z) => boolean
-   *   - getNormal(x, y, z) => {x, y, z}
-   *   - projectToSurface(x, y, z) => {x, y, z}
-   */
+  // === 碰撞体 ===
+  
   setCollider(collider) {
     if (!collider.containsPoint || typeof collider.containsPoint !== 'function') {
       throw new Error('Collider must have containsPoint(x, y, z) method');
     }
-    
     this.physics.collider = collider;
   }
 
-  /**
-   * ⭐ 从球谐对象创建碰撞体（高精度版）
-   * 
-   * ⭐ 改进：使用 SphericalHarmonics 类的高精度几何查询方法
-   * 
-   * @param {Object} sphericalHarmonicsObject
-   * @returns {Object} 标准碰撞体接口
-   */
   static createColliderFromSphericalHarmonics(sphericalHarmonicsObject) {
     if (sphericalHarmonicsObject.representation.type !== 'sphericalHarmonics') {
       throw new Error('Object is not a spherical harmonics representation');
     }
-    
+
     const { coefficients, sphericalHarmonics } = sphericalHarmonicsObject.representation.data;
     const center = sphericalHarmonicsObject.center;
-    
+
     return {
-      type: 'sphericalHarmonics',
-      
-      // ⭐ 使用球谐类的高精度符号距离
       containsPoint(x, y, z) {
-        const sd = sphericalHarmonics.signedDistance(
-          coefficients, x, y, z, center
-        );
-        return sd < 0;  // 负数 = 内部
-      },
-      
-      // ⭐ 使用球谐类的高精度表面法线（基于梯度）
-      // 
-      // ⚠️ 当前实现：径向近似法线
-      // - 对球体：精确
-      // - 对一般球谐体：近似（真实法线 ≠ 径向）
-      // 
-      // ⚠️ 适用场景：
-      // - 实时物理碰撞：✅ 视觉可接受
-      // - 精确摩擦/折痕：⚠️ 可能有误差
-      // 
-      // ⚠️ 后续升级：可基于球谐梯度计算真实表面法线
-      // - 使用 sphericalHarmonics.computeSurfaceNormal()
-      // - 接口保持不变
-      getNormal(x, y, z) {
         const dx = x - center.x;
         const dy = y - center.y;
         const dz = z - center.z;
         const rCart = Math.sqrt(dx * dx + dy * dy + dz * dz);
         
+        if (rCart < 1e-10) return true;
+
+        const theta = Math.acos(dz / rCart);
+        const phi = Math.atan2(dy, dx);
+        const rSH = sphericalHarmonics.evaluate(coefficients, theta, phi);
+
+        return rCart <= rSH;
+      },
+
+      getNormal(x, y, z) {
+        const dx = x - center.x;
+        const dy = y - center.y;
+        const dz = z - center.z;
+        const rCart = Math.sqrt(dx * dx + dy * dy + dz * dz);
+
         if (rCart < 1e-10) {
           return { x: 0, y: 1, z: 0 };
         }
-        
-        // 计算球坐标
-        const theta = Math.acos(Math.max(-1, Math.min(1, dz / rCart)));
+
+        const theta = Math.acos(dz / rCart);
         const phi = Math.atan2(dy, dx);
-        
-        // 使用高精度法线计算
-        return sphericalHarmonics.computeSurfaceNormal(
-          coefficients, theta, phi, center
-        );
+
+        const gradient = sphericalHarmonics.computeGradient(coefficients, theta, phi);
+
+        const radial = { x: dx / rCart, y: dy / rCart, z: dz / rCart };
+        const gradMag = Math.sqrt(gradient.x * gradient.x + gradient.y * gradient.y + gradient.z * gradient.z);
+
+        if (gradMag < 1e-10) {
+          return radial;
+        }
+
+        const nx = radial.x - gradient.x / gradMag;
+        const ny = radial.y - gradient.y / gradMag;
+        const nz = radial.z - gradient.z / gradMag;
+        const mag = Math.sqrt(nx * nx + ny * ny + nz * nz);
+
+        return mag > 1e-10 ? { x: nx / mag, y: ny / mag, z: nz / mag } : radial;
       },
-      
-      // ⭐ 使用球谐类的精确投影
+
       projectToSurface(x, y, z) {
-        const proj = sphericalHarmonics.projectToSurface(
-          coefficients, x, y, z, center
-        );
-        return proj.point;
-      },
-      
-      // ⭐ 新增：获取完整投影信息（包括法线、穿透深度）
-      getProjectionInfo(x, y, z) {
-        return sphericalHarmonics.projectToSurface(
-          coefficients, x, y, z, center
-        );
-      },
-      
-      // ⭐ 新增：穿透深度查询
-      getPenetrationDepth(x, y, z) {
-        const proj = sphericalHarmonics.projectToSurface(
-          coefficients, x, y, z, center
-        );
-        return proj.penetration;
-      },
-      
-      // ⭐ 新增：符号距离查询（快速）
-      getSignedDistance(x, y, z) {
-        return sphericalHarmonics.signedDistance(
-          coefficients, x, y, z, center
-        );
+        const dx = x - center.x;
+        const dy = y - center.y;
+        const dz = z - center.z;
+        const rCart = Math.sqrt(dx * dx + dy * dy + dz * dz);
+
+        if (rCart < 1e-10) {
+          return { x: center.x + 0.1, y: center.y, z: center.z };
+        }
+
+        const theta = Math.acos(dz / rCart);
+        const phi = Math.atan2(dy, dx);
+        const rSH = sphericalHarmonics.evaluate(coefficients, theta, phi);
+
+        const scale = rSH / rCart;
+        return {
+          x: center.x + dx * scale,
+          y: center.y + dy * scale,
+          z: center.z + dz * scale
+        };
       }
     };
   }
 
-  /**
-   * ⭐ 新增：获取编辑态预览网格
-   * 
-   * 用途：渲染系统可调用此方法获取实时预览三角网
-   * 
-   * @returns {Object|null} - { vertices, faces, edges } 或 null
-   */
-  getEditStatePreview() {
-    if (this.representation.type !== 'cloth') return null;
-    if (this.representation.metadata.state !== 'edit') return null;
-    
-    return this.representation.editState.preview;
+  // === 固定点与约束 ===
+  
+  fixPoint(index) {
+    if (index < 0 || index >= this.surfacePoints.length) {
+      throw new Error('Invalid point index');
+    }
+
+    const point = this.surfacePoints[index];
+    if (point._physicsData) {
+      point._physicsData.fixed = true;
+    }
+
+    if (this.representation.type === 'cloth' && this.representation.editState) {
+      let fixedConstraint = this.representation.editState.constraints.find(c => c.type === 'fixed');
+      
+      if (!fixedConstraint) {
+        fixedConstraint = {
+          type: 'fixed',
+          particles: []
+        };
+        this.representation.editState.constraints.push(fixedConstraint);
+      }
+      
+      if (!fixedConstraint.particles.includes(index)) {
+        fixedConstraint.particles.push(index);
+      }
+    }
   }
 
-  // ====================================================
-  // ⭐ 布料系统（阶段 5: 状态切换）
-  // ====================================================
+  unfixPoint(index) {
+    if (index < 0 || index >= this.surfacePoints.length) {
+      throw new Error('Invalid point index');
+    }
+
+    const point = this.surfacePoints[index];
+    if (point._physicsData) {
+      point._physicsData.fixed = false;
+    }
+
+    if (this.representation.type === 'cloth' && this.representation.editState) {
+      const fixedConstraint = this.representation.editState.constraints.find(c => c.type === 'fixed');
+      
+      if (fixedConstraint) {
+        const idx = fixedConstraint.particles.indexOf(index);
+        if (idx !== -1) {
+          fixedConstraint.particles.splice(idx, 1);
+        }
+        
+        if (fixedConstraint.particles.length === 0) {
+          const constraintIdx = this.representation.editState.constraints.indexOf(fixedConstraint);
+          this.representation.editState.constraints.splice(constraintIdx, 1);
+        }
+      }
+    }
+  }
 
   /**
-   * 切换回编辑态
+   * 更新物理几何（实时物理编辑）
    * 
-   * ⚠️ 警告：会丢失物理模拟的所有变形
+   * 触发时机：
+   * - 控制点被拖拽后
+   * - fitSphericalHarmonics 更新球谐系数后
+   * 
+   * 核心原则：
+   * - 严禁重置粒子的 position 和 velocity（保留动量）
+   * - 只更新约束的理想长度和形状匹配的参考形状
+   * - 物理引擎会自然地将粒子拉向新形状
+   * 
+   * 效果：
+   * - Q弹的过渡动画
+   * - 保持物理惯性
+   * - 平滑的形变
    */
-  switchToEditState() {
-    if (this.representation.type !== 'cloth') {
-      throw new Error('Not a cloth object');
-    }
-    
-    if (this.representation.metadata.state === 'edit') {
-      console.warn('Already in edit state');
+  updatePhysicsGeometry() {
+    const physicsState = this.representation.physicsState;
+    if (!physicsState) {
+      console.warn('[Object] No physics state to update');
       return;
     }
-    
-    this.representation.metadata.state = 'edit';
-    this.surfacePoints = [];
-    this.controlPoints = this.representation.editState.controlPoints;
-    
-    this.representation.physicsState = null;
-    this.representation.topology = {
-      triangles: [],
-      edges: [],
-      adjacency: null,
-      degree: null
-    };
-    
-    this._onSurfacePointsChanged();
-    
-    console.warn('Physics state discarded. All deformations lost.');
-  }
 
-  /**
-   * 检查当前状态
-   */
-  isInEditState() {
-    return this.representation.type === 'cloth' && 
-           this.representation.metadata.state === 'edit';
-  }
-
-  isInPhysicsState() {
-    return this.representation.type === 'cloth' && 
-           this.representation.metadata.state === 'physics';
-  }
-
-  // ====================================================
-  // 金刚石网络生成（保持不变）
-  // ====================================================
-
-  generateDiamondNetwork(options = {}) {
-    if (this.representation.type !== 'sphericalHarmonics') {
-      throw new Error('Diamond network requires spherical harmonics representation');
+    if (this.representation.type !== 'sphericalHarmonics' && 
+        this.representation.type !== 'volumetric') {
+      console.warn('[Object] updatePhysicsGeometry only works with spherical harmonics');
+      return;
     }
 
-    const spacing = options.spacing ?? this.diamondConfig.spacing;
-    const threshold = options.surfaceThreshold ?? this.diamondConfig.surfaceThreshold;
-    
-    // ⭐ 物理模式（PBD 或 Force）
-    const physicsModel = options.physicsModel ?? this.physics.model ?? 'pbd';
-    this.physics.model = physicsModel;
-    
     const { coefficients, sphericalHarmonics } = this.representation.data;
+    if (!coefficients || !sphericalHarmonics) {
+      console.warn('[Object] Missing spherical harmonics data');
+      return;
+    }
 
-    // 1. 估计体的大小（委托给球谐类）
-    const boundingRadius = sphericalHarmonics._estimateBoundingRadius(coefficients);
-    const gridSize = Math.ceil(boundingRadius * 2 / spacing) + 2;
+    const { particles, constraints } = physicsState;
 
-    // 2. 生成金刚石晶格
-    const lattice = this._generateDiamondLattice(gridSize, spacing);
+    // 步骤 1: 计算每个粒子的新理想位置（基于球坐标）
+    const idealPositions = new Array(particles.length);
 
-    // 3. 过滤体内节点
-    const internalNodes = [];
-    const nodeMap = new Map();
-
-    for (const node of lattice) {
-      const dx = node.x - this.center.x;
-      const dy = node.y - this.center.y;
-      const dz = node.z - this.center.z;
+    for (let i = 0; i < particles.length; i++) {
+      const p = particles[i];
       
-      const rCart = Math.sqrt(dx * dx + dy * dy + dz * dz);
-      if (rCart < 1e-10) continue;
+      let theta, phi;
+      
+      // ⚠️ 关键修复：检查球坐标是否有效
+      if (p._sphericalCoords && p._sphericalCoords.centerVersion === this._centerVersion) {
+        // 角度有效，直接使用
+        theta = p._sphericalCoords.theta;
+        phi = p._sphericalCoords.phi;
+      } else {
+        // 角度失效或不存在，需要重新计算（相对于当前 center）
+        const dx = p.position.x - this.center.x;
+        const dy = p.position.y - this.center.y;
+        const dz = p.position.z - this.center.z;
+        const r = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        
+        if (r < 1e-10) {
+          // 粒子在中心，保持当前位置
+          idealPositions[i] = { x: p.position.x, y: p.position.y, z: p.position.z };
+          continue;
+        }
+        
+        theta = Math.acos(dz / r);
+        phi = Math.atan2(dy, dx);
+        
+        // 更新粒子的球坐标（缓存）
+        if (!p._sphericalCoords) {
+          p._sphericalCoords = {};
+        }
+        p._sphericalCoords.theta = theta;
+        p._sphericalCoords.phi = phi;
+        p._sphericalCoords.centerVersion = this._centerVersion;
+      }
 
-      const theta = Math.acos(dz / rCart);
-      const phi = Math.atan2(dy, dx);
+      // 使用球谐函数计算新的半径
+      const r = sphericalHarmonics.evaluate(theta, phi, coefficients);
 
-      // 委托给球谐类评估
-      const rSH = sphericalHarmonics.evaluate(coefficients, theta, phi);
+      // ⚠️ 关键修复：转换为笛卡尔坐标时，加上当前 center
+      const sinTheta = Math.sin(theta);
+      idealPositions[i] = {
+        x: this.center.x + r * sinTheta * Math.cos(phi),
+        y: this.center.y + r * sinTheta * Math.sin(phi),
+        z: this.center.z + r * Math.cos(theta)
+      };
+    }
 
-      if (rCart < rSH - threshold) {
-        const idx = internalNodes.length;
-        nodeMap.set(this._positionKey(node), idx);
-        internalNodes.push({
-          position: { x: node.x, y: node.y, z: node.z },
-          neighbors: [],
-          isSurface: false,
-          theta,
-          phi,
-          rCart,
-          rSH
-        });
-      } else if (rCart >= rSH - threshold && rCart < rSH + threshold) {
-        const idx = internalNodes.length;
-        nodeMap.set(this._positionKey(node), idx);
-        internalNodes.push({
-          position: { x: node.x, y: node.y, z: node.z },
-          neighbors: [],
-          isSurface: true,
-          theta,
-          phi,
-          rCart,
-          rSH
-        });
+    // ⭐ 步骤 2: 热更新距离约束的 restLength
+    let updatedDistanceConstraints = 0;
+
+    for (const constraint of constraints) {
+      if (constraint.type === 'distance') {
+        const i = constraint.i;
+        const j = constraint.j;
+
+        if (i !== undefined && j !== undefined && 
+            idealPositions[i] && idealPositions[j]) {
+          
+          const pi = idealPositions[i];
+          const pj = idealPositions[j];
+
+          // 计算新的理想距离
+          const dx = pj.x - pi.x;
+          const dy = pj.y - pi.y;
+          const dz = pj.z - pi.z;
+          const newRestLength = Math.sqrt(dx * dx + dy * dy + dz * dz);
+
+          // 更新约束的 restLength
+          if (constraint.restLength !== undefined) {
+            constraint.restLength = newRestLength;
+          } else if (constraint.distance !== undefined) {
+            constraint.distance = newRestLength;
+          }
+
+          updatedDistanceConstraints++;
+        }
       }
     }
 
-    // 4. 构建邻接关系
-    this._buildDiamondAdjacency(internalNodes, nodeMap, spacing);
+    // ⭐ 步骤 3: 热更新形状匹配数据（如果存在）
+    // 注意：形状匹配数据通常由 PhysicsSystem 管理，这里我们更新 Object 层的引用形状
+    
+    if (physicsState.internalStartIndex !== undefined && 
+        physicsState.internalCount !== undefined) {
+      
+      const startIdx = physicsState.internalStartIndex;
+      const endIdx = startIdx + physicsState.internalCount;
 
-    // 5. 表面补点
-    const surfacePoints = this._generateSurfacePoints(
-      internalNodes, 
-      coefficients, 
-      sphericalHarmonics,
-      spacing
+      // 计算新的质心
+      let cx = 0, cy = 0, cz = 0;
+      let totalMass = 0;
+
+      for (let i = startIdx; i < endIdx; i++) {
+        const p = particles[i];
+        const ideal = idealPositions[i];
+        cx += ideal.x * p.mass;
+        cy += ideal.y * p.mass;
+        cz += ideal.z * p.mass;
+        totalMass += p.mass;
+      }
+
+      cx /= totalMass;
+      cy /= totalMass;
+      cz /= totalMass;
+
+      // 更新相对偏移量（存储在粒子上，供 PhysicsSystem 读取）
+      for (let i = startIdx; i < endIdx; i++) {
+        const p = particles[i];
+        const ideal = idealPositions[i];
+
+        if (!p._shapeMatchingData) {
+          p._shapeMatchingData = {};
+        }
+
+        p._shapeMatchingData.restOffset = {
+          x: ideal.x - cx,
+          y: ideal.y - cy,
+          z: ideal.z - cz
+        };
+      }
+    }
+
+    if (this.verbose) {
+      console.log(`[Object] Updated physics geometry: ${updatedDistanceConstraints} distance constraints`);
+    }
+
+    this.metadata.modified = Date.now();
+  }
+
+  // === 体积网格生成（Bubble Packing + Sightline Filtering）===
+  
+  /**
+   * 生成体积网格
+   * 
+   * ⭐ 指针切换策略（不覆盖控制点）：
+   * 
+   * 1. controlPoints 保持不变（幽灵句柄）
+   * 2. surfacePoints 切换到高密度网格
+   * 3. 设置 _isVolumetric = true
+   * 
+   * 效果：
+   * - 控制点驱动形状（拟合）
+   * - 表面点驱动渲染（物理）
+   * 
+   * @param {Object} options - 配置选项
+   * @returns {Object} 生成结果
+   */
+  generateVolumetricMesh(options = {}) {
+    if (this.representation.type !== 'sphericalHarmonics') {
+      throw new Error('Volumetric mesh requires spherical harmonics representation');
+    }
+    
+    // ⭐ 自动计算点数
+    let targetCount = options.targetCount;
+    const spacing = options.spacing ?? 0.1;
+    
+    if (targetCount === undefined) {
+      // 计算包围盒
+      const bbox = this.getBoundingBox();
+      const width = bbox.max.x - bbox.min.x;
+      const height = bbox.max.y - bbox.min.y;
+      const depth = bbox.max.z - bbox.min.z;
+      
+      // 平均直径
+      const D = (width + height + depth) / 3;
+      
+      // 估算公式：N ≈ 0.52 × (D / spacing)³
+      // 0.52 是球体填充率（考虑松弛后的实际密度）
+      const estimatedCount = Math.round(0.52 * Math.pow(D / spacing, 3));
+      
+      // 安全上限：防止浏览器崩溃
+      const safetyLimit = 2000;
+      targetCount = Math.min(estimatedCount, safetyLimit);
+      
+      // 最小值：确保至少有基本结构
+      targetCount = Math.max(targetCount, 50);
+      
+      if (this.verbose || options.verbose) {
+        console.log(`[Object] Auto-calculated targetCount: ${targetCount} (estimated: ${estimatedCount}, D: ${D.toFixed(2)}, spacing: ${spacing})`);
+      }
+    }
+    
+    const relaxIterations = options.relaxIterations ?? 25;
+    const surfaceRatio = options.surfaceRatio ?? 0.3;
+    const knn = options.knn ?? 10;
+    const physicsModel = options.physicsModel ?? this.physics.model ?? 'pbd';
+    
+    this.physics.model = physicsModel;
+    
+    const { surfacePoints, internalPoints } = this._generateBubblePacking(
+      targetCount, spacing, relaxIterations, surfaceRatio
     );
-
-    // 6. 构建表面三角网
-    const topology = this._buildSurfaceTriangulation(surfacePoints);
-
-    // 7. ⭐ 修正：更新状态但不清空拓扑
-    this.surfacePoints = surfacePoints.map(sp => 
+    
+    const topology = this._buildSurfaceTopologyByVisibility(surfacePoints, knn);
+    
+    // ⭐ 关键修改：创建新的表面点数组（不覆盖 controlPoints）
+    const newSurfacePoints = surfacePoints.map(sp => 
       new Point(sp.position.x, sp.position.y, sp.position.z)
     );
     
-    this._internalNodes = internalNodes;
-    this.representation.topology = topology;
+    const globalMassScale = this.physics.mass || 1.0;
+    const surfaceMass = globalMassScale * 0.6 / surfacePoints.length;
+    const internalMass = globalMassScale * 0.4 / internalPoints.length;
     
-    // ⭐ 关键修正：手动维护状态，不调用 _onSurfacePointsChanged()
+    const surfaceParticles = newSurfacePoints.map((point, index) => {
+      if (!point._physicsData) {
+        point._physicsData = {
+          position: { x: point.x, y: point.y, z: point.z },
+          prevPosition: { x: point.x, y: point.y, z: point.z },
+          velocity: { x: 0, y: 0, z: 0 },
+          fixed: false
+        };
+      }
+      
+      // ⚠️ 关键修复：计算相对于当前 center 的球坐标
+      const dx = point.x - this.center.x;
+      const dy = point.y - this.center.y;
+      const dz = point.z - this.center.z;
+      const r = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      const theta = Math.atan2(Math.sqrt(dx * dx + dy * dy), dz);
+      const phi = Math.atan2(dy, dx);
+      
+      return {
+        position: point._physicsData.position,
+        prevPosition: point._physicsData.prevPosition,
+        velocity: point._physicsData.velocity,
+        mass: surfaceMass,
+        invMass: surfaceMass > 0 ? 1 / surfaceMass : 0,
+        fixed: false,
+        _index: index,
+        _type: 'surface',
+        _sphericalCoords: { 
+          theta, 
+          phi, 
+          centerVersion: this._centerVersion  // 绑定中心版本
+        }
+      };
+    });
+    
+    const internalParticles = internalPoints.map((node, index) => {
+      // ⚠️ 关键修复：计算相对于当前 center 的球坐标
+      const pos = node.position;
+      const dx = pos.x - this.center.x;
+      const dy = pos.y - this.center.y;
+      const dz = pos.z - this.center.z;
+      const r = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      const theta = Math.atan2(Math.sqrt(dx * dx + dy * dy), dz);
+      const phi = Math.atan2(dy, dx);
+      
+      return {
+        position: node.position,
+        prevPosition: { x: node.position.x, y: node.position.y, z: node.position.z },
+        velocity: { x: 0, y: 0, z: 0 },
+        mass: internalMass,
+        invMass: internalMass > 0 ? 1 / internalMass : 0,
+        fixed: false,
+        _index: surfacePoints.length + index,
+        _type: 'internal',
+        _sphericalCoords: { 
+          theta, 
+          phi, 
+          centerVersion: this._centerVersion  // 绑定中心版本
+        }
+      };
+    });
+    
+    const particles = [...surfaceParticles, ...internalParticles];
+    
+    const surfaceConstraints = this._buildBubbleSurfaceConstraints(topology.edges, newSurfacePoints, physicsModel);
+    const internalConstraints = this._buildBubbleInternalConstraints(
+      internalPoints, surfacePoints.length, spacing * 1.5, knn, physicsModel
+    );
+    const skinBoneConstraints = this._buildSkinBoneConstraints(
+      surfacePoints, internalPoints, surfacePoints.length, spacing * 2.0, physicsModel
+    );
+    
+    const constraints = [...surfaceConstraints, ...internalConstraints, ...skinBoneConstraints];
+    
+    this.representation.physicsState = {
+      physicsModel,
+      particles,
+      constraints,
+      surfaceStartIndex: 0,
+      internalStartIndex: surfacePoints.length,
+      surfaceCount: surfacePoints.length,
+      internalCount: internalPoints.length
+    };
+    
+    this.representation.topology = topology;
+    this.representation.type = 'volumetric';
+    
+    // ⭐ 指针切换：将 surfacePoints 指向高密度网格
+    // controlPoints 保持不变，成为"幽灵句柄"
+    this.surfacePoints = newSurfacePoints;
+    
+    this._isVolumetric = true;
+    
+    if (this.verbose) {
+      console.log(`[Object] Volumetric mesh: controlPoints (${this.controlPoints.length}) → surfacePoints (${this.surfacePoints.length}) (mode=${this.mode}, call rebuildPhysicsTopology() to enable physics)`);
+    }
+    
     this._surfacePointVersion++;
     this._boundingBoxDirty = true;
-    
-    // 清空几何缓存（因为表面重建了）
     this.representation.geometryCache.volume = null;
     this.representation.geometryCache.surfaceArea = null;
     this.representation.geometryCache.sections.clear();
-    
     this.metadata.modified = Date.now();
     
-    // 注意：不清空 topology（刚刚生成的）
-    // 注意：不清空 _fitCache（拟合结果仍有效）
-
     return {
-      surfacePoints,
+      surfacePoints: surfacePoints.length,
+      internalPoints: internalPoints.length,
+      surfaceConstraints: surfaceConstraints.length,
+      internalConstraints: internalConstraints.length,
+      skinBoneConstraints: skinBoneConstraints.length,
       topology,
-      internalNodes: internalNodes.length
+      autoCalculated: options.targetCount === undefined,
+      finalTargetCount: targetCount,
+      isVolumetric: this._isVolumetric,
+      controlPointsPreserved: this.controlPoints.length,
+      mode: this.mode
     };
   }
 
-  _generateDiamondLattice(gridSize, spacing) {
-    const nodes = [];
-    const halfGrid = Math.floor(gridSize / 2);
-
-    const fccBase = [
-      [0, 0, 0],
-      [0.5, 0.5, 0],
-      [0.5, 0, 0.5],
-      [0, 0.5, 0.5]
-    ];
-
-    for (let i = -halfGrid; i <= halfGrid; i++) {
-      for (let j = -halfGrid; j <= halfGrid; j++) {
-        for (let k = -halfGrid; k <= halfGrid; k++) {
-          for (const [fx, fy, fz] of fccBase) {
-            const x = this.center.x + (i + fx) * spacing;
-            const y = this.center.y + (j + fy) * spacing;
-            const z = this.center.z + (k + fz) * spacing;
-            nodes.push({ x, y, z });
-
-            const x2 = x + 0.25 * spacing;
-            const y2 = y + 0.25 * spacing;
-            const z2 = z + 0.25 * spacing;
-            nodes.push({ x: x2, y: y2, z: z2 });
+  _generateBubblePacking(targetCount, spacing, iterations, surfaceRatio) {
+    const { coefficients, sphericalHarmonics } = this.representation.data;
+    const boundingRadius = sphericalHarmonics._estimateBoundingRadius(coefficients);
+    const boxSize = boundingRadius * 2.2;
+    
+    const points = [];
+    const cx = this.center.x;
+    const cy = this.center.y;
+    const cz = this.center.z;
+    
+    for (let i = 0; i < targetCount; i++) {
+      points.push({
+        position: {
+          x: cx + (Math.random() - 0.5) * boxSize,
+          y: cy + (Math.random() - 0.5) * boxSize,
+          z: cz + (Math.random() - 0.5) * boxSize
+        },
+        isSurface: false
+      });
+    }
+    
+    for (let iter = 0; iter < iterations; iter++) {
+      for (let i = 0; i < points.length; i++) {
+        const pi = points[i].position;
+        let fx = 0, fy = 0, fz = 0;
+        
+        for (let j = 0; j < points.length; j++) {
+          if (i === j) continue;
+          
+          const pj = points[j].position;
+          const dx = pi.x - pj.x;
+          const dy = pi.y - pj.y;
+          const dz = pi.z - pj.z;
+          const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+          
+          if (dist < spacing && dist > 1e-6) {
+            const force = (spacing - dist) / dist;
+            fx += dx * force;
+            fy += dy * force;
+            fz += dz * force;
+          }
+        }
+        
+        const damping = 0.5;
+        pi.x += fx * damping;
+        pi.y += fy * damping;
+        pi.z += fz * damping;
+      }
+      
+      for (const point of points) {
+        const dx = point.position.x - cx;
+        const dy = point.position.y - cy;
+        const dz = point.position.z - cz;
+        const rCart = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        
+        if (rCart < 1e-10) continue;
+        
+        const theta = Math.acos(dz / rCart);
+        const phi = Math.atan2(dy, dx);
+        const rSH = sphericalHarmonics.evaluate(coefficients, theta, phi);
+        
+        if (rCart > rSH) {
+          const scale = rSH / rCart;
+          point.position.x = cx + dx * scale;
+          point.position.y = cy + dy * scale;
+          point.position.z = cz + dz * scale;
+          point.isSurface = true;
+        }
+        else if (rCart > rSH * 0.92) {
+          const scale = rSH / rCart;
+          const attractionStrength = (rCart - rSH * 0.92) / (rSH * 0.08);
+          point.position.x = cx + dx * (scale * attractionStrength + (1 - attractionStrength));
+          point.position.y = cy + dy * (scale * attractionStrength + (1 - attractionStrength));
+          point.position.z = cz + dz * (scale * attractionStrength + (1 - attractionStrength));
+          
+          if (attractionStrength > 0.5) {
+            point.isSurface = true;
           }
         }
       }
     }
-
-    return nodes;
+    
+    const surfacePoints = points.filter(p => p.isSurface);
+    const internalPoints = points.filter(p => !p.isSurface);
+    
+    const targetSurfaceCount = Math.floor(targetCount * surfaceRatio);
+    if (surfacePoints.length < targetSurfaceCount && internalPoints.length > 0) {
+      const deficit = targetSurfaceCount - surfacePoints.length;
+      
+      internalPoints.sort((a, b) => {
+        const distA = this._distanceToSurface(a.position, coefficients, sphericalHarmonics);
+        const distB = this._distanceToSurface(b.position, coefficients, sphericalHarmonics);
+        return distA - distB;
+      });
+      
+      for (let i = 0; i < Math.min(deficit, internalPoints.length); i++) {
+        internalPoints[i].isSurface = true;
+        surfacePoints.push(internalPoints[i]);
+      }
+      
+      const finalInternal = internalPoints.filter(p => !p.isSurface);
+      return { surfacePoints, internalPoints: finalInternal };
+    }
+    
+    return { surfacePoints, internalPoints };
   }
 
-  /**
-   * ⭐ 修正：金刚石邻接关系构建
-   * 
-   * 问题：节点数据结构不一致
-   * - internalNodes 中节点有 .position 字段
-   * - 但这里直接访问 node.position 导致错误
-   * 
-   * 修正：统一使用 node.position
-   */
-  _buildDiamondAdjacency(nodes, nodeMap, spacing) {
-    const bondLength = spacing * Math.sqrt(3) / 4;
-    const tolerance = bondLength * 0.1;
+  _distanceToSurface(position, coefficients, sphericalHarmonics) {
+    const dx = position.x - this.center.x;
+    const dy = position.y - this.center.y;
+    const dz = position.z - this.center.z;
+    const rCart = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    
+    if (rCart < 1e-10) return 0;
+    
+    const theta = Math.acos(dz / rCart);
+    const phi = Math.atan2(dy, dx);
+    const rSH = sphericalHarmonics.evaluate(coefficients, theta, phi);
+    
+    return Math.abs(rCart - rSH);
+  }
 
-    for (let i = 0; i < nodes.length; i++) {
-      const node = nodes[i];
+  _buildSurfaceTopologyByVisibility(surfacePoints, knn) {
+    const { coefficients, sphericalHarmonics } = this.representation.data;
+    
+    const triangles = [];
+    const triangleSet = new Set();  // 去重
+    const edges = new Set();
+    const adjacency = new Map();
+    
+    for (let i = 0; i < surfacePoints.length; i++) {
+      adjacency.set(i, []);
+    }
+    
+    for (let i = 0; i < surfacePoints.length; i++) {
+      const pi = surfacePoints[i].position;
       
-      for (let j = i + 1; j < nodes.length; j++) {
-        const other = nodes[j];
+      const neighbors = [];
+      for (let j = 0; j < surfacePoints.length; j++) {
+        if (i === j) continue;
         
-        // ✅ 修正：正确访问 position 字段
-        const dx = other.position.x - node.position.x;
-        const dy = other.position.y - node.position.y;
-        const dz = other.position.z - node.position.z;
+        const pj = surfacePoints[j].position;
+        const dx = pj.x - pi.x;
+        const dy = pj.y - pi.y;
+        const dz = pj.z - pi.z;
         const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-
-        if (Math.abs(dist - bondLength) < tolerance) {
-          node.neighbors.push(j);
-          other.neighbors.push(i);
+        
+        neighbors.push({ index: j, dist });
+      }
+      
+      neighbors.sort((a, b) => a.dist - b.dist);
+      const kNeighbors = neighbors.slice(0, Math.min(knn, neighbors.length));
+      
+      for (let a = 0; a < kNeighbors.length; a++) {
+        for (let b = a + 1; b < kNeighbors.length; b++) {
+          const j = kNeighbors[a].index;
+          const k = kNeighbors[b].index;
+          const tri = [i, j, k];
+          
+          if (!this._isTriangleOutwardFacing(tri, surfacePoints)) {
+            continue;
+          }
+          
+          if (this._isTriangleOccluded(tri, surfacePoints, coefficients, sphericalHarmonics)) {
+            continue;
+          }
+          
+          // 去重：生成唯一键
+          const sorted = [i, j, k].sort((a, b) => a - b);
+          const triKey = `${sorted[0]}-${sorted[1]}-${sorted[2]}`;
+          
+          if (triangleSet.has(triKey)) {
+            continue;  // 已存在，跳过
+          }
+          
+          triangleSet.add(triKey);
+          triangles.push(tri);
+          this._addEdge(edges, adjacency, i, j);
+          this._addEdge(edges, adjacency, j, k);
+          this._addEdge(edges, adjacency, i, k);
         }
       }
+    }
+    
+    return {
+      triangles,
+      edges: Array.from(edges).map(e => e.split('-').map(Number)),
+      internalEdges: [],
+      adjacency
+    };
+  }
 
-      // 限制为4个邻居（金刚石约束）
-      if (node.neighbors.length > 4) {
-        node.neighbors = node.neighbors.slice(0, 4);
-      }
+  _isTriangleOutwardFacing(tri, surfacePoints) {
+    const [i, j, k] = tri;
+    const pi = surfacePoints[i].position;
+    const pj = surfacePoints[j].position;
+    const pk = surfacePoints[k].position;
+    
+    const e1 = { x: pj.x - pi.x, y: pj.y - pi.y, z: pj.z - pi.z };
+    const e2 = { x: pk.x - pi.x, y: pk.y - pi.y, z: pk.z - pi.z };
+    const normal = {
+      x: e1.y * e2.z - e1.z * e2.y,
+      y: e1.z * e2.x - e1.x * e2.z,
+      z: e1.x * e2.y - e1.y * e2.x
+    };
+    
+    const cx = (pi.x + pj.x + pk.x) / 3;
+    const cy = (pi.y + pj.y + pk.y) / 3;
+    const cz = (pi.z + pj.z + pk.z) / 3;
+    
+    const toCenter = {
+      x: cx - this.center.x,
+      y: cy - this.center.y,
+      z: cz - this.center.z
+    };
+    
+    const dot = normal.x * toCenter.x + normal.y * toCenter.y + normal.z * toCenter.z;
+    return dot > 0;
+  }
+
+  _isTriangleOccluded(tri, surfacePoints, coefficients, sphericalHarmonics) {
+    const [i, j, k] = tri;
+    const pi = surfacePoints[i].position;
+    const pj = surfacePoints[j].position;
+    const pk = surfacePoints[k].position;
+    
+    const cx = (pi.x + pj.x + pk.x) / 3;
+    const cy = (pi.y + pj.y + pk.y) / 3;
+    const cz = (pi.z + pj.z + pk.z) / 3;
+    
+    const dx = cx - this.center.x;
+    const dy = cy - this.center.y;
+    const dz = cz - this.center.z;
+    const rCart = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    
+    if (rCart < 1e-10) return false;
+    
+    const theta = Math.acos(dz / rCart);
+    const phi = Math.atan2(dy, dx);
+    const rSH = sphericalHarmonics.evaluate(coefficients, theta, phi);
+    
+    return rCart < rSH * 0.85;
+  }
+
+  _addEdge(edges, adjacency, i, j) {
+    const key = i < j ? `${i}-${j}` : `${j}-${i}`;
+    edges.add(key);
+    
+    if (!adjacency.get(i).includes(j)) {
+      adjacency.get(i).push(j);
+    }
+    if (!adjacency.get(j).includes(i)) {
+      adjacency.get(j).push(i);
     }
   }
 
-  _generateSurfacePoints(internalNodes, coeffs, sh, spacing) {
-    const surfacePoints = [];
-    const surfacePointMap = new Map();
-
-    const tetrahedralDirections = [
-      [1, 1, 1],
-      [1, -1, -1],
-      [-1, 1, -1],
-      [-1, -1, 1]
-    ];
-
-    for (let i = 0; i < internalNodes.length; i++) {
-      const node = internalNodes[i];
+  _buildBubbleSurfaceConstraints(edges, points, physicsModel) {
+    const constraints = [];
+    
+    for (const [i, j] of edges) {
+      const p1 = points[i];
+      const p2 = points[j];
       
-      if (!node.isSurface) continue;
+      const dx = p2.x - p1.x;
+      const dy = p2.y - p1.y;
+      const dz = p2.z - p1.z;
+      const restLength = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      
+      const avgStiffness = 1000;
+      const avgDamping = 10;
+      
+      if (physicsModel === 'pbd') {
+        const compliance = avgStiffness > 0 ? 1 / avgStiffness : 0;
+        constraints.push({
+          type: 'distance',
+          i, j,
+          particles: [i, j],
+          restLength,
+          distance: restLength,
+          edgeType: 'surface',
+          compliance
+        });
+      } else if (physicsModel === 'force') {
+        constraints.push({
+          type: 'spring',
+          i, j,
+          particles: [i, j],
+          restLength,
+          edgeType: 'surface',
+          stiffness: avgStiffness,
+          damping: avgDamping
+        });
+      }
+    }
+    
+    return constraints;
+  }
 
-      const interiorNeighborCount = node.neighbors.filter(nIdx => 
-        !internalNodes[nIdx].isSurface
-      ).length;
-
-      let surfacePointsToAdd = 0;
-      if (interiorNeighborCount === 1) surfacePointsToAdd = 3;
-      else if (interiorNeighborCount === 2) surfacePointsToAdd = 2;
-      else if (interiorNeighborCount === 3) surfacePointsToAdd = 1;
-      else continue;
-
-      const usedDirections = node.neighbors.map(nIdx => {
-        const other = internalNodes[nIdx];
-        return this._normalizeDirection([
-          other.position.x - node.position.x,
-          other.position.y - node.position.y,
-          other.position.z - node.position.z
-        ]);
-      });
-
-      const availableDirections = tetrahedralDirections.filter(dir => {
-        return !usedDirections.some(used => 
-          this._directionsSimilar(dir, used)
-        );
-      });
-
-      for (let d = 0; d < Math.min(surfacePointsToAdd, availableDirections.length); d++) {
-        const dir = availableDirections[d];
+  _buildBubbleInternalConstraints(internalPoints, surfaceCount, maxDist, knn, physicsModel) {
+    const constraints = [];
+    
+    for (let i = 0; i < internalPoints.length; i++) {
+      const pi = internalPoints[i].position;
+      
+      const neighbors = [];
+      for (let j = 0; j < internalPoints.length; j++) {
+        if (i === j) continue;
         
-        // 委托给球谐类
-        const surfacePos = this._projectToSurface(
-          node.position,
-          dir,
-          coeffs,
-          sh,
-          spacing
-        );
+        const pj = internalPoints[j].position;
+        const dx = pj.x - pi.x;
+        const dy = pj.y - pi.y;
+        const dz = pj.z - pi.z;
+        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        
+        if (dist < maxDist) {
+          neighbors.push({ index: j, dist });
+        }
+      }
+      
+      neighbors.sort((a, b) => a.dist - b.dist);
+      const kNeighbors = neighbors.slice(0, Math.min(knn, neighbors.length));
+      
+      for (const { index: j, dist: restLength } of kNeighbors) {
+        if (i >= j) continue;
+        
+        const globalI = surfaceCount + i;
+        const globalJ = surfaceCount + j;
+        
+        // 使用材料刚度，内部骨架刚度为表面的 5 倍
+        let baseStiffness = 1000;
+        let baseDamping = 10;
+        
+        if (!this.representation.material.uniform && this.representation.material.properties) {
+          const mat = this.getMaterialAt(pi);
+          baseStiffness = mat.stiffness;
+          baseDamping = mat.damping;
+        }
+        
+        const internalStiffness = baseStiffness * 5;
+        const internalDamping = baseDamping * 2;
+        
+        if (physicsModel === 'pbd') {
+          const compliance = internalStiffness > 0 ? 1 / internalStiffness : 0;
+          constraints.push({
+            type: 'distance',
+            i: globalI,
+            j: globalJ,
+            particles: [globalI, globalJ],
+            restLength,
+            distance: restLength,
+            edgeType: 'internal',
+            compliance
+          });
+        } else if (physicsModel === 'force') {
+          constraints.push({
+            type: 'spring',
+            i: globalI,
+            j: globalJ,
+            particles: [globalI, globalJ],
+            restLength,
+            edgeType: 'internal',
+            stiffness: internalStiffness,
+            damping: internalDamping
+          });
+        }
+      }
+    }
+    
+    return constraints;
+  }
 
-        if (surfacePos) {
-          const key = this._positionKey(surfacePos);
-          if (!surfacePointMap.has(key)) {
-            const idx = surfacePoints.length;
-            surfacePointMap.set(key, idx);
-            
-            surfacePoints.push({
-              position: surfacePos,
-              neighbors: [],
-              fromNode: i,
-              isSurface: true
+  _buildSkinBoneConstraints(surfacePoints, internalPoints, surfaceCount, maxDist, physicsModel) {
+    const constraints = [];
+    
+    for (let i = 0; i < surfacePoints.length; i++) {
+      const pi = surfacePoints[i].position;
+      
+      // 获取表面点的材料属性
+      let baseStiffness = 1000;
+      let baseDamping = 10;
+      
+      if (!this.representation.material.uniform && this.representation.material.properties) {
+        const mat = this.getMaterialAt(pi);
+        baseStiffness = mat.stiffness;
+        baseDamping = mat.damping;
+      }
+      
+      // 皮骨连接刚度为表面的 2 倍
+      const skinBoneStiffness = baseStiffness * 2;
+      const skinBoneDamping = baseDamping * 1.5;
+      
+      for (let j = 0; j < internalPoints.length; j++) {
+        const pj = internalPoints[j].position;
+        
+        const dx = pj.x - pi.x;
+        const dy = pj.y - pi.y;
+        const dz = pj.z - pi.z;
+        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        
+        if (dist < maxDist) {
+          const globalJ = surfaceCount + j;
+          
+          if (physicsModel === 'pbd') {
+            const compliance = skinBoneStiffness > 0 ? 1 / skinBoneStiffness : 0;
+            constraints.push({
+              type: 'distance',
+              i: i,
+              j: globalJ,
+              particles: [i, globalJ],
+              restLength: dist,
+              distance: dist,
+              edgeType: 'skinBone',
+              compliance
+            });
+          } else if (physicsModel === 'force') {
+            constraints.push({
+              type: 'spring',
+              i: i,
+              j: globalJ,
+              particles: [i, globalJ],
+              restLength: dist,
+              edgeType: 'skinBone',
+              stiffness: skinBoneStiffness,
+              damping: skinBoneDamping
             });
           }
         }
       }
     }
-
-    this._buildSurfaceAdjacency(surfacePoints, spacing);
-
-    return surfacePoints;
+    
+    return constraints;
   }
 
-  _projectToSurface(startPos, direction, coeffs, sh, spacing) {
-    const [dx, dy, dz] = this._normalizeDirection(direction);
-    
-    let t = 0;
-    const maxSteps = 20;
-    const step = spacing * 0.5;
+  // === 2D 有机布料生成 ===
 
-    for (let i = 0; i < maxSteps; i++) {
-      t += step;
-      const x = startPos.x + t * dx;
-      const y = startPos.y + t * dy;
-      const z = startPos.z + t * dz;
+  /**
+   * 生成 2D 有机布料（基于椭圆傅里叶描述符）
+   * 
+   * ⭐ 核心流程：
+   * 1. 拟合边界：使用 EFD 获取闭合曲线参数方程
+   * 2. 2D 气泡填充：在边界内生成均匀分布的点
+   * 3. 构建拓扑：三角剖分生成网格
+   * 4. 物理状态：生成约束（Structural, Shear, Bend）
+   * 
+   * ⭐ 增量拟合支持：
+   * - 初始化 this._fitStackX 和 this._fitStackY
+   * - 未来可支持边界控制点拖拽编辑
+   * 
+   * @param {Array} boundaryPoints - 边界点集 [{x, y}, ...]（有序，闭合）
+   * @param {Object} options - 配置选项
+   * @param {Number} options.order - EFD 阶数（默认 5）
+   * @param {Number} options.spacing - 点间距（默认 0.015，1.5cm）
+   * @param {Number} options.targetCount - 目标点数（可选，自动计算）
+   * @param {Number} options.relaxIterations - 松弛迭代次数（默认 20）
+   * @param {Number} options.surfaceRatio - 表面点比例（默认 0.4）
+   * @param {String} options.physicsModel - 物理模型（默认 'pbd'）
+   * @param {Object} options.fitter - FittingCalculator 类
+   * @param {Object} options.Matrix - Matrix 类
+   * @returns {Object} 生成结果
+   * 
+   * @example
+   * const boundaryPoints = [
+   *   { x: 0, y: 0 },
+   *   { x: 1, y: 0 },
+   *   { x: 1, y: 1 },
+   *   { x: 0, y: 1 }
+   * ];
+   * 
+   * const result = obj.generateOrganicCloth(boundaryPoints, {
+   *   order: 5,
+   *   spacing: 0.015,
+   *   fitter: FittingCalculator,
+   *   Matrix: Matrix
+   * });
+   */
+  generateOrganicCloth(boundaryPoints, options = {}) {
+    if (!boundaryPoints || boundaryPoints.length < 3) {
+      throw new Error('At least 3 boundary points are required');
+    }
 
-      const rx = x - this.center.x;
-      const ry = y - this.center.y;
-      const rz = z - this.center.z;
-      const rCart = Math.sqrt(rx * rx + ry * ry + rz * rz);
+    const order = options.order ?? 5;
+    const spacing = options.spacing ?? 0.015;  // 1.5cm
+    const relaxIterations = options.relaxIterations ?? 20;
+    const surfaceRatio = options.surfaceRatio ?? 0.4;
+    const physicsModel = options.physicsModel ?? this.physics.model ?? 'pbd';
 
-      if (rCart < 1e-10) continue;
+    const FittingCalculator = options.fitter;
+    const Matrix = options.Matrix;
 
-      const theta = Math.acos(rz / rCart);
-      const phi = Math.atan2(ry, rx);
-      
-      // 委托给球谐类
-      const rSH = sh.evaluate(coeffs, theta, phi);
+    if (!FittingCalculator) {
+      throw new Error('FittingCalculator (fitter) required in options');
+    }
 
-      if (rCart >= rSH) {
-        return {
-          x: this.center.x + rSH * Math.sin(theta) * Math.cos(phi),
-          y: this.center.y + rSH * Math.sin(theta) * Math.sin(phi),
-          z: this.center.z + rSH * Math.cos(theta)
+    if (!Matrix) {
+      throw new Error('Matrix class required in options');
+    }
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // 步骤 1: 拟合边界（椭圆傅里叶描述符）
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    if (!this._fittingCalculator) {
+      this._fittingCalculator = new FittingCalculator({
+        Matrix,
+        verbose: this.verbose
+      });
+    }
+
+    const fitter = this._fittingCalculator;
+
+    // ⭐ 使用非增量版本进行首次拟合（完整边界）
+    const fitResult = fitter.fit2DEllipticFourier(boundaryPoints, order, {
+      verbose: this.verbose
+    });
+
+    if (this.verbose) {
+      console.log(`[Object] EFD fit: order=${order}, residualX=${fitResult.residualX.toExponential(3)}, residualY=${fitResult.residualY.toExponential(3)}`);
+    }
+
+    // ⭐ 初始化增量拟合状态栈（为未来的边界编辑做准备）
+    this._fitStackX = [];
+    this._fitStackY = [];
+
+    // 存储 EFD 表示
+    this.representation = {
+      type: 'elliptic-fourier-2d',
+      isClosed: true,
+      data: {
+        coeffsX: fitResult.coeffsX,
+        coeffsY: fitResult.coeffsY,
+        order: fitResult.order,
+        fitResult  // 保留完整结果（包含 evaluate 函数）
+      },
+      physicsState: this.representation?.physicsState ?? {
+        physicsModel,
+        particles: [],
+        constraints: [],
+        surfaceStartIndex: 0,
+        internalStartIndex: 0,
+        surfaceCount: 0,
+        internalCount: 0
+      },
+      topology: {
+        triangles: [],
+        edges: [],
+        internalEdges: [],
+        adjacency: null,
+        degree: null
+      },
+      editState: null,
+      geometryCache: {
+        volume: null,
+        surfaceArea: null,
+        sections: new Map()
+      },
+      material: {
+        uniform: true,
+        properties: null
+      },
+      metadata: {}
+    };
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // 步骤 2: 计算目标点数（2D 版本）
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    let targetCount = options.targetCount;
+
+    if (targetCount === undefined) {
+      // 计算边界框
+      const bbox = this._compute2DBoundingBox(boundaryPoints);
+      const width = bbox.max.x - bbox.min.x;
+      const height = bbox.max.y - bbox.min.y;
+
+      // 面积估算
+      const area = width * height * 0.7;  // 假设填充率 70%
+
+      // 点数估算：N ≈ Area / spacing²
+      const estimatedCount = Math.round(area / (spacing * spacing));
+
+      // 安全上限
+      const safetyLimit = 3000;
+      targetCount = Math.min(estimatedCount, safetyLimit);
+
+      // 最小值
+      targetCount = Math.max(targetCount, 30);
+
+      if (this.verbose) {
+        console.log(`[Object] Auto-calculated targetCount: ${targetCount} (estimated: ${estimatedCount}, area: ${area.toFixed(4)})`);
+      }
+    }
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // 步骤 3: 2D 气泡填充
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    const { surfacePoints, internalPoints } = this._generate2DBubblePacking(
+      fitResult,
+      targetCount,
+      spacing,
+      relaxIterations,
+      surfaceRatio
+    );
+
+    if (this.verbose) {
+      console.log(`[Object] 2D bubble packing: ${surfacePoints.length} surface, ${internalPoints.length} internal`);
+    }
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // 步骤 4: 构建拓扑（三角剖分）
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    const topology = this._build2DTopology(surfacePoints, internalPoints, spacing * 2.5);
+
+    if (this.verbose) {
+      console.log(`[Object] 2D topology: ${topology.triangles.length} triangles, ${topology.edges.length} edges`);
+    }
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // 步骤 5: 创建物理粒子
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    // 更新 surfacePoints（指针切换）
+    const newSurfacePoints = surfacePoints.map(sp =>
+      new Point(sp.position.x, sp.position.y, 0)  // 2D: z = 0
+    );
+
+    const globalMassScale = this.physics.mass || 1.0;
+    const surfaceMass = globalMassScale * 0.6 / surfacePoints.length;
+    const internalMass = globalMassScale * 0.4 / internalPoints.length;
+
+    const surfaceParticles = newSurfacePoints.map((point, index) => {
+      if (!point._physicsData) {
+        point._physicsData = {
+          position: { x: point.x, y: point.y, z: 0 },
+          prevPosition: { x: point.x, y: point.y, z: 0 },
+          velocity: { x: 0, y: 0, z: 0 },
+          fixed: false
         };
       }
+
+      return {
+        position: point._physicsData.position,
+        prevPosition: point._physicsData.prevPosition,
+        velocity: point._physicsData.velocity,
+        mass: surfaceMass,
+        invMass: surfaceMass > 0 ? 1 / surfaceMass : 0,
+        fixed: false,
+        _index: index,
+        _type: 'surface'
+      };
+    });
+
+    const internalParticles = internalPoints.map((node, index) => {
+      return {
+        position: node.position,
+        prevPosition: { x: node.position.x, y: node.position.y, z: 0 },
+        velocity: { x: 0, y: 0, z: 0 },
+        mass: internalMass,
+        invMass: internalMass > 0 ? 1 / internalMass : 0,
+        fixed: false,
+        _index: surfacePoints.length + index,
+        _type: 'internal'
+      };
+    });
+
+    const particles = [...surfaceParticles, ...internalParticles];
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // 步骤 6: 构建约束
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    const structuralConstraints = this._build2DStructuralConstraints(topology.edges, physicsModel);
+    const shearConstraints = this._build2DShearConstraints(topology.triangles, physicsModel);
+    const bendConstraints = this._build2DBendConstraints(topology.edges, topology.adjacency, physicsModel);
+
+    const constraints = [...structuralConstraints, ...shearConstraints, ...bendConstraints];
+
+    if (this.verbose) {
+      console.log(`[Object] 2D constraints: ${structuralConstraints.length} structural, ${shearConstraints.length} shear, ${bendConstraints.length} bend`);
     }
 
-    return null;
-  }
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // 步骤 7: 更新物理状态
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  _buildSurfaceAdjacency(surfacePoints, spacing) {
-    const maxDist = spacing * 2;
+    this.representation.physicsState = {
+      physicsModel,
+      particles,
+      constraints,
+      surfaceStartIndex: 0,
+      internalStartIndex: surfacePoints.length,
+      surfaceCount: surfacePoints.length,
+      internalCount: internalPoints.length
+    };
 
-    for (let i = 0; i < surfacePoints.length; i++) {
-      const p = surfacePoints[i];
-      
-      const distances = [];
-      for (let j = 0; j < surfacePoints.length; j++) {
-        if (i === j) continue;
-        const other = surfacePoints[j];
-        const dx = other.position.x - p.position.x;
-        const dy = other.position.y - p.position.y;
-        const dz = other.position.z - p.position.z;
-        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-        
-        if (dist < maxDist) {
-          distances.push({ index: j, dist });
-        }
-      }
+    this.representation.topology = topology;
 
-      distances.sort((a, b) => a.dist - b.dist);
-      p.neighbors = distances.slice(0, 3).map(d => d.index);
+    this.surfacePoints = newSurfacePoints;
+    this._isVolumetric = true;
+
+    this._surfacePointVersion++;
+    this._boundingBoxDirty = true;
+    this.metadata.modified = Date.now();
+
+    if (this.verbose) {
+      console.log(`[Object] Organic cloth generated: ${this.surfacePoints.length} surface points (mode=${this.mode}, call rebuildPhysicsTopology() to enable physics)`);
     }
-  }
-
-  _buildSurfaceTriangulation(surfacePoints) {
-    const triangles = [];
-    const edges = new Set();
-    const adjacency = new Map();
-
-    for (let i = 0; i < surfacePoints.length; i++) {
-      const p = surfacePoints[i];
-      adjacency.set(i, p.neighbors);
-
-      for (let j = 0; j < p.neighbors.length; j++) {
-        const n1 = p.neighbors[j];
-        const n2 = p.neighbors[(j + 1) % p.neighbors.length];
-
-        if (surfacePoints[n1].neighbors.includes(n2)) {
-          const tri = [i, n1, n2].sort((a, b) => a - b);
-          triangles.push(tri);
-
-          edges.add(`${tri[0]}-${tri[1]}`);
-          edges.add(`${tri[1]}-${tri[2]}`);
-          edges.add(`${tri[0]}-${tri[2]}`);
-        }
-      }
-    }
-
-    const uniqueTriangles = Array.from(
-      new Set(triangles.map(t => t.join(',')))
-    ).map(s => s.split(',').map(Number));
 
     return {
-      triangles: uniqueTriangles,
-      edges: Array.from(edges).map(e => e.split('-').map(Number)),
-      adjacency,
-      degree: Array.from(adjacency.values()).map(n => n.length)
+      surfacePoints: surfacePoints.length,
+      internalPoints: internalPoints.length,
+      structuralConstraints: structuralConstraints.length,
+      shearConstraints: shearConstraints.length,
+      bendConstraints: bendConstraints.length,
+      triangles: topology.triangles.length,
+      edges: topology.edges.length,
+      fitResult,
+      isVolumetric: this._isVolumetric,
+      controlPointsPreserved: this.controlPoints.length,
+      mode: this.mode
     };
   }
 
-  // ====================================================
-  // 材料参数（不均质）
-  // ====================================================
+  /**
+   * 2D 气泡填充算法
+   * 
+   * @private
+   * @param {Object} fitResult - EFD 拟合结果
+   * @param {Number} targetCount - 目标点数
+   * @param {Number} spacing - 点间距
+   * @param {Number} iterations - 松弛迭代次数
+   * @param {Number} surfaceRatio - 表面点比例
+   * @returns {Object} { surfacePoints, internalPoints }
+   */
+  _generate2DBubblePacking(fitResult, targetCount, spacing, iterations, surfaceRatio) {
+    // 计算边界框
+    const samples = fitResult.sample(100);
+    const bbox = this._compute2DBoundingBox(samples);
 
+    const boxWidth = bbox.max.x - bbox.min.x;
+    const boxHeight = bbox.max.y - bbox.min.y;
+
+    // 随机撒点
+    const points = [];
+    const cx = (bbox.min.x + bbox.max.x) / 2;
+    const cy = (bbox.min.y + bbox.max.y) / 2;
+
+    for (let i = 0; i < targetCount; i++) {
+      const x = cx + (Math.random() - 0.5) * boxWidth;
+      const y = cy + (Math.random() - 0.5) * boxHeight;
+
+      // 检查是否在边界内
+      if (this._isPointInsideEFD(x, y, fitResult)) {
+        points.push({
+          position: { x, y, z: 0 },
+          isSurface: false
+        });
+      }
+    }
+
+    if (this.verbose) {
+      console.log(`[Object] 2D bubble packing: ${points.length} points inside boundary`);
+    }
+
+    // 松弛迭代（2D 斥力）
+    for (let iter = 0; iter < iterations; iter++) {
+      for (let i = 0; i < points.length; i++) {
+        const pi = points[i].position;
+        let fx = 0, fy = 0;
+
+        for (let j = 0; j < points.length; j++) {
+          if (i === j) continue;
+
+          const pj = points[j].position;
+          const dx = pi.x - pj.x;
+          const dy = pi.y - pj.y;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+
+          if (dist < spacing && dist > 1e-6) {
+            const force = (spacing - dist) / dist;
+            fx += dx * force;
+            fy += dy * force;
+          }
+        }
+
+        // 更新位置
+        pi.x += fx * 0.1;
+        pi.y += fy * 0.1;
+
+        // 边界约束（保持在 EFD 内部）
+        if (!this._isPointInsideEFD(pi.x, pi.y, fitResult)) {
+          // 投影到最近的边界点
+          const projected = this._projectToEFDBoundary(pi.x, pi.y, fitResult);
+          pi.x = projected.x;
+          pi.y = projected.y;
+        }
+      }
+    }
+
+    // 标记表面点（距离边界最近的点）
+    const surfaceCount = Math.floor(points.length * surfaceRatio);
+    const pointsWithDist = points.map(p => ({
+      point: p,
+      distToBoundary: this._distanceToEFDBoundary(p.position.x, p.position.y, fitResult)
+    }));
+
+    // 按距离排序
+    pointsWithDist.sort((a, b) => a.distToBoundary - b.distToBoundary);
+
+    // 前 surfaceCount 个标记为表面点
+    for (let i = 0; i < surfaceCount; i++) {
+      pointsWithDist[i].point.isSurface = true;
+    }
+
+    // 吸附表面点到边界
+    for (let i = 0; i < surfaceCount; i++) {
+      const p = pointsWithDist[i].point.position;
+      const projected = this._projectToEFDBoundary(p.x, p.y, fitResult);
+      p.x = projected.x;
+      p.y = projected.y;
+    }
+
+    const surfacePoints = points.filter(p => p.isSurface);
+    const internalPoints = points.filter(p => !p.isSurface);
+
+    return { surfacePoints, internalPoints };
+  }
+
+  /**
+   * 判断点是否在 EFD 边界内（射线法）
+   * 
+   * @private
+   * @param {Number} x - x 坐标
+   * @param {Number} y - y 坐标
+   * @param {Object} fitResult - EFD 拟合结果
+   * @returns {Boolean} 是否在内部
+   */
+  _isPointInsideEFD(x, y, fitResult) {
+    // 射线法：从点发射水平射线，计算与边界的交点数
+    // 奇数个交点 → 在内部，偶数个交点 → 在外部
+
+    const samples = fitResult.sample(100);
+    let intersections = 0;
+
+    for (let i = 0; i < samples.length; i++) {
+      const p1 = samples[i];
+      const p2 = samples[(i + 1) % samples.length];
+
+      // 检查线段 (p1, p2) 是否与射线 (x, y) → (+∞, y) 相交
+      if ((p1.y > y) !== (p2.y > y)) {
+        // 计算交点的 x 坐标
+        const xIntersect = p1.x + (y - p1.y) * (p2.x - p1.x) / (p2.y - p1.y);
+
+        if (xIntersect > x) {
+          intersections++;
+        }
+      }
+    }
+
+    return intersections % 2 === 1;
+  }
+
+  /**
+   * 投影点到 EFD 边界
+   * 
+   * @private
+   * @param {Number} x - x 坐标
+   * @param {Number} y - y 坐标
+   * @param {Object} fitResult - EFD 拟合结果
+   * @returns {Object} { x, y }
+   */
+  _projectToEFDBoundary(x, y, fitResult) {
+    const samples = fitResult.sample(100);
+    let minDist = Infinity;
+    let closest = null;
+
+    for (const sample of samples) {
+      const dx = sample.x - x;
+      const dy = sample.y - y;
+      const dist = dx * dx + dy * dy;
+
+      if (dist < minDist) {
+        minDist = dist;
+        closest = sample;
+      }
+    }
+
+    return closest || { x, y };
+  }
+
+  /**
+   * 计算点到 EFD 边界的距离
+   * 
+   * @private
+   * @param {Number} x - x 坐标
+   * @param {Number} y - y 坐标
+   * @param {Object} fitResult - EFD 拟合结果
+   * @returns {Number} 距离
+   */
+  _distanceToEFDBoundary(x, y, fitResult) {
+    const projected = this._projectToEFDBoundary(x, y, fitResult);
+    const dx = projected.x - x;
+    const dy = projected.y - y;
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+
+  /**
+   * 构建 2D 拓扑（三角剖分）
+   * 
+   * 使用简单的"最近邻连接法"：
+   * - 对每个点，连接到最近的 K 个邻居
+   * - 使用 Delaunay 风格的连接策略
+   * 
+   * @private
+   * @param {Array} surfacePoints - 表面点
+   * @param {Array} internalPoints - 内部点
+   * @param {Number} maxDist - 最大连接距离
+   * @returns {Object} { triangles, edges, adjacency }
+   */
+  _build2DTopology(surfacePoints, internalPoints, maxDist) {
+    const allPoints = [...surfacePoints, ...internalPoints];
+    const n = allPoints.length;
+
+    const edges = [];
+    const edgeSet = new Set();
+
+    // 为每个点找到最近的 K 个邻居
+    const K = 6;  // 2D 网格平均连接数
+
+    for (let i = 0; i < n; i++) {
+      const pi = allPoints[i].position;
+
+      // 计算到所有其他点的距离
+      const neighbors = [];
+      for (let j = 0; j < n; j++) {
+        if (i === j) continue;
+
+        const pj = allPoints[j].position;
+        const dx = pj.x - pi.x;
+        const dy = pj.y - pi.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+
+        if (dist < maxDist) {
+          neighbors.push({ index: j, dist });
+        }
+      }
+
+      // 按距离排序，取前 K 个
+      neighbors.sort((a, b) => a.dist - b.dist);
+      const kNearest = neighbors.slice(0, K);
+
+      // 添加边
+      for (const neighbor of kNearest) {
+        const a = Math.min(i, neighbor.index);
+        const b = Math.max(i, neighbor.index);
+        const edgeKey = `${a}-${b}`;
+
+        if (!edgeSet.has(edgeKey)) {
+          edgeSet.add(edgeKey);
+          edges.push([a, b]);
+        }
+      }
+    }
+
+    // 构建三角形（简化版：使用贪心策略）
+    const triangles = [];
+    const triangleSet = new Set();
+
+    for (let i = 0; i < n; i++) {
+      const pi = allPoints[i].position;
+
+      // 找到相邻的点
+      const adjacentIndices = [];
+      for (const [a, b] of edges) {
+        if (a === i) adjacentIndices.push(b);
+        if (b === i) adjacentIndices.push(a);
+      }
+
+      // 尝试形成三角形
+      for (let j = 0; j < adjacentIndices.length; j++) {
+        for (let k = j + 1; k < adjacentIndices.length; k++) {
+          const idx1 = adjacentIndices[j];
+          const idx2 = adjacentIndices[k];
+
+          // 检查 idx1 和 idx2 是否相邻
+          const edgeKey = `${Math.min(idx1, idx2)}-${Math.max(idx1, idx2)}`;
+          if (edgeSet.has(edgeKey)) {
+            // 形成三角形
+            const tri = [i, idx1, idx2].sort((a, b) => a - b);
+            const triKey = tri.join('-');
+
+            if (!triangleSet.has(triKey)) {
+              triangleSet.add(triKey);
+              triangles.push(tri);
+            }
+          }
+        }
+      }
+    }
+
+    // 构建邻接表
+    const adjacency = Array(n).fill(null).map(() => []);
+    for (const [a, b] of edges) {
+      adjacency[a].push(b);
+      adjacency[b].push(a);
+    }
+
+    return {
+      triangles,
+      edges,
+      adjacency
+    };
+  }
+
+  /**
+   * 构建 2D 结构约束（Structural）
+   * 
+   * @private
+   * @param {Array} edges - 边列表
+   * @param {String} physicsModel - 物理模型
+   * @returns {Array} 约束列表
+   */
+  _build2DStructuralConstraints(edges, physicsModel) {
+    const constraints = [];
+    const stiffness = physicsModel === 'pbd' ? 1.0 : 1000.0;
+
+    for (const [a, b] of edges) {
+      constraints.push({
+        type: 'distance',
+        particleA: a,
+        particleB: b,
+        restLength: null,  // 将在首次物理步中计算
+        stiffness,
+        edgeType: 'structural'
+      });
+    }
+
+    return constraints;
+  }
+
+  /**
+   * 构建 2D 剪切约束（Shear）
+   * 
+   * @private
+   * @param {Array} triangles - 三角形列表
+   * @param {String} physicsModel - 物理模型
+   * @returns {Array} 约束列表
+   */
+  _build2DShearConstraints(triangles, physicsModel) {
+    const constraints = [];
+    const stiffness = physicsModel === 'pbd' ? 1.0 : 500.0;
+
+    // 对每个三角形，添加对角线约束
+    for (const [a, b, c] of triangles) {
+      // 添加 a-b, b-c, c-a 的对角线（如果不是结构边）
+      // 简化：直接添加所有三条边的约束
+      constraints.push({
+        type: 'distance',
+        particleA: a,
+        particleB: b,
+        restLength: null,
+        stiffness,
+        edgeType: 'shear'
+      });
+
+      constraints.push({
+        type: 'distance',
+        particleA: b,
+        particleB: c,
+        restLength: null,
+        stiffness,
+        edgeType: 'shear'
+      });
+
+      constraints.push({
+        type: 'distance',
+        particleA: c,
+        particleB: a,
+        restLength: null,
+        stiffness,
+        edgeType: 'shear'
+      });
+    }
+
+    return constraints;
+  }
+
+  /**
+   * 构建 2D 弯曲约束（Bend）
+   * 
+   * @private
+   * @param {Array} edges - 边列表
+   * @param {Array} adjacency - 邻接表
+   * @param {String} physicsModel - 物理模型
+   * @returns {Array} 约束列表
+   */
+  _build2DBendConstraints(edges, adjacency, physicsModel) {
+    const constraints = [];
+    const stiffness = physicsModel === 'pbd' ? 0.5 : 200.0;
+
+    // 对每条边，找到相邻的两个三角形，添加弯曲约束
+    for (const [a, b] of edges) {
+      // 找到 a 和 b 的共同邻居
+      const neighborsA = new Set(adjacency[a]);
+      const neighborsB = new Set(adjacency[b]);
+
+      const commonNeighbors = [...neighborsA].filter(n => neighborsB.has(n) && n !== a && n !== b);
+
+      if (commonNeighbors.length >= 2) {
+        // 添加弯曲约束：连接对角顶点
+        const c = commonNeighbors[0];
+        const d = commonNeighbors[1];
+
+        constraints.push({
+          type: 'distance',
+          particleA: c,
+          particleB: d,
+          restLength: null,
+          stiffness,
+          edgeType: 'bend'
+        });
+      }
+    }
+
+    return constraints;
+  }
+
+  /**
+   * 计算 2D 边界框
+   * 
+   * @private
+   * @param {Array} points - 点集
+   * @returns {Object} { min: {x, y}, max: {x, y} }
+   */
+  _compute2DBoundingBox(points) {
+    if (points.length === 0) {
+      return { min: { x: 0, y: 0 }, max: { x: 0, y: 0 } };
+    }
+
+    let minX = Infinity, minY = Infinity;
+    let maxX = -Infinity, maxY = -Infinity;
+
+    for (const p of points) {
+      if (p.x < minX) minX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y > maxY) maxY = p.y;
+    }
+
+    return {
+      min: { x: minX, y: minY },
+      max: { x: maxX, y: maxY }
+    };
+  }
+
+  // === 材料参数 ===
+  
   setMaterialProperties(propertyFunc) {
     this.representation.material.uniform = false;
     this.representation.material.properties = propertyFunc;
@@ -1985,11 +3261,7 @@ export class Object {
 
   getMaterialAt(point) {
     if (this.representation.material.uniform) {
-      return {
-        stiffness: 1000,
-        damping: 10,
-        mass: 1.0
-      };
+      return { stiffness: 1000, damping: 10, mass: 1.0 };
     }
 
     const dx = point.x - this.center.x;
@@ -2007,240 +3279,509 @@ export class Object {
     return this.representation.material.properties(theta, phi);
   }
 
-  // ====================================================
-  // ⭐ 物理接口（PBD 标准）
-  // ====================================================
+  // === 物理拓扑重建 ===
 
   /**
-   * ⭐ 获取物理视图（PBD 标准接口 + 布料增强）
+   * 重建物理拓扑（唯一合法物理入口）
    * 
-   * 返回 { particles, constraints, commit }
-   * - particles: 包装后的粒子数组（不直接暴露 Point）
-   * - constraints: 约束数组（布料：距离 + 弯曲）
-   * - commit: 回调函数，用于同步物理结果回 surfacePoints
+   * 清空旧物理数据，重新生成 particles 和 constraints，
+   * 强制设置 this.mode = 'discrete'，使对象可被物理系统访问。
    * 
-   * @returns {Object} - { particles, constraints, commit }
+   * 支持的类型：cloth, elliptic-fourier-2d, spherical-harmonics, line, points
+   * 
+   * @param {Object} options
+   * @param {Boolean} options.force - 强制重建约束
+   * @returns {Object} 重建结果统计
    */
-  getPhysicsView() {
+  rebuildPhysicsTopology(options = {}) {
+    const force = options.force ?? false;
+
     if (this.surfacePoints.length === 0) {
-      return {
-        particles: [],
-        constraints: [],
-        commit: () => {}
-      };
+      throw new Error(
+        `[Object] 无法重建物理拓扑：surfacePoints 为空。\n` +
+        `  请先调用生成方法：generateClothMesh/generateOrganicCloth/generateVolumetricMesh/defineLineTopology\n` +
+        `  对象：${this.metadata.name}`
+      );
     }
 
-    // ⭐ 修正：支持不均匀质量密度
-    // this.physics.mass 作为全局缩放因子
-    const globalMassScale = this.physics.mass;
-    const uniformMass = globalMassScale / this.surfacePoints.length;
+    if (this.verbose) {
+      console.log(`[Object] Rebuilding physics topology (type: ${this.representation.type})`);
+    }
+
+    const oldParticleCount = this.representation.physicsState?.particles?.length ?? 0;
+    const oldConstraintCount = this.representation.physicsState?.constraints?.length ?? 0;
+
+    // ⚠️ 关键：保存旧的物理状态（内部粒子数据）
+    const oldPhysicsState = this.representation.physicsState;
     
-    // ⭐ 创建粒子包装（零拷贝引用）
-    const particles = this.surfacePoints.map((point, index) => {
-      // 初始化物理属性（如果不存在）
-      if (!point._physicsData) {
-        point._physicsData = {
-          position: { x: point.x, y: point.y, z: point.z },
-          prevPosition: { x: point.x, y: point.y, z: point.z },
-          velocity: { x: 0, y: 0, z: 0 },
-          fixed: false
-        };
-      }
-      
-      // ⭐ 同步 position 到 _physicsData（确保一致）
-      point._physicsData.position.x = point.x;
-      point._physicsData.position.y = point.y;
-      point._physicsData.position.z = point.z;
+    // 清空物理数据
+    this.representation.physicsState = {
+      physicsModel: this.physics.model ?? 'pbd',
+      particles: [],
+      constraints: [],
+      surfaceStartIndex: 0,
+      internalStartIndex: 0,
+      surfaceCount: 0,
+      internalCount: 0
+    };
 
-      // ⭐ 计算粒子质量（支持不均匀密度）
-      let particleMass = uniformMass;
-      let invMass = particleMass > 0 ? 1 / particleMass : 0;
-      
-      if (!this.representation.material.uniform && 
-          this.representation.material.properties) {
-        // 获取该点的材料属性
-        const mat = this.getMaterialAt(point);
-        
-        if (mat && mat.mass !== undefined) {
-          // 使用材料指定的质量（相对值）
-          // globalMassScale 作为缩放因子
-          particleMass = mat.mass * globalMassScale / this.surfacePoints.length;
-          invMass = particleMass > 0 ? 1 / particleMass : 0;
-        }
-      }
-
-      // ⭐ 工程优化：返回粒子包装（零拷贝引用）
-      // - position / prevPosition / velocity 直接引用 _physicsData
-      // - 不创建新对象（避免 GC）
-      return {
-        // ✅ 直接引用（零拷贝）
-        position: point._physicsData.position,
-        prevPosition: point._physicsData.prevPosition,
-        velocity: point._physicsData.velocity,
-        
-        // ⭐ 质量相关（支持不均匀密度）
-        mass: particleMass,
-        invMass: invMass,
-        
-        // 是否固定
-        fixed: point._physicsData.fixed,
-        
-        // 内部索引（用于同步）
-        _index: index
-      };
-    });
-
-    // ⭐ 修正：使用预生成的约束（不重复构建）
+    const type = this.representation.type;
+    let particles = [];
     let constraints = [];
-    
-    if (this.representation.type === 'cloth') {
-      // 布料：使用缓存的约束
-      if (this.representation.physicsState?.constraints) {
-        constraints = this.representation.physicsState.constraints;
-      } else {
-        console.warn('Cloth constraints not generated. Call generateClothPhysicsState() first.');
-      }
+    const globalMassScale = this.physics.mass ?? 1.0;
+
+    if (type === 'cloth' || type === 'elliptic-fourier-2d' || type === 'spherical-harmonics') {
       
-      // ⭐ 修正：在这里统一解析固定点约束（从编辑态）
-      if (this.representation.editState?.constraints) {
-        for (const ec of this.representation.editState.constraints) {
-          if (ec.type === 'fixed') {
-            for (const idx of ec.particles) {
-              if (idx >= 0 && idx < particles.length) {
-                particles[idx].fixed = true;
-                particles[idx].invMass = 0;  // 固定点质量无限大
+      if (this.representation.topology.triangles.length > 0 && !force) {
+        const topology = this.representation.topology;
+
+        if (this._isVolumetric && oldPhysicsState.surfaceCount > 0) {
+          // 体积网格：表面点 + 内部点
+          const surfaceCount = oldPhysicsState.surfaceCount;
+          const internalCount = oldPhysicsState.internalCount;
+
+          const surfaceMass = globalMassScale * 0.6 / surfaceCount;
+          const internalMass = globalMassScale * 0.4 / internalCount;
+
+          // 表面粒子
+          for (let i = 0; i < surfaceCount; i++) {
+            const point = this.surfacePoints[i];
+            if (!point._physicsData) {
+              point._physicsData = {
+                position: { x: point.x, y: point.y, z: point.z },
+                prevPosition: { x: point.x, y: point.y, z: point.z },
+                velocity: { x: 0, y: 0, z: 0 },
+                fixed: false
+              };
+            }
+
+            const newParticle = {
+              position: point._physicsData.position,
+              prevPosition: point._physicsData.prevPosition,
+              velocity: point._physicsData.velocity,
+              mass: surfaceMass,
+              invMass: surfaceMass > 0 ? 1 / surfaceMass : 0,
+              fixed: point._physicsData.fixed,
+              _index: i,
+              _type: 'surface'
+            };
+            
+            // 保留旧粒子的 _sphericalCoords（如果存在且有效）
+            const oldParticle = oldPhysicsState.particles?.[i];
+            if (oldParticle && oldParticle._sphericalCoords) {
+              newParticle._sphericalCoords = oldParticle._sphericalCoords;
+            }
+            
+            particles.push(newParticle);
+          }
+
+          // 内部粒子：从旧状态恢复
+          if (internalCount > 0 && oldPhysicsState.particles) {
+            const internalStartIdx = oldPhysicsState.internalStartIndex;
+            for (let i = 0; i < internalCount; i++) {
+              const oldParticle = oldPhysicsState.particles[internalStartIdx + i];
+              if (oldParticle) {
+                const newParticle = {
+                  position: oldParticle.position,
+                  prevPosition: oldParticle.prevPosition,
+                  velocity: oldParticle.velocity,
+                  mass: internalMass,
+                  invMass: internalMass > 0 ? 1 / internalMass : 0,
+                  fixed: false,
+                  _index: surfaceCount + i,
+                  _type: 'internal'
+                };
                 
-                // 同步到 surfacePoint（保持一致性）
+                // 保留旧粒子的 _sphericalCoords（如果存在）
+                if (oldParticle._sphericalCoords) {
+                  newParticle._sphericalCoords = oldParticle._sphericalCoords;
+                }
+                
+                particles.push(newParticle);
+              }
+            }
+          }
+        } else {
+          // 非体积网格：只有表面点
+          const uniformMass = globalMassScale / this.surfacePoints.length;
+
+          for (let i = 0; i < this.surfacePoints.length; i++) {
+            const point = this.surfacePoints[i];
+            if (!point._physicsData) {
+              point._physicsData = {
+                position: { x: point.x, y: point.y, z: point.z },
+                prevPosition: { x: point.x, y: point.y, z: point.z },
+                velocity: { x: 0, y: 0, z: 0 },
+                fixed: false
+              };
+            }
+
+            let particleMass = uniformMass;
+            if (!this.representation.material.uniform && this.representation.material.properties) {
+              const mat = this.getMaterialAt(point);
+              if (mat && mat.mass !== undefined) {
+                particleMass = mat.mass * globalMassScale / this.surfacePoints.length;
+              }
+            }
+
+            particles.push({
+              position: point._physicsData.position,
+              prevPosition: point._physicsData.prevPosition,
+              velocity: point._physicsData.velocity,
+              mass: particleMass,
+              invMass: particleMass > 0 ? 1 / particleMass : 0,
+              fixed: point._physicsData.fixed,
+              _index: i,
+              _type: 'surface'
+            });
+          }
+        }
+
+        // 生成约束：如果有预生成的约束，复用它们
+        if (oldPhysicsState.constraints && oldPhysicsState.constraints.length > 0 && !force) {
+          constraints = oldPhysicsState.constraints;
+        } else if (topology.edges.length > 0) {
+          // 临时设置 particles 以便约束构建方法使用
+          this.representation.physicsState.particles = particles;
+          constraints = this._buildPhysicsConstraints();
+        }
+
+      } else {
+        // 没有预生成拓扑，简单网格
+        const uniformMass = globalMassScale / this.surfacePoints.length;
+
+        for (let i = 0; i < this.surfacePoints.length; i++) {
+          const point = this.surfacePoints[i];
+          if (!point._physicsData) {
+            point._physicsData = {
+              position: { x: point.x, y: point.y, z: point.z },
+              prevPosition: { x: point.x, y: point.y, z: point.z },
+              velocity: { x: 0, y: 0, z: 0 },
+              fixed: false
+            };
+          }
+
+          particles.push({
+            position: point._physicsData.position,
+            prevPosition: point._physicsData.prevPosition,
+            velocity: point._physicsData.velocity,
+            mass: uniformMass,
+            invMass: uniformMass > 0 ? 1 / uniformMass : 0,
+            fixed: point._physicsData.fixed,
+            _index: i
+          });
+        }
+
+        this.representation.physicsState.particles = particles;
+        constraints = this._buildPhysicsConstraints();
+      }
+
+    } else if (type === 'line') {
+      const uniformMass = globalMassScale / this.surfacePoints.length;
+
+      for (let i = 0; i < this.surfacePoints.length; i++) {
+        const point = this.surfacePoints[i];
+        if (!point._physicsData) {
+          point._physicsData = {
+            position: { x: point.x, y: point.y, z: point.z },
+            prevPosition: { x: point.x, y: point.y, z: point.z },
+            velocity: { x: 0, y: 0, z: 0 },
+            fixed: false
+          };
+        }
+
+        particles.push({
+          position: point._physicsData.position,
+          prevPosition: point._physicsData.prevPosition,
+          velocity: point._physicsData.velocity,
+          mass: uniformMass,
+          invMass: uniformMass > 0 ? 1 / uniformMass : 0,
+          fixed: point._physicsData.fixed,
+          _index: i
+        });
+      }
+
+      constraints = this._buildLineConstraints();
+
+    } else if (type === 'points') {
+      const uniformMass = globalMassScale / this.surfacePoints.length;
+
+      for (let i = 0; i < this.surfacePoints.length; i++) {
+        const point = this.surfacePoints[i];
+        if (!point._physicsData) {
+          point._physicsData = {
+            position: { x: point.x, y: point.y, z: point.z },
+            prevPosition: { x: point.x, y: point.y, z: point.z },
+            velocity: { x: 0, y: 0, z: 0 },
+            fixed: false
+          };
+        }
+
+        particles.push({
+          position: point._physicsData.position,
+          prevPosition: point._physicsData.prevPosition,
+          velocity: point._physicsData.velocity,
+          mass: uniformMass,
+          invMass: uniformMass > 0 ? 1 / uniformMass : 0,
+          fixed: point._physicsData.fixed,
+          _index: i
+        });
+      }
+
+      constraints = [];
+
+    } else {
+      throw new Error(
+        `[Object] 不支持的 representation 类型：${type}\n` +
+        `  支持：cloth, elliptic-fourier-2d, spherical-harmonics, line, points`
+      );
+    }
+
+    // 应用编辑态约束（固定点）
+    if (this.representation.editState?.constraints) {
+      for (const ec of this.representation.editState.constraints) {
+        if (ec.type === 'fixed') {
+          for (const idx of ec.particles) {
+            if (idx >= 0 && idx < particles.length) {
+              particles[idx].fixed = true;
+              particles[idx].invMass = 0;
+              if (idx < this.surfacePoints.length) {
                 this.surfacePoints[idx]._physicsData.fixed = true;
               }
             }
           }
         }
       }
-    } else if (this.representation.type === 'line') {
-      // ⭐ 新增：线形态约束
-      constraints = this._buildLineConstraints();
-    } else {
-      // 其他类型：动态构建
-      constraints = this._buildPhysicsConstraints();
     }
 
-    // ⭐⭐⭐ 约束语义验证（开发模式）⭐⭐⭐
+    // 更新物理状态
+    this.representation.physicsState.particles = particles;
+    this.representation.physicsState.constraints = constraints;
+    this.representation.physicsState.surfaceCount = this.surfacePoints.length;
+
+    // ⚠️ 设置 mode = 'discrete'（唯一入口）
+    this.mode = 'discrete';
+
+    // 验证约束语义（开发模式）
     if (typeof process !== 'undefined' && process.env && process.env.NODE_ENV === 'development') {
       this._validateConstraintSemantics(constraints);
     }
 
-    // ⭐ commit 回调 - 只同步位置，不触发拓扑变化
+    if (this.verbose) {
+      console.log(
+        `[Object] Physics rebuilt: ${oldParticleCount}→${particles.length} particles, ` +
+        `${oldConstraintCount}→${constraints.length} constraints, mode=${this.mode}`
+      );
+    }
+
+    return {
+      particles: particles.length,
+      constraints: constraints.length,
+      mode: this.mode,
+      type: this.representation.type,
+      isVolumetric: this._isVolumetric
+    };
+  }
+
+  // === 物理接口（零拷贝）===
+
+  /**
+   * 获取物理视图（强约束）
+   * 
+   * 只有 mode === 'discrete' 的对象才能被物理系统访问。
+   * 非 discrete 模式直接抛出 Error。
+   * 
+   * @returns {Object} { particles, constraints, commit }
+   * @throws {Error} 当 mode !== 'discrete'
+   */
+  getPhysicsView() {
+    if (this.mode !== 'discrete') {
+      throw new Error(
+        `[Object] 非法物理访问：当前 Object 不是可物理对象。\n` +
+        `  当前模式：${this.mode}\n` +
+        `  要求模式：discrete\n` +
+        `  解决方案：\n` +
+        `    1. 如果是 mesh/cloth/line，调用 rebuildPhysicsTopology()\n` +
+        `    2. 如果是球谐/拟合对象，不能进入物理系统\n` +
+        `  对象名称：${this.metadata.name}`
+      );
+    }
+
+    const particles = this.representation.physicsState.particles;
+    const constraints = this.representation.physicsState.constraints;
+
+    if (!particles || particles.length === 0) {
+      throw new Error(
+        `[Object] 物理数据不完整：particles 为空。\n` +
+        `  这通常意味着 rebuildPhysicsTopology() 未正确执行。\n` +
+        `  对象名称：${this.metadata.name}`
+      );
+    }
+
+    if (!constraints) {
+      throw new Error(
+        `[Object] 物理数据不完整：constraints 未定义。\n` +
+        `  这通常意味着 rebuildPhysicsTopology() 未正确执行。\n` +
+        `  对象名称：${this.metadata.name}`
+      );
+    }
+
     const commit = () => {
-      for (let i = 0; i < particles.length; i++) {
+      for (let i = 0; i < particles.length && i < this.surfacePoints.length; i++) {
         const particle = particles[i];
         const point = this.surfacePoints[i];
         
-        // ⭐ 零拷贝优化：
-        // - particle.position/prevPosition/velocity 已经是 _physicsData 的引用
-        // - 不需要复制，只需同步 point.x/y/z
-        
-        // ✅ 同步位置到 Point（用于几何计算）
         point.x = particle.position.x;
         point.y = particle.position.y;
         point.z = particle.position.z;
-        
-        // ✅ _physicsData 已自动更新（因为是引用）
-        // - particle.position === point._physicsData.position
-        // - particle.prevPosition === point._physicsData.prevPosition
-        // - particle.velocity === point._physicsData.velocity
       }
       
-      // ⭐ 关键修正：只标记 bounding box dirty，不清空拓扑
       this._onSurfacePositionsUpdated();
     };
 
-    return {
-      particles,
-      constraints,
-      commit
-    };
+    return { particles, constraints, commit };
   }
 
-  /**
-   * ⭐ 新增：物理位置更新（不影响拓扑）
-   * 
-   * 与 _onSurfacePointsChanged() 的区别：
-   * - 只标记 bounding box dirty
-   * - 不清空拓扑
-   * - 不清空几何缓存
-   * - 不触发重新拟合
-   * 
-   * @private
-   */
   _onSurfacePositionsUpdated() {
-    // 只标记边界盒需要更新
     this._boundingBoxDirty = true;
-    
-    // 更新修改时间
     this.metadata.modified = Date.now();
     
-    // 注意：不增加 _surfacePointVersion
-    // 注意：不清空 topology
-    // 注意：不清空 geometryCache
-    // 注意：不清空 _internalNodes
+    // ⭐ 更新法向量（用于渲染）
+    this._updateNormals();
   }
 
   /**
-   * ⭐⭐⭐ 约束语义验证（开发模式）⭐⭐⭐
+   * 更新表面法向量（用于渲染）
    * 
-   * 验证约束数据是否符合 PhysicsSystem 的双轨语义规范：
+   * 算法：加权面法向累加法 (Weighted Face Normal Accumulation)
    * 
-   * 规则 1: type === 'distance' 只允许以下字段
-   * - ✅ i, j, particles, restLength, distance, compliance, edgeType
-   * - ❌ stiffness, damping, k
+   * 步骤：
+   * 1. 清零所有表面点的法向
+   * 2. 遍历三角形，计算面法向
+   * 3. 将面法向累加到三个顶点
+   * 4. 归一化所有顶点法向
    * 
-   * 规则 2: type === 'spring' 只允许以下字段
-   * - ✅ i, j, particles, restLength, stiffness, damping
-   * - ❌ compliance, lambda
-   * 
-   * 规则 3: type === 'bending' / 'line_bending' 只允许以下字段
-   * - ✅ particles, restAngle, compliance
-   * - ❌ stiffness, damping
-   * 
-   * 规则 4: 同一粒子对 (i, j) 不能同时存在 spring 和 distance
+   * 优势：
+   * - 考虑三角形面积权重
+   * - 自动处理共享顶点
+   * - 平滑的法向过渡
    * 
    * @private
-   * @param {Array} constraints 
    */
+  _updateNormals() {
+    const topology = this.representation.topology;
+    if (!topology || !topology.triangles) {
+      return;  // 没有拓扑信息，跳过
+    }
+
+    const particles = this.representation.physicsState?.particles;
+    if (!particles) {
+      return;  // 没有物理粒子，跳过
+    }
+
+    const surfaceCount = this.representation.physicsState?.surfaceCount || this.surfacePoints.length;
+
+    // 步骤 1: 清零所有表面点的法向
+    for (let i = 0; i < surfaceCount; i++) {
+      const p = particles[i];
+      if (!p.normal) {
+        p.normal = { x: 0, y: 0, z: 0 };
+      } else {
+        p.normal.x = 0;
+        p.normal.y = 0;
+        p.normal.z = 0;
+      }
+    }
+
+    // 步骤 2 & 3: 遍历三角形，计算并累加面法向
+    for (const tri of topology.triangles) {
+      const [ia, ib, ic] = tri;
+
+      // 跳过无效索引
+      if (ia >= surfaceCount || ib >= surfaceCount || ic >= surfaceCount) {
+        continue;
+      }
+
+      const pa = particles[ia].position;
+      const pb = particles[ib].position;
+      const pc = particles[ic].position;
+
+      // 计算边向量
+      const abx = pb.x - pa.x;
+      const aby = pb.y - pa.y;
+      const abz = pb.z - pa.z;
+
+      const acx = pc.x - pa.x;
+      const acy = pc.y - pa.y;
+      const acz = pc.z - pa.z;
+
+      // 叉积：面法向 = AB × AC
+      const nx = aby * acz - abz * acy;
+      const ny = abz * acx - abx * acz;
+      const nz = abx * acy - aby * acx;
+
+      // 面法向的模长（面积的两倍）作为权重
+      // 不归一化，让大三角形贡献更多权重
+
+      // 累加到三个顶点
+      particles[ia].normal.x += nx;
+      particles[ia].normal.y += ny;
+      particles[ia].normal.z += nz;
+
+      particles[ib].normal.x += nx;
+      particles[ib].normal.y += ny;
+      particles[ib].normal.z += nz;
+
+      particles[ic].normal.x += nx;
+      particles[ic].normal.y += ny;
+      particles[ic].normal.z += nz;
+    }
+
+    // 步骤 4: 归一化所有顶点法向
+    for (let i = 0; i < surfaceCount; i++) {
+      const n = particles[i].normal;
+      const mag = Math.sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
+
+      if (mag > 1e-10) {
+        n.x /= mag;
+        n.y /= mag;
+        n.z /= mag;
+      } else {
+        // 退化情况：使用默认法向
+        n.x = 0;
+        n.y = 1;
+        n.z = 0;
+      }
+    }
+  }
+
   _validateConstraintSemantics(constraints) {
     const errors = [];
-    const warnings = [];
-    const edgeMap = new Map();  // 用于检测重复边
+    const edgeMap = new Map();
 
     for (let idx = 0; idx < constraints.length; idx++) {
       const c = constraints[idx];
       
-      // ⭐ 规则 1: distance 约束字段验证
       if (c.type === 'distance') {
-        // 检查禁止字段
         if (c.stiffness !== undefined) {
-          errors.push(`Constraint ${idx} (distance): 'stiffness' field is not allowed. Use 'compliance' instead (compliance = 1/stiffness).`);
+          errors.push(`Constraint ${idx} (distance): 'stiffness' not allowed. Use 'compliance'.`);
         }
         if (c.damping !== undefined) {
-          errors.push(`Constraint ${idx} (distance): 'damping' field is not allowed. Use global 'airDamping' instead.`);
+          errors.push(`Constraint ${idx} (distance): 'damping' not allowed.`);
         }
         if (c.k !== undefined) {
-          errors.push(`Constraint ${idx} (distance): 'k' field is not allowed. Use 'compliance' for XPBD.`);
+          errors.push(`Constraint ${idx} (distance): 'k' not allowed. Use 'compliance'.`);
         }
         
-        // 检查必需字段
         if (c.restLength === undefined && c.distance === undefined) {
-          errors.push(`Constraint ${idx} (distance): Missing 'restLength' or 'distance' field.`);
+          errors.push(`Constraint ${idx} (distance): Missing 'restLength' or 'distance'.`);
         }
         
-        // 检查索引
         const i = c.i ?? c.particles?.[0];
         const j = c.j ?? c.particles?.[1];
         if (i === undefined || j === undefined) {
-          errors.push(`Constraint ${idx} (distance): Missing particle indices (i, j or particles).`);
+          errors.push(`Constraint ${idx} (distance): Missing particle indices.`);
         } else {
-          // 检测重复边
           const edgeKey = `${Math.min(i, j)}-${Math.max(i, j)}`;
           if (!edgeMap.has(edgeKey)) {
             edgeMap.set(edgeKey, []);
@@ -2249,28 +3790,23 @@ export class Object {
         }
       }
       
-      // ⭐ 规则 2: spring 约束字段验证
       else if (c.type === 'spring') {
-        // 检查禁止字段
         if (c.compliance !== undefined) {
-          errors.push(`Constraint ${idx} (spring): 'compliance' field is not allowed. Use 'stiffness' for force-based springs.`);
+          errors.push(`Constraint ${idx} (spring): 'compliance' not allowed. Use 'stiffness'.`);
         }
         if (c.lambda !== undefined) {
-          errors.push(`Constraint ${idx} (spring): 'lambda' field is not allowed (XPBD-only field).`);
+          errors.push(`Constraint ${idx} (spring): 'lambda' not allowed.`);
         }
         
-        // 检查必需字段
         if (c.stiffness === undefined) {
-          warnings.push(`Constraint ${idx} (spring): Missing 'stiffness' field. Default stiffness will be used.`);
+          errors.push(`Constraint ${idx} (spring): Missing 'stiffness'.`);
         }
         
-        // 检查索引
         const i = c.i ?? c.particles?.[0];
         const j = c.j ?? c.particles?.[1];
         if (i === undefined || j === undefined) {
-          errors.push(`Constraint ${idx} (spring): Missing particle indices (i, j or particles).`);
+          errors.push(`Constraint ${idx} (spring): Missing particle indices.`);
         } else {
-          // 检测重复边
           const edgeKey = `${Math.min(i, j)}-${Math.max(i, j)}`;
           if (!edgeMap.has(edgeKey)) {
             edgeMap.set(edgeKey, []);
@@ -2279,266 +3815,173 @@ export class Object {
         }
       }
       
-      // ⭐ 规则 3: bending / line_bending 约束字段验证
       else if (c.type === 'bending' || c.type === 'line_bending') {
-        // 检查禁止字段
         if (c.stiffness !== undefined) {
-          errors.push(`Constraint ${idx} (${c.type}): 'stiffness' field is not allowed. Use 'compliance' instead.`);
+          errors.push(`Constraint ${idx} (${c.type}): 'stiffness' not allowed. Use 'compliance'.`);
         }
         if (c.damping !== undefined) {
-          errors.push(`Constraint ${idx} (${c.type}): 'damping' field is not allowed. Use global 'airDamping' instead.`);
+          errors.push(`Constraint ${idx} (${c.type}): 'damping' not allowed.`);
         }
         
-        // 检查必需字段
-        if (c.restAngle === undefined) {
-          errors.push(`Constraint ${idx} (${c.type}): Missing 'restAngle' field.`);
+        if (c.compliance === undefined) {
+          errors.push(`Constraint ${idx} (${c.type}): Missing 'compliance'.`);
         }
+        
         if (!c.particles || c.particles.length < 3) {
-          errors.push(`Constraint ${idx} (${c.type}): Must have at least 3 particles.`);
+          errors.push(`Constraint ${idx} (${c.type}): Invalid 'particles' array.`);
         }
-        
-        // bending 约束不检测重复边（它们涉及多个粒子）
       }
     }
     
-    // ⭐ 规则 3: 检测混合约束（同一边同时有 spring 和 distance）
-    for (const [edgeKey, constraints] of edgeMap.entries()) {
-      if (constraints.length > 1) {
-        const types = constraints.map(c => c.type);
-        const hasSpring = types.includes('spring');
+    for (const [edgeKey, constraintList] of edgeMap) {
+      if (constraintList.length > 1) {
+        const types = constraintList.map(c => c.type);
         const hasDistance = types.includes('distance');
+        const hasSpring = types.includes('spring');
         
-        if (hasSpring && hasDistance) {
-          errors.push(`Edge ${edgeKey}: Mixed constraint types detected! Same edge has both 'spring' and 'distance' constraints. This causes double solving and instability.`);
-          
-          // 列出具体约束
-          const springIndices = constraints.filter(c => c.type === 'spring').map(c => c.index);
-          const distanceIndices = constraints.filter(c => c.type === 'distance').map(c => c.index);
-          errors.push(`  - Spring constraints: ${springIndices.join(', ')}`);
-          errors.push(`  - Distance constraints: ${distanceIndices.join(', ')}`);
+        if (hasDistance && hasSpring) {
+          errors.push(`Edge ${edgeKey} has both 'distance' and 'spring' constraints.`);
         }
       }
     }
-    
-    // ⭐ 输出验证结果
+
     if (errors.length > 0) {
-      console.error('❌ Constraint Semantic Validation Failed:');
-      errors.forEach(err => console.error(`  ${err}`));
-      throw new Error(`Constraint semantic validation failed with ${errors.length} error(s). See console for details.`);
-    }
-    
-    if (warnings.length > 0) {
-      console.warn('⚠️ Constraint Semantic Validation Warnings:');
-      warnings.forEach(warn => console.warn(`  ${warn}`));
-    }
-    
-    if (errors.length === 0 && warnings.length === 0) {
-      console.log('✅ Constraint semantic validation passed.');
+      console.error('Constraint semantic validation failed:');
+      for (const err of errors) {
+        console.error(`  - ${err}`);
+      }
+      throw new Error(`Found ${errors.length} constraint semantic errors`);
     }
   }
 
-  /**
-   * 构建物理约束（基于拓扑）
-   * 
-   * ⭐ 重要：此方法依赖稳定的拓扑结构
-   * - 必须在 generateDiamondNetwork() 之后调用
-   * - 拓扑在物理模拟期间保持稳定
-   * 
-   * @private
-   */
   _buildPhysicsConstraints() {
     const constraints = [];
-
-    // ⭐ 检查拓扑是否存在且有效
-    if (!this.representation.topology || 
-        !this.representation.topology.edges || 
-        this.representation.topology.edges.length === 0) {
-      console.warn('No topology available for physics constraints. Call generateDiamondNetwork() first.');
+    
+    if (this.representation.topology.edges.length === 0) {
+      console.warn('No topology available for physics constraints.');
       return constraints;
     }
 
-    // ⭐⭐⭐ 约束生成规范声明 ⭐⭐⭐
-    // 根据 physics.model 生成不同类型的约束：
-    // - 'pbd': 生成 type === 'distance'（PBD/XPBD 几何约束）
-    // - 'force': 生成 type === 'spring'（MSS 力学弹簧）
-
+    const { edges } = this.representation.topology;
     const physicsModel = this.physics.model || 'pbd';
-
-    // 基于拓扑边构建约束
-    for (const [i, j] of this.representation.topology.edges) {
-      if (i < this.surfacePoints.length && j < this.surfacePoints.length) {
-        const p1 = this.surfacePoints[i];
-        const p2 = this.surfacePoints[j];
-        
-        const dx = p2.x - p1.x;
-        const dy = p2.y - p1.y;
-        const dz = p2.z - p1.z;
-        const restLength = Math.sqrt(dx * dx + dy * dy + dz * dz);
-        
-        // ⭐ 获取材料属性（支持不均质材料）
-        let avgStiffness = 1000;  // 默认刚度
-        let avgDamping = 10;      // 默认阻尼
-        
-        if (!this.representation.material.uniform && 
-            this.representation.material.properties) {
-          const mat1 = this.getMaterialAt(p1);
-          const mat2 = this.getMaterialAt(p2);
-          avgStiffness = (mat1.stiffness + mat2.stiffness) / 2;
-          avgDamping = (mat1.damping + mat2.damping) / 2;
-        }
-        
-        // ⭐ 根据物理模式生成不同约束
-        if (physicsModel === 'pbd') {
-          // ✅ PBD 模式：生成 distance 约束
-          const compliance = avgStiffness > 0 ? 1 / avgStiffness : 0;
-          
-          constraints.push({
-            type: 'distance',           // ⭐ PBD 几何约束
-            i, j,                       // ⭐ 主索引（求解器使用）
-            particles: [i, j],          // 📋 辅助字段（序列化）
-            restLength,                 // ⭐ 静止长度
-            distance: restLength,       // ⭐ 别名（兼容）
-            compliance                  // ⭐ XPBD 柔度
-            // ❌ 禁止：stiffness, damping（PBD 不使用）
-          });
-        } else if (physicsModel === 'force') {
-          // ✅ Force 模式：生成 spring 约束
-          constraints.push({
-            type: 'spring',             // ⭐ MSS 力学弹簧
-            i, j,                       // ⭐ 主索引（求解器使用）
-            particles: [i, j],          // 📋 辅助字段（序列化）
-            restLength,                 // ⭐ 静止长度
-            stiffness: avgStiffness,    // ⭐ 弹簧刚度
-            damping: avgDamping         // ⭐ 弹簧阻尼
-            // ❌ 禁止：compliance（Force 不使用）
-          });
-        } else {
-          console.warn(`Unknown physics model: ${physicsModel}, defaulting to 'pbd'`);
-          
-          // 默认 PBD
-          const compliance = avgStiffness > 0 ? 1 / avgStiffness : 0;
-          constraints.push({
-            type: 'distance',
-            i, j,
-            particles: [i, j],
-            restLength,
-            distance: restLength,
-            compliance
-          });
-        }
+    
+    for (const [i, j] of edges) {
+      const p1 = this.surfacePoints[i];
+      const p2 = this.surfacePoints[j];
+      
+      const dx = p2.x - p1.x;
+      const dy = p2.y - p1.y;
+      const dz = p2.z - p1.z;
+      const restLength = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      
+      let avgStiffness = 1000;
+      let avgDamping = 10;
+      
+      if (!this.representation.material.uniform) {
+        const mat1 = this.getMaterialAt(p1);
+        const mat2 = this.getMaterialAt(p2);
+        avgStiffness = (mat1.stiffness + mat2.stiffness) / 2;
+        avgDamping = (mat1.damping + mat2.damping) / 2;
+      }
+      
+      if (physicsModel === 'pbd') {
+        const compliance = avgStiffness > 0 ? 1 / avgStiffness : 0;
+        constraints.push({
+          type: 'distance',
+          i, j,
+          particles: [i, j],
+          restLength,
+          distance: restLength,
+          compliance
+        });
+      } else if (physicsModel === 'force') {
+        constraints.push({
+          type: 'spring',
+          i, j,
+          particles: [i, j],
+          restLength,
+          stiffness: avgStiffness,
+          damping: avgDamping
+        });
       }
     }
-
+    
     return constraints;
   }
 
-  /**
-   * 固定特定点（用于物理模拟）
-   */
-  fixPoint(index, fixed = true) {
-    if (index >= 0 && index < this.surfacePoints.length) {
-      const point = this.surfacePoints[index];
-      if (!point._physicsData) {
-        point._physicsData = {
-          prevPosition: { x: point.x, y: point.y, z: point.z },
-          velocity: { x: 0, y: 0, z: 0 },
-          fixed: false
-        };
-      }
-      point._physicsData.fixed = fixed;
-    }
-  }
-
-  /**
-   * 固定多个点
-   */
-  fixPoints(indices, fixed = true) {
-    for (const index of indices) {
-      this.fixPoint(index, fixed);
-    }
-  }
-
-  /**
-   * 获取物理数据（旧接口，保留兼容性）
-  /**
-   * 启用物理
-   */
-  enablePhysics(options = {}) {
-    this.physics.enabled = true;
-    this.physics.mass = options.mass ?? 1.0;
-  }
-
-  // ====================================================
-  // 辅助工具
-  // ====================================================
-
   _positionKey(pos) {
-    const precision = 10000;
+    const precision = 1000;
     return `${Math.round(pos.x * precision)},${Math.round(pos.y * precision)},${Math.round(pos.z * precision)}`;
   }
 
-  _normalizeDirection(dir) {
-    const [x, y, z] = dir;
-    const mag = Math.sqrt(x * x + y * y + z * z);
-    return mag > 1e-10 ? [x / mag, y / mag, z / mag] : [0, 0, 1];
-  }
-
-  _directionsSimilar(dir1, dir2, threshold = 0.9) {
-    const dot = dir1[0] * dir2[0] + dir1[1] * dir2[1] + dir1[2] * dir2[2];
-    return Math.abs(dot) > threshold;
-  }
-
-  getBoundingBox() {
-    if (!this._boundingBoxDirty && this._boundingBox) {
-      return this._boundingBox;
-    }
-
-    if (this.surfacePoints.length === 0) {
-      return { min: { ...this.center }, max: { ...this.center } };
-    }
-
-    let minX = Infinity, minY = Infinity, minZ = Infinity;
-    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-
-    for (const p of this.surfacePoints) {
-      if (p.x < minX) minX = p.x;
-      if (p.y < minY) minY = p.y;
-      if (p.z < minZ) minZ = p.z;
-      if (p.x > maxX) maxX = p.x;
-      if (p.y > maxY) maxY = p.y;
-      if (p.z > maxZ) maxZ = p.z;
-    }
-
-    this._boundingBox = {
-      min: { x: minX, y: minY, z: minZ },
-      max: { x: maxX, y: maxY, z: maxZ }
+  // === 调试 ===
+  
+  getDebugInfo() {
+    return {
+      surfacePoints: this.surfacePoints.length,
+      controlPoints: this.controlPoints.length,
+      representation: this.representation.type,
+      isClosed: this.representation.isClosed,
+      isVolumetric: this._isVolumetric,
+      topology: {
+        triangles: this.representation.topology.triangles.length,
+        edges: this.representation.topology.edges.length
+      },
+      physicsState: {
+        particles: this.representation.physicsState?.particles?.length ?? 0,
+        constraints: this.representation.physicsState?.constraints?.length ?? 0,
+        surfaceCount: this.representation.physicsState?.surfaceCount ?? 0,
+        internalCount: this.representation.physicsState?.internalCount ?? 0
+      }
     };
-    this._boundingBoxDirty = false;
-
-    return this._boundingBox;
   }
 
-  // ====================================================
-  // 调试
-  // ====================================================
-
-  debug() {
-    console.log('=== Object Debug Info ===');
-    console.log('Name:', this.metadata.name);
-    console.log('Type:', this.representation.type);
-    console.log('Control Points:', this.controlPoints.length);
-    console.log('Surface Points:', this.surfacePoints.length);
-    console.log('Internal Nodes:', this._internalNodes ? this._internalNodes.length : 0);
-    console.log('Triangles:', this.representation.topology.triangles.length);
-    console.log('Edges:', this.representation.topology.edges.length);
-    if (this.representation.type === 'sphericalHarmonics') {
-      console.log('Geometry Cache:', {
-        volume: this.representation.geometryCache.volume,
-        surfaceArea: this.representation.geometryCache.surfaceArea,
-        sections: this.representation.geometryCache.sections.size
-      });
-    }
+  /**
+   * 获取渲染数据（视觉分层）
+   * 
+   * ⭐ 数据分层：
+   * - controlPoints: 用于绘制编辑手柄
+   * - surfacePoints: 用于绘制物体本身
+   * 
+   * 朴素模式：两者相同
+   * 体积模式：两者分离
+   * 
+   * @returns {Object} 渲染数据
+   */
+  getRenderData() {
+    return {
+      // 控制点（编辑手柄）
+      controlPoints: this.controlPoints.map(p => ({
+        x: p.x,
+        y: p.y,
+        z: p.z,
+        type: 'control'
+      })),
+      
+      // 表面点（物体渲染）
+      surfacePoints: this.surfacePoints.map(p => ({
+        x: p.x,
+        y: p.y,
+        z: p.z,
+        type: 'surface'
+      })),
+      
+      // 拓扑信息（用于绘制网格）
+      topology: {
+        triangles: this.representation.topology.triangles,
+        edges: this.representation.topology.edges
+      },
+      
+      // 状态标记
+      isVolumetric: this._isVolumetric,
+      
+      // 渲染提示
+      renderHints: {
+        showControlPoints: this._isVolumetric,  // 体积模式下显示控制点手柄
+        showSurfaceMesh: true,                   // 始终显示表面网格
+        controlPointSize: this._isVolumetric ? 0.05 : 0.03,  // 控制点大小
+        surfacePointSize: 0.02                   // 表面点大小
+      }
+    };
   }
 }
-
-export { SimpleFitCache };
