@@ -84,6 +84,11 @@ export class ObjectCore {
     
     // 表面点（物理/渲染）
     // ⭐ 显式设置策略（不隐含流程假设）
+    // 
+    // ⚠️ 重要不变量：surfacePoints 和 controlPoints 必须是不同的数组
+    // - controlPoints：参数源（驱动拟合）
+    // - surfacePoints：可变表示（物理/渲染）
+    // - 即使内容相同，也要确保数组独立，避免版本系统失效
     if (options.surfacePoints) {
       // 策略 1：显式提供 surfacePoints
       this.surfacePoints = options.surfacePoints;
@@ -92,7 +97,8 @@ export class ObjectCore {
       this.surfacePoints = points;
     } else if (this.controlPoints.length > 0) {
       // 策略 3：controlPoints 作为初始 surfacePoints（朴素模式）
-      this.surfacePoints = this.controlPoints;
+      // ⭐ 浅拷贝数组（Point 实例复用，数组独立）
+      this.surfacePoints = [...this.controlPoints];
     } else {
       // 策略 4：空对象
       this.surfacePoints = [];
@@ -113,6 +119,9 @@ export class ObjectCore {
     
     // 几何中心
     this.center = options.center ?? this._computeCenter(this.controlPoints);
+    
+    // 中心缓存（用于惰性 getter）
+    this._cachedCenter = null;
     
     // 边界盒
     this._boundingBox = null;
@@ -232,6 +241,84 @@ export class ObjectCore {
     return this.mode;
   }
 
+  // === 状态控制（受控写入） ===
+  
+  /**
+   * 设置体积网格状态（单一写入口）
+   * 
+   * ⭐ 这是修改 _isVolumetric 的唯一合法入口
+   * 
+   * 职责：
+   * - 设置 _isVolumetric 标志
+   * - 检查 mode 合法性
+   * - 冻结 surfacePoints 编辑权限
+   * 
+   * 约束：
+   * - Geometry 模块不得直接写 _isVolumetric
+   * - 必须通过此方法修改
+   * 
+   * @param {Boolean} isVolumetric - 是否为体积网格
+   * @throws {Error} 当试图在不兼容的 mode 下设置时
+   */
+  setVolumetricState(isVolumetric) {
+    // 类型检查
+    if (typeof isVolumetric !== 'boolean') {
+      throw new Error('[ObjectCore] setVolumetricState: isVolumetric must be a boolean');
+    }
+    
+    // 如果状态没有变化，直接返回
+    if (this._isVolumetric === isVolumetric) {
+      return;
+    }
+    
+    // 设置状态
+    this._isVolumetric = isVolumetric;
+    
+    // 更新元数据
+    this.metadata.modified = Date.now();
+    
+    if (this.verbose) {
+      console.log(`[ObjectCore] Volumetric state changed: ${isVolumetric}`);
+    }
+  }
+  
+  /**
+   * 获取几何中心（惰性计算）
+   * 
+   * ⭐ 这是访问 center 的推荐方式
+   * 
+   * 职责：
+   * - 检测 centerVersion 变化
+   * - 必要时重新计算 center
+   * - 缓存计算结果
+   * 
+   * 注意：
+   * - 直接访问 this.center 仍然有效（向后兼容）
+   * - 但可能获取到过期值
+   * - 推荐使用 getCenter() 确保值最新
+   * 
+   * @returns {Object} { x, y, z }
+   */
+  getCenter() {
+    // 检查是否需要重新计算
+    if (!this._cachedCenter || this._cachedCenter.version !== this._centerVersion) {
+      // 重新计算 center（基于 controlPoints）
+      this.center = this._computeCenter(this.controlPoints);
+      
+      // 缓存版本
+      this._cachedCenter = {
+        version: this._centerVersion,
+        value: this.center
+      };
+      
+      if (this.verbose) {
+        console.log(`[ObjectCore] Center recomputed: (${this.center.x.toFixed(3)}, ${this.center.y.toFixed(3)}, ${this.center.z.toFixed(3)})`);
+      }
+    }
+    
+    return this.center;
+  }
+
   // === 内部辅助方法 ===
   
   /**
@@ -263,6 +350,7 @@ export class ObjectCore {
    * 职责：标记状态失效（不执行流程操作）
    * - 标记版本号变化
    * - 标记缓存失效
+   * - 标记 center 失效
    * 
    * @private
    */
@@ -270,12 +358,16 @@ export class ObjectCore {
     this._surfacePointVersion++;
     this._boundingBoxDirty = true;
     this._fitCache.clear();
+    this._centerVersion++;  // ⭐ center 失效
   }
 
   /**
    * 控制点改变回调
    * 
    * 职责：标记状态失效（不执行流程操作）
+   * - 标记版本号变化
+   * - 标记缓存失效
+   * - 标记 center 失效
    * 
    * @private
    */
@@ -283,6 +375,7 @@ export class ObjectCore {
     this._controlPointVersion++;
     this._boundingBoxDirty = true;
     this._fitCache.clear();
+    this._centerVersion++;  // ⭐ center 失效
   }
 
   // === 几何方法转发（Proxy Methods） ===

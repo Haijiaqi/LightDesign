@@ -170,6 +170,55 @@ export class ObjectPhysics {
         );
       }
     }
+    
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // ⭐ 6. 粒子-点索引不变量校验（核心不变量）
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // 
+    // 系统约束：particles[i] 永远对应 surfacePoints[i]
+    // 
+    // 该不变量是整个物理系统的基础假设：
+    // - 约束通过索引 i, j 引用粒子
+    // - 粒子通过索引 i 引用表面点
+    // - 如果 surfacePoints 顺序改变，约束会绑定到错误粒子
+    // 
+    // 校验方法：
+    // - 如果旧物理状态存在，检查 surfacePoints 是否被重排
+    // - 使用 _surfacePointVersion 检测变化
+    // 
+    const oldPhysicsState = this.core.representation.physicsState;
+    if (!force && oldPhysicsState && oldPhysicsState.particles && oldPhysicsState.particles.length > 0) {
+      // 检查 surfacePointVersion 是否变化
+      if (oldPhysicsState._surfacePointVersion !== undefined && 
+          oldPhysicsState._surfacePointVersion !== this.core._surfacePointVersion) {
+        
+        if (this.core.verbose) {
+          console.warn(
+            `[ObjectPhysics] surfacePoints 版本变化检测：\n` +
+            `  旧版本：${oldPhysicsState._surfacePointVersion}\n` +
+            `  新版本：${this.core._surfacePointVersion}\n` +
+            `  自动启用 force rebuild`
+          );
+        }
+        
+        // 自动启用 force rebuild（降级策略）
+        return this.rebuildPhysicsTopology({ force: true });
+      }
+      
+      // 检查 surfacePoints 数量是否变化
+      const oldSurfaceCount = oldPhysicsState.surfaceCount || oldPhysicsState.particles.length;
+      if (oldSurfaceCount !== this.core.surfacePoints.length) {
+        throw new Error(
+          `[ObjectPhysics] 粒子-点索引不变量违反：surfacePoints 数量变化。\n` +
+          `  对象：${this.core.metadata.name}\n` +
+          `  旧数量：${oldSurfaceCount}\n` +
+          `  新数量：${this.core.surfacePoints.length}\n` +
+          `  原因：surfacePoints 被修改（添加/删除点）\n` +
+          `  解决：使用 force: true 强制重建\n` +
+          `    obj.rebuildPhysicsTopology({ force: true })`
+        );
+      }
+    }
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     // ⭐ 前提条件验证通过，开始构建物理拓扑
@@ -179,11 +228,11 @@ export class ObjectPhysics {
       console.log(`[ObjectPhysics] Rebuilding physics topology (type: ${type})`);
     }
 
-    const oldParticleCount = this.core.representation.physicsState?.particles?.length ?? 0;
-    const oldConstraintCount = this.core.representation.physicsState?.constraints?.length ?? 0;
+    const oldParticleCount = oldPhysicsState?.particles?.length ?? 0;
+    const oldConstraintCount = oldPhysicsState?.constraints?.length ?? 0;
 
     // ⚠️ 关键：保存旧的物理状态（内部粒子数据）
-    const oldPhysicsState = this.core.representation.physicsState;
+    // （oldPhysicsState 已在上面定义）
     
     // 清空物理数据
     this.core.representation.physicsState = {
@@ -288,30 +337,131 @@ export class ObjectPhysics {
             particles.push(newParticle);
           }
 
-          // 内部粒子：从旧状态恢复
-          if (internalCount > 0 && oldPhysicsState.particles) {
-            const internalStartIdx = oldPhysicsState.internalStartIndex;
-            for (let i = 0; i < internalCount; i++) {
-              const oldParticle = oldPhysicsState.particles[internalStartIdx + i];
-              if (oldParticle) {
-                const newParticle = {
-                  position: oldParticle.position,
-                  prevPosition: oldParticle.prevPosition,
-                  velocity: oldParticle.velocity,
-                  mass: internalMass,
-                  invMass: internalMass > 0 ? 1 / internalMass : 0,
-                  fixed: false,
-                  _index: surfaceCount + i,
-                  _type: 'internal'
-                };
+          // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+          // ⭐ 内部粒子恢复：三级优先级策略
+          // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+          // 
+          // 优先级 1：使用 core.representation.data.internalPoints（Geometry 保存的原始数据）
+          // 优先级 2：使用 oldPhysicsState.particles（增量优化）
+          // 优先级 3：抛出错误（数据完全缺失）
+          // 
+          if (internalCount > 0) {
+            const internalPoints = this.core.representation.data?.internalPoints;
+            const hasInternalPoints = internalPoints && Array.isArray(internalPoints) && internalPoints.length > 0;
+            const hasOldParticles = oldPhysicsState.particles && oldPhysicsState.particles.length > 0;
+            
+            if (hasInternalPoints) {
+              // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+              // ⭐ 优先级 1：从 Geometry 保存的 internalPoints 恢复
+              // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+              
+              // 验证数量一致性
+              if (internalPoints.length !== internalCount) {
+                console.warn(
+                  `[ObjectPhysics] internalPoints 数量不匹配：\n` +
+                  `  期望：${internalCount}\n` +
+                  `  实际：${internalPoints.length}\n` +
+                  `  回退到 oldPhysicsState`
+                );
                 
-                // 保留旧粒子的 _sphericalCoords（如果存在）
-                if (oldParticle._sphericalCoords) {
-                  newParticle._sphericalCoords = oldParticle._sphericalCoords;
+                // 回退到优先级 2
+                if (!hasOldParticles) {
+                  throw new Error(
+                    `[ObjectPhysics] 无法重建体积网格：internalPoints 数量不匹配且旧物理状态不可用。\n` +
+                    `  对象：${this.core.metadata.name}\n` +
+                    `  期望内部点数：${internalCount}\n` +
+                    `  实际 internalPoints 数量：${internalPoints.length}\n` +
+                    `  解决：使用 force: true 或重新生成几何\n` +
+                    `    obj.rebuildPhysicsTopology({ force: true })`
+                  );
+                }
+              } else {
+                // 数量匹配，使用 internalPoints
+                for (let i = 0; i < internalCount; i++) {
+                  const point = internalPoints[i];
+                  
+                  // internalPoints 可能是 {position: {x, y, z}} 或直接是 {x, y, z}
+                  const pos = point.position || point;
+                  
+                  const newParticle = {
+                    position: { x: pos.x, y: pos.y, z: pos.z },
+                    prevPosition: { x: pos.x, y: pos.y, z: pos.z },
+                    velocity: { x: 0, y: 0, z: 0 },
+                    mass: internalMass,
+                    invMass: internalMass > 0 ? 1 / internalMass : 0,
+                    fixed: false,
+                    _index: surfaceCount + i,
+                    _type: 'internal'
+                  };
+                  
+                  // 尝试保留 _sphericalCoords（如果旧粒子存在）
+                  if (hasOldParticles) {
+                    const internalStartIdx = oldPhysicsState.internalStartIndex || surfaceCount;
+                    const oldParticle = oldPhysicsState.particles[internalStartIdx + i];
+                    if (oldParticle && oldParticle._sphericalCoords) {
+                      newParticle._sphericalCoords = oldParticle._sphericalCoords;
+                    }
+                  }
+                  
+                  particles.push(newParticle);
                 }
                 
-                particles.push(newParticle);
+                if (this.core.verbose) {
+                  console.log(`[ObjectPhysics] Restored ${internalCount} internal particles from core.representation.data.internalPoints`);
+                }
               }
+              
+            } else if (hasOldParticles) {
+              // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+              // ⭐ 优先级 2：从 oldPhysicsState.particles 恢复（原有逻辑）
+              // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+              
+              const internalStartIdx = oldPhysicsState.internalStartIndex;
+              for (let i = 0; i < internalCount; i++) {
+                const oldParticle = oldPhysicsState.particles[internalStartIdx + i];
+                if (oldParticle) {
+                  const newParticle = {
+                    position: oldParticle.position,
+                    prevPosition: oldParticle.prevPosition,
+                    velocity: oldParticle.velocity,
+                    mass: internalMass,
+                    invMass: internalMass > 0 ? 1 / internalMass : 0,
+                    fixed: false,
+                    _index: surfaceCount + i,
+                    _type: 'internal'
+                  };
+                  
+                  // 保留旧粒子的 _sphericalCoords（如果存在）
+                  if (oldParticle._sphericalCoords) {
+                    newParticle._sphericalCoords = oldParticle._sphericalCoords;
+                  }
+                  
+                  particles.push(newParticle);
+                }
+              }
+              
+              if (this.core.verbose) {
+                console.log(`[ObjectPhysics] Restored ${internalCount} internal particles from oldPhysicsState`);
+              }
+              
+            } else {
+              // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+              // ⭐ 优先级 3：数据完全缺失，抛出明确错误
+              // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+              
+              throw new Error(
+                `[ObjectPhysics] 无法重建体积网格：缺少 internalPoints 且旧物理状态不可用。\n` +
+                `  对象：${this.core.metadata.name}\n` +
+                `  期望内部点数：${internalCount}\n` +
+                `  core.representation.data.internalPoints：${internalPoints ? '存在但为空' : '不存在'}\n` +
+                `  oldPhysicsState.particles：${oldPhysicsState.particles ? '存在但为空' : '不存在'}\n` +
+                `  原因：几何被完全重建或物理状态丢失\n` +
+                `  解决方案：\n` +
+                `    1. 使用 force: true 重新生成完整物理拓扑\n` +
+                `       obj.rebuildPhysicsTopology({ force: true })\n` +
+                `    2. 或重新生成几何（会自动保存 internalPoints）\n` +
+                `       obj.generateVolumetricMesh(options)`
+              );
             }
           }
         } else {
@@ -351,10 +501,57 @@ export class ObjectPhysics {
           }
         }
 
-        // 生成约束：如果有预生成的约束，复用它们
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        // ⭐ 约束生成/复用：收紧安全条件
+        // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        
+        // 检查是否可以安全复用旧约束
+        let canReuseConstraints = false;
+        
         if (oldPhysicsState.constraints && oldPhysicsState.constraints.length > 0 && !force) {
+          // 一致性校验：防止旧约束绑定到错误粒子
+          const oldParticleCount = oldPhysicsState.particles?.length || 0;
+          const newParticleCount = particles.length;
+          const oldSurfaceCount = oldPhysicsState.surfaceCount || 0;
+          const newSurfaceCount = this.core.surfacePoints.length;
+          const oldEdgeCount = oldPhysicsState._topologyEdgeCount || 0;
+          const newEdgeCount = topology.edges.length;
+          
+          // 检查拓扑一致性
+          const isTopologyConsistent = (
+            oldParticleCount === newParticleCount &&
+            oldSurfaceCount === newSurfaceCount &&
+            oldEdgeCount === newEdgeCount
+          );
+          
+          if (isTopologyConsistent) {
+            canReuseConstraints = true;
+            
+            if (this.core.verbose) {
+              console.log(`[ObjectPhysics] Reusing ${oldPhysicsState.constraints.length} existing constraints`);
+            }
+          } else {
+            // 拓扑不一致，自动降级为 force rebuild
+            if (this.core.verbose) {
+              console.warn(
+                `[ObjectPhysics] 拓扑不一致，无法复用约束：\n` +
+                `  粒子数：${oldParticleCount} → ${newParticleCount}\n` +
+                `  表面数：${oldSurfaceCount} → ${newSurfaceCount}\n` +
+                `  边数：${oldEdgeCount} → ${newEdgeCount}\n` +
+                `  自动执行 force rebuild`
+              );
+            }
+            
+            // 递归调用 force rebuild
+            return this.rebuildPhysicsTopology({ force: true });
+          }
+        }
+        
+        if (canReuseConstraints) {
+          // 安全复用
           constraints = oldPhysicsState.constraints;
         } else if (topology.edges.length > 0) {
+          // 重新生成约束
           // 临时设置 particles 以便约束构建方法使用
           this.core.representation.physicsState.particles = particles;
           constraints = this._buildPhysicsConstraints();
@@ -472,6 +669,10 @@ export class ObjectPhysics {
     this.core.representation.physicsState.particles = particles;
     this.core.representation.physicsState.constraints = constraints;
     this.core.representation.physicsState.surfaceCount = this.core.surfacePoints.length;
+    
+    // ⭐ 记录版本号和拓扑信息（用于下次校验）
+    this.core.representation.physicsState._surfacePointVersion = this.core._surfacePointVersion;
+    this.core.representation.physicsState._topologyEdgeCount = this.core.representation.topology.edges?.length || 0;
 
     // ⚠️ 设置 mode = 'discrete'（唯一入口）
     this.core.mode = 'discrete';
@@ -545,12 +746,30 @@ export class ObjectPhysics {
     }
     avgEdgeLength /= edges.length;
     
+    // ⭐ 计算模型尺度（使用 bounding box）
+    const bbox = this.core.getBoundingBox();
+    const bboxSize = Math.max(
+      bbox.max.x - bbox.min.x,
+      bbox.max.y - bbox.min.y,
+      bbox.max.z - bbox.min.z
+    );
+    
+    // 参考长度：使用模型尺度的 10%（而非固定 0.1）
+    // 这样确保归一化与模型尺度相关
+    const referenceLength = Math.max(bboxSize * 0.1, 0.01);  // 最小 0.01 防止除零
+    
     // 网格密度因子（边长越短，密度越高）
     // 高密度网格需要更软的约束以避免过约束
-    const densityFactor = Math.max(0.1, Math.min(1.0, avgEdgeLength / 0.1));
+    const densityFactor = Math.max(0.1, Math.min(1.0, avgEdgeLength / referenceLength));
     
     if (this.core.verbose) {
-      console.log(`[ObjectPhysics] Mesh density: avgEdgeLength=${avgEdgeLength.toFixed(4)}, densityFactor=${densityFactor.toFixed(3)}`);
+      console.log(
+        `[ObjectPhysics] Mesh density analysis:\n` +
+        `  avgEdgeLength: ${avgEdgeLength.toFixed(4)}\n` +
+        `  bboxSize: ${bboxSize.toFixed(4)}\n` +
+        `  referenceLength: ${referenceLength.toFixed(4)}\n` +
+        `  densityFactor: ${densityFactor.toFixed(3)}`
+      );
     }
     
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -763,7 +982,15 @@ export class ObjectPhysics {
     }
     avgEdgeLength /= edges.length;
     
-    const densityFactor = Math.max(0.1, Math.min(1.0, avgEdgeLength / 0.1));
+    // ⭐ 使用模型尺度（与 _buildPhysicsConstraints 一致）
+    const bbox = this.core.getBoundingBox();
+    const bboxSize = Math.max(
+      bbox.max.x - bbox.min.x,
+      bbox.max.y - bbox.min.y,
+      bbox.max.z - bbox.min.z
+    );
+    const referenceLength = Math.max(bboxSize * 0.1, 0.01);
+    const densityFactor = Math.max(0.1, Math.min(1.0, avgEdgeLength / referenceLength));
     
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     // ⭐ 阶段 1: 结构约束（沿着边）
