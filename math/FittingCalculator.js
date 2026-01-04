@@ -597,6 +597,231 @@ class FittingCalculator {
 
     return extrema;
   }
+
+  // ====================================================
+  // 通用线性拟合（全量）
+  // ====================================================
+
+  /**
+   * 通用线性最小二乘拟合（全量）
+   * 
+   * 接受任意设计矩阵 A 和目标向量 b，求解 Ax ≈ b
+   * 
+   * @param {Array<Array<number>>} A - 设计矩阵（行数组的数组）
+   * @param {Array<number>} b - 目标向量
+   * @param {Object} options - 选项
+   *   - verbose: 是否输出调试信息
+   * @returns {Object} - { coefficients, residual, condition }
+   */
+  fitLinear(A, b, options = {}) {
+    const verbose = options.verbose ?? this.verbose;
+
+    if (!A || A.length === 0) {
+      throw new Error('[FittingCalculator] Design matrix A is empty');
+    }
+
+    const m = A.length;
+    const n = A[0].length;
+
+    if (m < n) {
+      throw new Error(`[FittingCalculator] Not enough rows (${m}) for ${n} unknowns`);
+    }
+
+    if (verbose) {
+      console.log(`[FittingCalculator] Linear fit: rows=${m}, cols=${n}`);
+    }
+
+    // 转换为 Matrix 对象（列主序）
+    const matA = new this.Matrix(m, n);
+    for (let i = 0; i < m; i++) {
+      for (let j = 0; j < n; j++) {
+        matA.set(i, j, A[i][j]);
+      }
+    }
+    const bVec = new Float64Array(b);
+
+    // Householder QR 分解求解
+    const qrState = this.Matrix.householderQR(matA, bVec, { estimateCondition: true });
+
+    // 检查条件数
+    if (qrState.condition > 1e12) {
+      console.warn(`[FittingCalculator] High condition number (${qrState.condition.toExponential(2)}): fit may be unstable`);
+    }
+
+    const coefficients = this.Matrix.solveFromQR(qrState);
+
+    // 计算残差
+    const residual = this._computeLinearResidual(A, b, coefficients);
+
+    return {
+      coefficients: Array.from(coefficients),
+      residual,
+      condition: qrState.condition
+    };
+  }
+
+  // ====================================================
+  // 通用 1D 增量拟合（逐点缓存版）
+  // ====================================================
+
+  /**
+   * 通用 1D 增量拟合
+   * 
+   * 【重要】fitStack 结构：
+   * - fitStack[n] = 前 n+1 个点的 QR 状态
+   * - fitStack.meta = { cols, ... } 元数据
+   * 
+   * 【编辑支持】
+   * - 编辑点时，调用方应：
+   *   1. 将编辑点移到 controlPoints 末尾
+   *   2. 截断 fitStack.length = 最小编辑索引
+   *   3. 调用此方法，会从截断处正向增量重建
+   * 
+   * @param {Array<Array<number>>} A - 设计矩阵（行数组的数组）
+   * @param {Array<number>} b - 目标向量
+   * @param {Array} fitStack - 拟合状态栈（会被修改）
+   * @param {Object} options - 选项
+   *   - verbose: 是否输出调试信息
+   * @returns {Object} - { coefficients, residual, condition }
+   */
+  fitIncremental1D(A, b, fitStack, options = {}) {
+    const verbose = options.verbose ?? this.verbose;
+
+    if (!A || A.length === 0) {
+      throw new Error('[FittingCalculator] Design matrix A is empty');
+    }
+
+    const m = A.length;   // 点数（行数）
+    const n = A[0].length; // 系数数（列数）
+
+    if (m < n) {
+      throw new Error(`[FittingCalculator] Not enough rows (${m}) for ${n} unknowns`);
+    }
+
+    // 初始化元数据（使用数组属性）
+    if (!fitStack.meta) {
+      fitStack.meta = { cols: n };
+    }
+
+    // 检查列数变化（需要完全重建）
+    // 注意：meta.cols === 0 表示首次构建，不是"变化"
+    if (fitStack.meta.cols !== 0 && fitStack.meta.cols !== n) {
+      if (verbose) {
+        console.log(`[FittingCalculator] Column count changed (${fitStack.meta.cols} -> ${n}), full rebuild`);
+      }
+      fitStack.length = 0;
+    }
+    fitStack.meta.cols = n;
+
+    const stackLen = fitStack.length;
+
+    // 情况1：点数减少 → 截断
+    if (stackLen > m) {
+      if (verbose) {
+        console.log(`[FittingCalculator] Row count decreased (${stackLen} -> ${m}), truncating`);
+      }
+      fitStack.length = m;
+    }
+
+    // 确定起始位置
+    const startIdx = fitStack.length;
+
+    if (startIdx === 0) {
+      // 首次拟合或完全重建：从第一行开始
+      if (verbose) {
+        console.log(`[FittingCalculator] 1D full build: rows=${m}, cols=${n}`);
+      }
+
+      // 用第一行初始化 QR
+      const matA0 = new this.Matrix(1, n);
+      for (let j = 0; j < n; j++) {
+        matA0.set(0, j, A[0][j]);
+      }
+      const bVec0 = new Float64Array([b[0]]);
+
+      let qrState = this.Matrix.givensQR(matA0, bVec0, {
+        allowExtend: true,
+        estimateCondition: true
+      });
+
+      // 保存第一个状态（深拷贝）
+      fitStack.push(this._cloneQRState(qrState));
+
+      // 逐点添加剩余点
+      for (let i = 1; i < m; i++) {
+        const row = new Float64Array(A[i]);
+        const bval = b[i];
+        qrState = this.Matrix.givensExtend(qrState, row, bval, { estimateCondition: true });
+        fitStack.push(this._cloneQRState(qrState));
+      }
+
+      if (verbose) {
+        console.log(`[FittingCalculator] Built ${m} cached states`);
+      }
+    } else if (startIdx < m) {
+      // 增量添加：从最后一个状态开始扩展
+      if (verbose) {
+        console.log(`[FittingCalculator] 1D incremental: adding ${m - startIdx} points from index ${startIdx}`);
+      }
+
+      let qrState = fitStack[startIdx - 1];
+
+      for (let i = startIdx; i < m; i++) {
+        const row = new Float64Array(A[i]);
+        const bval = b[i];
+        qrState = this.Matrix.givensExtend(qrState, row, bval, { estimateCondition: true });
+        fitStack.push(this._cloneQRState(qrState));
+      }
+    }
+    // else startIdx === m：点数不变，无需操作
+
+    // 求解（使用最后一个状态）
+    const finalState = fitStack[m - 1];
+    const coefficients = this.Matrix.solveFromQR(finalState);
+
+    return {
+      coefficients: Array.from(coefficients),
+      residual: null,  // 增量模式不单独计算残差
+      condition: finalState.condition
+    };
+  }
+
+  /**
+   * 深拷贝 QR 状态
+   * @private
+   */
+  _cloneQRState(state) {
+    return {
+      R: new Float64Array(state.R),
+      Qtb: state.Qtb ? new Float64Array(state.Qtb) : null,
+      rows: state.rows,
+      cols: state.cols,
+      condition: state.condition,
+      residual: state.residual,
+      _compatibility: { ...state._compatibility }
+    };
+  }
+
+  /**
+   * 计算线性拟合残差
+   * @private
+   */
+  _computeLinearResidual(A, b, coefficients) {
+    const m = A.length;
+    const n = A[0].length;
+    let sumSq = 0;
+
+    for (let i = 0; i < m; i++) {
+      let predicted = 0;
+      for (let j = 0; j < n; j++) {
+        predicted += A[i][j] * coefficients[j];
+      }
+      const error = b[i] - predicted;
+      sumSq += error * error;
+    }
+
+    return Math.sqrt(sumSq / m);
+  }
 }
 
 // 导出

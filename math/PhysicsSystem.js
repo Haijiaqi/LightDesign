@@ -744,6 +744,8 @@ class PhysicsSystem {
           this._solveBendingConstraint(data.particles, constraint);
         } else if (constraint.type === 'line_bending') {
           this._solveLineBendingConstraint(data.particles, constraint);
+        } else if (constraint.type === 'shape_matching') {
+          this._solveShapeMatchingConstraint(data.particles, constraint, dt);
         }
       }
 
@@ -1148,6 +1150,121 @@ class PhysicsSystem {
       p2.position.x += perp.x * factor;
       p2.position.y += perp.y * factor;
       p2.position.z += perp.z * factor;
+    }
+  }
+
+  /**
+   * Shape Matching 约束求解
+   * 
+   * Shape Matching 是一种刚体/软体形状还原约束：
+   * 1. 计算当前参与粒子的质心
+   * 2. 根据 restOffsets 计算目标位置（相对于质心）
+   * 3. 将粒子朝目标位置移动
+   * 
+   * ⭐ 支持 PBD 和 XPBD：
+   * - PBD: compliance = 0（刚性形状匹配）
+   * - XPBD: compliance > 0（柔性形状匹配）
+   * 
+   * @private
+   * @param {Array} particles - 粒子数组
+   * @param {Object} constraint - 约束对象
+   *   - particles: 参与的粒子索引数组
+   *   - restOffsets: 每个粒子相对于质心的初始偏移 [{x, y, z}, ...]
+   *   - compliance: XPBD 柔度（可选，默认 0）
+   *   - stiffness: 刚度（可选，仅用于力模式）
+   * @param {number} dt - 时间步长
+   */
+  _solveShapeMatchingConstraint(particles, constraint, dt) {
+    const indices = constraint.particles;
+    const restOffsets = constraint.restOffsets;
+    
+    // ⭐ 边界检查
+    if (!indices || indices.length === 0) return;
+    if (!restOffsets || restOffsets.length !== indices.length) return;
+    
+    // 收集有效粒子
+    const validParticles = [];
+    const validOffsets = [];
+    let totalMass = 0;
+    let allFixed = true;
+    
+    for (let i = 0; i < indices.length; i++) {
+      const idx = indices[i];
+      const p = particles[idx];
+      if (!p) continue;
+      
+      validParticles.push(p);
+      validOffsets.push(restOffsets[i]);
+      totalMass += p.mass;
+      
+      if (!p.fixed) allFixed = false;
+    }
+    
+    if (validParticles.length === 0 || allFixed) return;
+    if (totalMass < 1e-10) return;
+    
+    // 1. 计算当前质心
+    let cx = 0, cy = 0, cz = 0;
+    for (const p of validParticles) {
+      cx += p.position.x * p.mass;
+      cy += p.position.y * p.mass;
+      cz += p.position.z * p.mass;
+    }
+    cx /= totalMass;
+    cy /= totalMass;
+    cz /= totalMass;
+    
+    // 2. 计算目标位置并修正
+    // ⭐ XPBD 支持
+    const compliance = constraint.compliance ?? 0;
+    let alpha = 0;
+    if (compliance > 0 && dt > 0) {
+      alpha = compliance / (dt * dt);
+    }
+    
+    // 计算总权重（用于归一化）
+    let totalW = 0;
+    for (const p of validParticles) {
+      if (!p.fixed) {
+        totalW += 1 / p.mass;
+      }
+    }
+    
+    if (totalW < 1e-10) return;
+    
+    // 应用修正
+    for (let i = 0; i < validParticles.length; i++) {
+      const p = validParticles[i];
+      const offset = validOffsets[i];
+      
+      if (p.fixed) continue;
+      
+      // 目标位置 = 质心 + restOffset
+      const targetX = cx + offset.x;
+      const targetY = cy + offset.y;
+      const targetZ = cz + offset.z;
+      
+      // 位置差（约束函数）
+      const dx = targetX - p.position.x;
+      const dy = targetY - p.position.y;
+      const dz = targetZ - p.position.z;
+      
+      // 计算修正量
+      const w = 1 / p.mass;
+      
+      // ⭐ XPBD 公式：Δx = w * Δλ * ∇C / (w + α)
+      // 简化情况：∇C ≈ -1（朝目标方向）
+      // Δλ = C / (w + α)
+      const denominator = w + alpha;
+      if (denominator < 1e-10) continue;
+      
+      const lambda = 1 / denominator;
+      const factor = w * lambda * this.constraintRelaxation;
+      
+      // 应用修正
+      p.position.x += dx * factor;
+      p.position.y += dy * factor;
+      p.position.z += dz * factor;
     }
   }
 
