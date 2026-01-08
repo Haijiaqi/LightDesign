@@ -15,23 +15,29 @@ const CONFIG = {
   screenHeight: 1080,
   // 双眼瞳距（厘米）
   eyeD: 6.3,
-  // 相机初始参数
-  initialCamRadius: 20,
-  initialCamAngle: 0,
-  initialCamElevation: 0,
-  // 光源初始参数
-  initialLightRadius: 5,
-  initialLightAngle: 0,
-  initialLightElevation: 0,
+
+  // ========== 阶段1修改：用户/场景布置 ==========
+  // 显示模式: '3D_LR'(左红右蓝), '3D_RL'(左蓝右红), '2D'(纯2D紫色)
+  displayMode: '3D_LR',
+  // 坐标系布置（厘米）：
+  // - 旋转中心 = 原点 (0, 0, 0)
+  // - 双眼在 +Y 方向，距原点 userDistanceFromOrigin
+  // - 屏幕在 +Y 方向，距原点 screenDistance
+  userEyeHeight: 0,              // Z 高度（统一为 0）
+  userDistanceFromOrigin: 10,    // 双眼到旋转中心距离
+  screenDistance: 50,            // 屏幕到旋转中心距离
+  // =============================================
+
+  // 光源初始位置（可参数化，后期支持操作移动）
+  lightX: 5,
+  lightY: 15,
+  lightZ: 0,
   // 点云密度
   spherePoints: 1000,
   cubePoints: 250,
   // 渲染和控制参数
   rotationSpeed: 0.05,
   moveSpeed: 0.5,
-  zoomSpeed: 0.1,
-  minZoom: 5,
-  maxZoom: 100,
   minElevation: -Math.PI / 2 + 0.1,
   maxElevation: Math.PI / 2 - 0.1,
   // 拖拽旋转灵敏度
@@ -52,6 +58,7 @@ const CONFIG = {
     smoothingFactor: 0.1, // 位置平滑因子 (0-1, 1=无平滑)
   },
 };
+
 
 // ========================
 // 2. 对象创建函数
@@ -197,10 +204,10 @@ function createSphere(x0, y0, z0, radius = 5, numPoints = 5000) {
 }
 
 function createSphereWithMeridians(
-  x0, 
-  y0, 
-  z0, 
-  radius = 2.5, 
+  x0,
+  y0,
+  z0,
+  radius = 2.5,
   numMeridians = 12,     // 每组大圆的数量（实际每组只有1个，但可旋转生成多个）
   pointsPerCircle = 50
 ) {
@@ -258,141 +265,26 @@ function createSphereWithMeridians(
   return new Object(points);
 }
 
-function createPoints() {
-  const points = [
-    new Point(0.1, -10, 1.3),
-    new Point(0, -10, 1.2),
-    new Point(0.1, -10, 1.1),
-    new Point(0, -10, 1),
-  ];
-  return new Object(points);
-}
-
-function createLatitudeSphere(
-  radius = 10,
-  latitudeCount = 10,
-  pointsPerCircle = 20,
-) {
-  const points = [];
-  const latitudeStep = Math.PI / (latitudeCount + 1);
-  for (let lat = 1; lat <= latitudeCount; lat++) {
-    const theta = lat * latitudeStep;
-    const sinTheta = Math.sin(theta);
-    const cosTheta = Math.cos(theta);
-    const circleRadius = radius * sinTheta;
-    for (let i = 0; i < pointsPerCircle; i++) {
-      const phi = (i / pointsPerCircle) * Math.PI * 2;
-      points.push(
-        new Point(
-          circleRadius * Math.cos(phi),
-          circleRadius * Math.sin(phi),
-          radius * cosTheta,
-        ),
-      );
-    }
-  }
-  return new Object(points);
-}
-
-function createRectangleFace(pointsCount = 1000, rotationZ = 0, ys = 0) {
-  const points = [];
-  const rad = (rotationZ * Math.PI) / 180;
-  const cosθ = Math.cos(rad);
-  const sinθ = Math.sin(rad);
-
-  const corners = [
-    { x: -2 + ys, y: 0 + ys, z: 8 + ys },
-    { x: 2 + ys, y: 0 + ys, z: 8 + ys },
-    { x: -2 + ys, y: 0 + ys, z: 0 + ys },
-    { x: 2 + ys, y: 0 + ys, z: 0 + ys },
-  ];
-
-  const rotatePoint = (p) => ({
-    x: p.x * cosθ - p.y * sinθ,
-    y: p.x * sinθ + p.y * cosθ,
-    z: p.z,
-  });
-
-  corners.forEach((corner) => {
-    const rotated = rotatePoint(corner);
-    points.push(new Point(rotated.x, rotated.y, rotated.z));
-  });
-
-  for (let i = 0; i < pointsCount; i++) {
-    const rawPoint = {
-      x: -2 + ys + Math.random() * 4,
-      y: 0 + ys,
-      z: 0 + ys + Math.random() * 8,
-    };
-    const rotated = rotatePoint(rawPoint);
-    points.push(new Point(rotated.x, rotated.y, rotated.z));
-  }
-  return new Object(points);
-}
-
-function createSphereWithLines(
-  radius = 3,
-  longitudeLines = 12,
-  latitudeLines = 8,
-  pointsPerLine = 30,
-) {
-  const points = [];
-  const halfPi = Math.PI / 2;
-  const twoPi = Math.PI * 2;
-
-  // 经度线
-  for (let lon = 0; lon < longitudeLines; lon++) {
-    const lonAngle = (lon / longitudeLines) * twoPi;
-    const cosLon = Math.cos(lonAngle);
-    const sinLon = Math.sin(lonAngle);
-    for (let i = 0; i < pointsPerLine; i++) {
-      const latAngle = halfPi - (i / (pointsPerLine - 1)) * Math.PI;
-      const cosLat = Math.cos(latAngle);
-      const sinLat = Math.sin(latAngle);
-      points.push(
-        new Point(
-          radius * cosLat * cosLon,
-          radius * cosLat * sinLon,
-          radius * sinLat,
-        ),
-      );
-    }
-  }
-
-  // 纬度线
-  for (let lat = 1; lat < latitudeLines; lat++) {
-    const latAngle = halfPi - (lat / latitudeLines) * Math.PI;
-    const cosLat = Math.cos(latAngle);
-    const sinLat = Math.sin(latAngle);
-    const circleRadius = radius * cosLat;
-    for (let i = 0; i < pointsPerLine; i++) {
-      const lonAngle = (i / (pointsPerLine - 1)) * twoPi;
-      const cosLon = Math.cos(lonAngle);
-      const sinLon = Math.sin(lonAngle);
-      points.push(
-        new Point(
-          circleRadius * cosLon,
-          circleRadius * sinLon,
-          radius * sinLat,
-        ),
-      );
-    }
-  }
-  return new Object(points);
-}
-
 // ========================
 // 3. 系统状态管理
 // ========================
+
+/**
+ * 创建测试场景物体
+ * 物体位于屏幕附近（Y ≈ screenDistance）
+ */
+function createTestScene() {
+  return [
+    createSphere(0, CONFIG.screenDistance, CONFIG.userEyeHeight, 3, 2000),     // 屏幕处主球
+    // createSphere(-6, CONFIG.screenDistance + 5, CONFIG.userEyeHeight, 2, 1000),
+    // createSphere(6, CONFIG.screenDistance + 5, CONFIG.userEyeHeight, 2, 1000),
+  ];
+}
+
 const SystemState = {
   ifControl: true,
   // 对象列表
-  objects: [
-    // createSphereWithMeridians(),
-    // createCube(2.5, Math.floor(CONFIG.cubePoints), -10, 0, 8.7, 30, true),
-    // createPlane()
-    createSphere(0, -5, 8.7)
-  ],
+  objects: createTestScene(),
   otherObjects: [], // 例如光源点
 
   // 窗口实例
@@ -400,15 +292,8 @@ const SystemState = {
   lightWindow: null,
   mainWindow: null,
 
-  // 相机控制参数
-  camAngle: CONFIG.initialCamAngle,
-  camElevation: CONFIG.initialCamElevation,
-  camRadius: CONFIG.initialCamRadius,
-
-  // 光源控制参数
-  lightAngle: CONFIG.initialLightAngle,
-  lightElevation: CONFIG.initialLightElevation,
-  lightRadius: CONFIG.initialLightRadius,
+  // 旋转中心（阶段1新增）
+  rotationCenter: null,
 
   // 鼠标拖拽状态
   isDragging: false,
@@ -417,6 +302,9 @@ const SystemState = {
 
   // 键盘状态
   keys: {},
+
+  // 鼠标边缘状态（阶段1新增）
+  mouseEdge: 0,  // -1=左边缘, 0=中间, 1=右边缘
 
   // DOM 元素
   canvas: null,
@@ -655,10 +543,26 @@ async function init() {
     (window.innerHeight / CONFIG.screenHeight) * CONFIG.screenYLengthCm,
     "main",
   );
+
+  // ========== 阶段1修改：用户初始位置 ==========
+  const eyeZ = CONFIG.userEyeHeight;
+
+  // 旋转中心 = 原点
+  SystemState.rotationCenter = new Point(0, 0, eyeZ);
+
+  // 双眼位置 = 原点向 +Y 方向偏移
+  SystemState.mainWindow.capital = new Point(0, CONFIG.userDistanceFromOrigin, eyeZ);
+
+  // 视线方向：从双眼指向屏幕（+Y 方向）
+  // direction.start = 屏幕参考点（屏幕平面上的锚点）
   SystemState.mainWindow.direction = new Vector(0, 0, 0);
-  SystemState.mainWindow.direction.normalInit(0, 0, CONFIG.screenWidth / 2, 0, 1, CONFIG.screenWidth / 2);
-  SystemState.mainWindow.capital =
-    SystemState.mainWindow.direction.getPoint(-CONFIG.screenWidth);
+  SystemState.mainWindow.direction.normalInit(
+    0, CONFIG.screenDistance, eyeZ,      // 起点 = 屏幕位置
+    0, CONFIG.screenDistance + 1, eyeZ   // 方向 = +Y
+  );
+  // 结果：direction.start = (0, 50, 0)，direction = (0, 1, 0)
+  // =============================================
+
 
   // 估算法向量
   estimateNormals();
@@ -711,18 +615,19 @@ function estimateNormals() {
 // 8. 光源更新
 // ========================
 function updateLight() {
-  const lightX =
-    SystemState.lightRadius *
-    Math.cos(SystemState.lightElevation) *
-    Math.cos(SystemState.lightAngle);
-  const lightY =
-    SystemState.lightRadius *
-    Math.cos(SystemState.lightElevation) *
-    Math.sin(SystemState.lightAngle);
-  const lightZ = SystemState.lightRadius * Math.sin(SystemState.lightElevation);
+  const eyeZ = CONFIG.userEyeHeight;
+  const targetY = CONFIG.screenDistance;  // 光照目标：物体所在位置
+
+  // 光源位置（使用 CONFIG 参数）
+  const lightX = CONFIG.lightX;
+  const lightY = CONFIG.lightY;
+  const lightZ = CONFIG.lightZ;
+
   const lightDir = new Vector(0, 0, 0);
-  lightDir.normalInit(lightX, lightY, lightZ + 8.7, 0, 0, 8.7);
+  // 光源从光源位置指向物体中心（0, targetY, eyeZ）
+  lightDir.normalInit(lightX, lightY, lightZ, 0, targetY, eyeZ);
   const lightCamPos = lightDir.getPoint(-5);
+
   SystemState.lightWindow.calculate(
     lightCamPos,
     0,
@@ -731,10 +636,11 @@ function updateLight() {
     1.0,
     SystemState.otherObjects,
   );
-  SystemState.otherObjects.length = 0; // 清空 otherObjects
+  SystemState.otherObjects.length = 0;
+  // 光源小球放在实际光源位置
   SystemState.otherObjects.push(
-    createSphere(lightCamPos.x, lightCamPos.y, lightCamPos.z, 0.5, 20),
-  ); // 添加光源点
+    createSphere(lightX, lightY, lightZ, 0.5, 20),
+  );
 }
 
 // ========================
@@ -953,8 +859,13 @@ function render() {
 
   for (let index = 0; index < SystemState.mainWindow.windowObjects.length; index++) {
     const element = SystemState.mainWindow.windowObjects[index];
-    for (let i = 0; i < element.points.length; i++) {
-      const p = element.points[i];
+    // 阶段1修改：优先使用 displayPoints，回退到 constructionPoints
+    const renderPoints = (element.displayPoints && element.displayPoints.length > 0)
+      ? element.displayPoints
+      : element.constructionPoints;
+    if (!renderPoints || renderPoints.length === 0) continue;
+    for (let i = 0; i < renderPoints.length; i++) {
+      const p = renderPoints[i];
       const commonParams = {
         light: p.light,
         pixelData,
@@ -990,53 +901,10 @@ function render() {
           getNeighbors,
         };
 
-        // --------------------------
-        // 处理非紫色点（红、蓝点）
-        // --------------------------
-        if (Math.abs(p.xL - p.xR) > 0) {
-          const first = p.xL % 2 === 0;
-
-          // ① 红色点（xL/yL，baseLight=35，maxLutIndex=3500）
-          if (first && p.xL !== 0 && p.yL !== 0) {
-            // 合并first为true/false的重复逻辑
-            drawColoredPoints({
-              ...commonParams,
-              colorType: "red",
-              x: p.xL,
-              y: p.yL,
-              baseLight: 35,
-              maxLutIndex: 350,
-            });
-          }
-
-          // ② 蓝色点（xR/yR，baseLight=50，maxLutIndex=5000）
-          if (p.xR !== 0 && p.yR !== 0) {
-            drawColoredPoints({
-              ...commonParams,
-              colorType: "blue",
-              x: p.xR,
-              y: p.yR,
-              baseLight: 50,
-              maxLutIndex: 500,
-            });
-          }
-          if (!first && p.xL !== 0 && p.yL !== 0) {
-            // 合并first为true/false的重复逻辑
-            drawColoredPoints({
-              ...commonParams,
-              colorType: "red",
-              x: p.xL,
-              y: p.yL,
-              baseLight: 35,
-              maxLutIndex: 350,
-            });
-          }
-        }
-        // --------------------------
-        // 处理紫色点（xL/yL，baseLight=50，maxLutIndex=5000）
-        // --------------------------
-        else {
-          if (p.xL !== 0 && p.yL !== 0) {
+        // ========== 阶段1新增：显示模式判断 ==========
+        if (CONFIG.displayMode === '2D') {
+          // 纯2D模式：使用 xM/yM，紫色
+          if (p.xM !== 0 && p.yM !== 0) {
             drawColoredPoints({
               ...commonParams,
               colorType: "purple",
@@ -1046,7 +914,74 @@ function render() {
               maxLutIndex: 500,
             });
           }
+        } else {
+          // 3D模式：根据 displayMode 决定左右眼颜色
+          const isLR = CONFIG.displayMode === '3D_LR';
+          const leftColor = isLR ? 'red' : 'blue';
+          const rightColor = isLR ? 'blue' : 'red';
+          const leftBaseLight = isLR ? 35 : 50;
+          const rightBaseLight = isLR ? 50 : 35;
+          const leftMaxLut = isLR ? 350 : 500;
+          const rightMaxLut = isLR ? 500 : 350;
+
+          // --------------------------
+          // 处理立体点（有左右眼差异）
+          // --------------------------
+          if (Math.abs(p.xL - p.xR) > 0) {
+            const first = p.xL % 2 === 0;
+
+            // ① 左眼点
+            if (first && p.xL !== 0 && p.yL !== 0) {
+              drawColoredPoints({
+                ...commonParams,
+                colorType: leftColor,
+                x: p.xL,
+                y: p.yL,
+                baseLight: leftBaseLight,
+                maxLutIndex: leftMaxLut,
+              });
+            }
+
+            // ② 右眼点
+            if (p.xR !== 0 && p.yR !== 0) {
+              drawColoredPoints({
+                ...commonParams,
+                colorType: rightColor,
+                x: p.xR,
+                y: p.yR,
+                baseLight: rightBaseLight,
+                maxLutIndex: rightMaxLut,
+              });
+            }
+
+            if (!first && p.xL !== 0 && p.yL !== 0) {
+              drawColoredPoints({
+                ...commonParams,
+                colorType: leftColor,
+                x: p.xL,
+                y: p.yL,
+                baseLight: leftBaseLight,
+                maxLutIndex: leftMaxLut,
+              });
+            }
+          }
+          // --------------------------
+          // 处理紫色点（无左右眼差异，如网格点）
+          // --------------------------
+          else {
+            if (p.xM !== 0 && p.yM !== 0) {
+              drawColoredPoints({
+                ...commonParams,
+                colorType: "purple",
+                x: p.xM,
+                y: p.yM,
+                baseLight: 50,
+                maxLutIndex: 500,
+              });
+            }
+          }
         }
+        // =============================================
       }
     }
   }
@@ -1058,46 +993,116 @@ function render() {
 // ========================
 // 11. 输入处理
 // ========================
+
+/**
+ * 用户绕旋转中心水平旋转
+ * 旋转 capital（双眼）、direction.start（屏幕参考点）、direction（视线方向）
+ * @param {number} angle - 旋转角度（弧度）
+ */
+function userRotate(angle) {
+  const center = SystemState.rotationCenter;
+  const cam = SystemState.mainWindow.capital;
+  const dir = SystemState.mainWindow.direction;
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+
+  // 1. capital（双眼）绕旋转中心旋转
+  const camDx = cam.x - center.x;
+  const camDy = cam.y - center.y;
+  cam.x = center.x + camDx * cos - camDy * sin;
+  cam.y = center.y + camDx * sin + camDy * cos;
+
+  // 2. direction.start（屏幕参考点）绕旋转中心旋转
+  const startDx = dir.start.x - center.x;
+  const startDy = dir.start.y - center.y;
+  dir.start.x = center.x + startDx * cos - startDy * sin;
+  dir.start.y = center.y + startDx * sin + startDy * cos;
+
+  // 3. direction 向量旋转（修复变量覆盖 bug）
+  const oldDirX = dir.x;
+  const oldDirY = dir.y;
+  dir.x = oldDirX * cos - oldDirY * sin;
+  dir.y = oldDirX * sin + oldDirY * cos;
+
+  // 4. 更新角度
+  dir.getAngle();
+  SystemState.mainWindow.getAngle();
+}
+
 function handleInput() {
   const keys = SystemState.keys;
 
-  // WASD 控制相机水平旋转 (模拟原始代码中的 Z/X/C/V/B/N/M)
-  if (
-    keys["z"] ||
-    keys["x"] ||
-    keys["c"] ||
-    keys["v"] ||
-    keys["b"] ||
-    keys["n"] ||
-    keys["m"]
-  ) {
+  // ========== 阶段1修改：ZXCBNM 控制旋转 ==========
+  // Z/X/C 左转（速度递减），B/N/M 右转（速度递增）
+  // 正角度 = 左转（物体在屏幕上向右移动）
+  if (keys["z"]) {
+    userRotate(CONFIG.rotationSpeed);         // 左转最快
     SystemState.ifControl = true;
-    if (keys["z"])
-      SystemState.mainWindow.horizontalRotation(-CONFIG.rotationSpeed);
-    if (keys["x"])
-      SystemState.mainWindow.horizontalRotation(-CONFIG.rotationSpeed * 0.5);
-    if (keys["c"])
-      SystemState.mainWindow.horizontalRotation(-CONFIG.rotationSpeed * 0.25);
-    if (keys["v"]) SystemState.mainWindow.horizontalRotation(0); // 无旋转
-    if (keys["b"])
-      SystemState.mainWindow.horizontalRotation(CONFIG.rotationSpeed * 0.25);
-    if (keys["n"])
-      SystemState.mainWindow.horizontalRotation(CONFIG.rotationSpeed * 0.5);
-    if (keys["m"])
-      SystemState.mainWindow.horizontalRotation(CONFIG.rotationSpeed);
+  }
+  if (keys["x"]) {
+    userRotate(CONFIG.rotationSpeed * 0.5);   // 左转中
+    SystemState.ifControl = true;
+  }
+  if (keys["c"]) {
+    userRotate(CONFIG.rotationSpeed * 0.25);  // 左转慢
+    SystemState.ifControl = true;
+  }
+  // V 不再控制旋转，改为后退
+  if (keys["b"]) {
+    userRotate(-CONFIG.rotationSpeed * 0.25); // 右转慢
+    SystemState.ifControl = true;
+  }
+  if (keys["n"]) {
+    userRotate(-CONFIG.rotationSpeed * 0.5);  // 右转中
+    SystemState.ifControl = true;
+  }
+  if (keys["m"]) {
+    userRotate(-CONFIG.rotationSpeed);        // 右转最快
+    SystemState.ifControl = true;
   }
 
-  // Q/E 控制相机距离
-  if (keys["q"])
-    SystemState.camRadius = Math.max(
-      CONFIG.minZoom,
-      SystemState.camRadius - CONFIG.moveSpeed,
-    );
-  if (keys["e"])
-    SystemState.camRadius = Math.min(
-      CONFIG.maxZoom,
-      SystemState.camRadius + CONFIG.moveSpeed,
-    );
+  // ========== 阶段1修改：FG 前进，V 后退（沿视线方向）==========
+  // 前进：双眼和屏幕一起沿视线方向移动
+  if (keys["f"] || keys["g"]) {
+    const dir = SystemState.mainWindow.direction;
+    const speed = CONFIG.moveSpeed;
+    // 双眼移动
+    SystemState.mainWindow.capital.x += dir.x * speed;
+    SystemState.mainWindow.capital.y += dir.y * speed;
+    SystemState.mainWindow.capital.z += dir.z * speed;
+    // 屏幕也移动（保持与双眼的相对距离）
+    dir.start.x += dir.x * speed;
+    dir.start.y += dir.y * speed;
+    dir.start.z += dir.z * speed;
+    SystemState.ifControl = true;
+  }
+  // 后退：双眼和屏幕一起沿视线反方向移动
+  if (keys["v"]) {
+    const dir = SystemState.mainWindow.direction;
+    const speed = CONFIG.moveSpeed;
+    // 双眼移动
+    SystemState.mainWindow.capital.x -= dir.x * speed;
+    SystemState.mainWindow.capital.y -= dir.y * speed;
+    SystemState.mainWindow.capital.z -= dir.z * speed;
+    // 屏幕也移动
+    dir.start.x -= dir.x * speed;
+    dir.start.y -= dir.y * speed;
+    dir.start.z -= dir.z * speed;
+    SystemState.ifControl = true;
+  }
+  // ============================================================
+
+  // ========== 阶段1新增：鼠标边缘持续旋转 ==========
+  if (SystemState.mouseEdge === -1) {
+    // 鼠标在左边缘 -> 持续左转
+    userRotate(CONFIG.rotationSpeed * 0.25);
+    SystemState.ifControl = true;
+  } else if (SystemState.mouseEdge === 1) {
+    // 鼠标在右边缘 -> 持续右转
+    userRotate(-CONFIG.rotationSpeed * 0.25);
+    SystemState.ifControl = true;
+  }
+  // ==================================================
 
   // 方向键控制光源
   if (keys["arrowleft"]) SystemState.lightAngle -= CONFIG.rotationSpeed;
@@ -1116,6 +1121,7 @@ function handleInput() {
   // 摄像头控制逻辑（如果启用）
   // 摄像头的更新在 processCamera 中进行
 }
+
 
 // ========================
 // 12. 事件监听器设置
@@ -1150,32 +1156,45 @@ function setupEventListeners() {
     SystemState.isDragging = false;
   });
   SystemState.canvas.addEventListener("mousemove", (e) => {
-    if (SystemState.isDragging) {
-      const deltaX = e.clientX - SystemState.lastMouseX;
-      const deltaY = e.clientY - SystemState.lastMouseY;
-      SystemState.camAngle += deltaX * CONFIG.dragRotationSpeed;
-      SystemState.camElevation = Math.max(
-        CONFIG.minElevation,
-        Math.min(
-          CONFIG.maxElevation,
-          SystemState.camElevation - deltaY * CONFIG.dragRotationSpeed,
-        ),
-      ); // 注意 deltaY 符号
-      SystemState.lastMouseX = e.clientX;
-      SystemState.lastMouseY = e.clientY;
+    // 阶段1新增：鼠标边缘状态更新
+    const screenWidth = window.innerWidth;
+
+    if (e.clientX <= 0) {
+      // 鼠标在最左边缘（0像素）
+      SystemState.mouseEdge = -1;
+    } else if (e.clientX >= screenWidth - 1) {
+      // 鼠标在最右边缘
+      SystemState.mouseEdge = 1;
+    } else {
+      // 鼠标不在边缘
+      SystemState.mouseEdge = 0;
     }
   });
 
-  // 滚轮事件
+  // 滚轮事件：前进/后退
   SystemState.canvas.addEventListener("wheel", (e) => {
     e.preventDefault();
-    SystemState.camRadius = Math.max(
-      CONFIG.minZoom,
-      Math.min(
-        CONFIG.maxZoom,
-        SystemState.camRadius + e.deltaY * CONFIG.zoomSpeed,
-      ),
-    );
+    const dir = SystemState.mainWindow.direction;
+    const speed = CONFIG.moveSpeed * 2;  // 滚轮速度稍快
+
+    if (e.deltaY < 0) {
+      // 滚轮向上 -> 前进（相当于 FG）
+      SystemState.mainWindow.capital.x += dir.x * speed;
+      SystemState.mainWindow.capital.y += dir.y * speed;
+      SystemState.mainWindow.capital.z += dir.z * speed;
+      dir.start.x += dir.x * speed;
+      dir.start.y += dir.y * speed;
+      dir.start.z += dir.z * speed;
+    } else {
+      // 滚轮向下 -> 后退（相当于 V）
+      SystemState.mainWindow.capital.x -= dir.x * speed;
+      SystemState.mainWindow.capital.y -= dir.y * speed;
+      SystemState.mainWindow.capital.z -= dir.z * speed;
+      dir.start.x -= dir.x * speed;
+      dir.start.y -= dir.y * speed;
+      dir.start.z -= dir.z * speed;
+    }
+    SystemState.ifControl = true;
   });
 
   // 窗口大小变化事件
@@ -1198,10 +1217,10 @@ function setupEventListeners() {
       "light",
     );
     SystemState.mainWindow.resizeRefresh(
-        window.innerWidth,
-        window.innerHeight,
-        (window.innerWidth / CONFIG.screenWidth) * CONFIG.screenXLengthCm,
-        (window.innerHeight / CONFIG.screenHeight) * CONFIG.screenYLengthCm,
+      window.innerWidth,
+      window.innerHeight,
+      (window.innerWidth / CONFIG.screenWidth) * CONFIG.screenXLengthCm,
+      (window.innerHeight / CONFIG.screenHeight) * CONFIG.screenYLengthCm,
     );
     // 重新估算法向量（可选，可能耗时）
     // estimateNormals();
@@ -1264,7 +1283,7 @@ function updateFromCamera(cameraData) {
 // ========================
 function gameLoop() {
   handleInput();
-//   processCamera(); // 在主循环中处理摄像头
+  //   processCamera(); // 在主循环中处理摄像头
   drawCameraFeedOnMainCanvas(SystemState.ctx);
   if (SystemState.ifControl) {
     updateLight(); // 每帧更新光源位置（如果需要动态光源）

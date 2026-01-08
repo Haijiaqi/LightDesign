@@ -65,13 +65,26 @@ class SimpleFitCache {
 export class Object {
 
   constructor(points = [], options = {}) {
-    // ━━━ 核心点集 ━━━
+    // ━━━ 阶段1修改：支持点云/朴素对象 ━━━
+    // 传入的 points 作为 displayPoints（用于渲染）
+    // 从 displayPoints 提取表层点作为 controlPoints（用于拟合）
+
+    // ━━━ 显示点（用于视觉渲染）━━━
+    if (points.length > 0) {
+      this.displayPoints = points.map(p => new Point(p.x, p.y, p.z));
+    } else {
+      this.displayPoints = [];
+    }
+    this._displayPointVersion = 0;
+
+    // ━━━ 核心点集（控制点）━━━
     if (options.controlPoints && options.controlPoints.length > 0) {
-      // 使用传入的控制点（假设调用者已经创建了 Point 实例）
+      // 显式传入控制点
       this.controlPoints = options.controlPoints;
-    } else if (points.length > 0) {
-      // 从 points 创建控制点（拷贝）
-      this.controlPoints = points.map(p => new Point(p.x, p.y, p.z));
+    } else if (this.displayPoints.length > 0) {
+      // 从点云提取表层点作为控制点（简单算法）
+      const controlCount = options.controlPointCount || Math.min(100, this.displayPoints.length);
+      this.controlPoints = this._extractSurfacePoints(this.displayPoints, controlCount);
     } else {
       this.controlPoints = [];
     }
@@ -87,10 +100,6 @@ export class Object {
     this._surfaceBoundary = this.controlPoints.length;
     this._constructionPointVersion = 0;
 
-    // ━━━ 显示点（用于视觉渲染，独立于建构点）━━━
-    this.displayPoints = [];
-    this._displayPointVersion = 0;
-
     // ━━━ 状态标记 ━━━
     this._isVolumetric = false;
     this.mode = 'parametric';
@@ -104,7 +113,7 @@ export class Object {
       type: 'points',
       isClosed: false,
       data: null,
-      
+
       physicsState: {
         physicsModel: options.physicsModel ?? 'pbd',
         particles: [],
@@ -114,7 +123,7 @@ export class Object {
         surfaceCount: 0,
         internalCount: 0
       },
-      
+
       topology: {
         triangles: [],
         edges: [],
@@ -124,20 +133,20 @@ export class Object {
         internalEdges: [],
         skinBoneEdges: []
       },
-      
+
       editState: null,
-      
+
       geometryCache: {
         volume: null,
         surfaceArea: null,
         sections: new Map()
       },
-      
+
       material: {
         uniform: true,
         properties: null
       },
-      
+
       clothConfig: null,
       lineConfig: null,
       efdConfig: null,
@@ -160,7 +169,7 @@ export class Object {
     };
 
     this._collider = null;
-    
+
     // 延迟初始化的拟合器实例
     this._fitterInstance = null;
     this._matrixClass = null;
@@ -216,6 +225,40 @@ export class Object {
 
   _extractPositions(points) {
     return points.map(p => ({ x: p.x, y: p.y, z: p.z }));
+  }
+
+  /**
+   * 从点云提取表层点（阶段1新增）
+   * 简单算法：基于点到质心距离，取最远的一批点作为表层点
+   * @param {Point[]} points - 点云
+   * @param {number} count - 需要的表层点数量
+   * @returns {Point[]} 表层点数组
+   */
+  _extractSurfacePoints(points, count) {
+    if (points.length === 0) return [];
+    if (points.length <= count) {
+      return points.map(p => new Point(p.x, p.y, p.z));
+    }
+
+    // 计算质心
+    let cx = 0, cy = 0, cz = 0;
+    for (const p of points) {
+      cx += p.x; cy += p.y; cz += p.z;
+    }
+    cx /= points.length;
+    cy /= points.length;
+    cz /= points.length;
+
+    // 计算每点到质心距离
+    const withDist = points.map(p => ({
+      point: p,
+      dist: Math.sqrt((p.x - cx) ** 2 + (p.y - cy) ** 2 + (p.z - cz) ** 2)
+    }));
+
+    // 按距离降序排序，取最远的 count 个
+    withDist.sort((a, b) => b.dist - a.dist);
+
+    return withDist.slice(0, count).map(d => new Point(d.point.x, d.point.y, d.point.z));
   }
 
   _createPoints(positions) {
@@ -426,9 +469,9 @@ export class Object {
     this._fitStack = result.fitStack;
 
     if (!this.center ||
-        this.center.x !== centerPos.x ||
-        this.center.y !== centerPos.y ||
-        this.center.z !== centerPos.z) {
+      this.center.x !== centerPos.x ||
+      this.center.y !== centerPos.y ||
+      this.center.z !== centerPos.z) {
       this._centerVersion++;
     }
     this.center = { x: centerPos.x, y: centerPos.y, z: centerPos.z };
@@ -500,8 +543,8 @@ export class Object {
     const positions = this._extractPositions(this.controlPoints);
 
     // 如果提供了 fitter，使用它；否则使用 ParametricImpl 的内置求解
-    const fitterInstance = options.fitter ? 
-      (this._fitterInstance ?? new options.fitter({ Matrix: options.Matrix, verbose: this.verbose })) : 
+    const fitterInstance = options.fitter ?
+      (this._fitterInstance ?? new options.fitter({ Matrix: options.Matrix, verbose: this.verbose })) :
       null;
 
     if (options.fitter && !this._fitterInstance) {
@@ -559,12 +602,12 @@ export class Object {
     }
 
     const { coefficients, sphericalHarmonics } = this.representation.data;
-    
+
     // 【新增】验证关键数据完整性
     if (!coefficients || !sphericalHarmonics) {
       throw new Error('[Object] generateVolumetricMesh: coefficients or sphericalHarmonics missing in representation.data');
     }
-    
+
     const spacing = options.spacing ?? GeometryImpl.DEFAULT_SPACING_VOLUMETRIC;
     const knn = options.knn ?? 10;
     const physicsModel = options.physicsModel ?? this.physics.model ?? 'pbd';
@@ -576,7 +619,7 @@ export class Object {
     if (targetCount === undefined) {
       // 优先使用体积计算
       const volume = this.getVolume();
-      
+
       if (volume && volume > 0) {
         // 基于体积计算：N ≈ V / d^3
         // 其中 d 是间距，V 是体积
@@ -584,7 +627,7 @@ export class Object {
         const safetyLimit = 5000;
         targetCount = Math.min(estimatedCount, safetyLimit);
         targetCount = Math.max(targetCount, 50);
-        
+
         if (this.verbose) {
           console.log(`[Object] Volume-based targetCount: ${targetCount} (volume=${volume.toFixed(6)}, spacing=${spacing})`);
         }
@@ -728,10 +771,10 @@ export class Object {
    * @returns {{count: number, displayPoints: Array}}
    */
   generateDisplayPoints(options = {}) {
-    if (this.representation.type !== 'sphericalHarmonics' && 
-        this.representation.type !== 'volumetric' &&
-        this.representation.type !== 'elliptic-fourier-2d' &&
-        this.representation.type !== 'cloth') {
+    if (this.representation.type !== 'sphericalHarmonics' &&
+      this.representation.type !== 'volumetric' &&
+      this.representation.type !== 'elliptic-fourier-2d' &&
+      this.representation.type !== 'cloth') {
       throw new Error('[Object] generateDisplayPoints requires fitted representation');
     }
 
@@ -785,12 +828,12 @@ export class Object {
     for (let i = 0; i < this.displayPoints.length; i++) {
       const p = this.displayPoints[i];
       const pos = sampledPositions[i];
-      
+
       // 使用球谐函数的梯度计算法向量
       const normal = sphericalHarmonics.computeSurfaceNormal?.(
         coefficients, pos.theta, pos.phi, this.center
       );
-      
+
       if (normal) {
         p.nx = normal.x;
         p.ny = normal.y;
@@ -800,7 +843,7 @@ export class Object {
         const dx = p.x - this.center.x;
         const dy = p.y - this.center.y;
         const dz = p.z - this.center.z;
-        const len = Math.sqrt(dx*dx + dy*dy + dz*dz);
+        const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
         if (len > 1e-10) {
           p.nx = dx / len;
           p.ny = dy / len;
@@ -829,7 +872,7 @@ export class Object {
     const numSamples = 100;
     let minX = Infinity, maxX = -Infinity;
     let minY = Infinity, maxY = -Infinity;
-    
+
     for (let i = 0; i < numSamples; i++) {
       const t = (i / numSamples) * 2 * Math.PI;
       const pt = ParametricImpl.evaluateEFD(coeffsX, coeffsY, t);
@@ -880,7 +923,7 @@ export class Object {
     const bbox = this.getBoundingBox();
     const width = bbox.max.x - bbox.min.x;
     const height = bbox.max.y - bbox.min.y;
-    
+
     // 自动计算采样点数
     if (count === undefined) {
       const area = width * height;
@@ -890,10 +933,10 @@ export class Object {
 
     // 如果是 organic cloth，使用 EFD 边界；否则使用形状判定
     let boundaryCallback;
-    
-    if (this.representation.clothConfig?.mode === 'organic' && 
-        this.representation.clothConfig?.coeffsX && 
-        this.representation.clothConfig?.coeffsY) {
+
+    if (this.representation.clothConfig?.mode === 'organic' &&
+      this.representation.clothConfig?.coeffsX &&
+      this.representation.clothConfig?.coeffsY) {
       // organic 模式：使用 EFD 边界
       boundaryCallback = ParametricImpl.createEFDBoundaryCallback(
         this.representation.clothConfig.coeffsX,
@@ -1265,12 +1308,12 @@ export class Object {
     if (this._surfaceBoundary === 0) {
       throw new Error('[Object] No surface points for physics topology');
     }
-    
+
     // 【修复】检查类型：sphericalHarmonics 是纯参数化的，没有离散拓扑
     if (this.representation.type === 'sphericalHarmonics') {
       throw new Error('[Object] Cannot build physics topology for sphericalHarmonics type. Call generateVolumetricMesh() first.');
     }
-    
+
     // 【修复】检查类型：points 类型没有拓扑
     if (this.representation.type === 'points') {
       throw new Error('[Object] Cannot build physics topology for points type. Call fitSphericalHarmonics() and generateVolumetricMesh() first.');
@@ -1337,11 +1380,11 @@ export class Object {
     // 构建内部粒子
     const internalParticles = internalPositions.length > 0
       ? PhysicsBridgeImpl.buildInternalParticles(
-          internalPositions,
-          this._surfaceBoundary,
-          internalMass,
-          internalSphericalCoords
-        )
+        internalPositions,
+        this._surfaceBoundary,
+        internalMass,
+        internalSphericalCoords
+      )
       : [];
 
     // 合并粒子
@@ -1355,9 +1398,9 @@ export class Object {
     // 构建约束（传入particles用于形状匹配约束）
     const allPositions = [...surfacePositions, ...internalPositions];
     const constraints = this._buildConstraintsByType(
-      physicsModel, 
-      allPositions, 
-      stiffnessArray, 
+      physicsModel,
+      allPositions,
+      stiffnessArray,
       dampingArray,
       particles,  // 新增：传入粒子数组
       this._surfaceBoundary,  // surfaceCount
@@ -1398,15 +1441,12 @@ export class Object {
         this._surfaceBoundary
       );
 
-      // 同步法向量到 Point（直接操作 constructionPoints）
+      // 阶段1修改：同步法向量到 Point（直接使用 nx/ny/nz）
       const syncCount = Math.min(this._surfaceBoundary, particles.length);
       for (let i = 0; i < syncCount; i++) {
-        const n = particles[i].normal;
-        if (n) {
-          this.constructionPoints[i].nx = n.x;
-          this.constructionPoints[i].ny = n.y;
-          this.constructionPoints[i].nz = n.z;
-        }
+        this.constructionPoints[i].nx = particles[i].nx;
+        this.constructionPoints[i].ny = particles[i].ny;
+        this.constructionPoints[i].nz = particles[i].nz;
       }
     }
 
@@ -1670,12 +1710,12 @@ export class Object {
 
   commitPhysics() {
     const physicsState = this.representation.physicsState;
-    
+
     // 【修复】验证 physicsState 有效性
     if (!physicsState || !physicsState.particles || physicsState.particles.length === 0) {
       return;
     }
-    
+
     const particles = physicsState.particles;
     // 【修复】使用实际数组长度的最小值，防止越界
     const surfaceCount = Math.min(physicsState.surfaceCount, this._surfaceBoundary);
@@ -1692,7 +1732,7 @@ export class Object {
 
     // 同步内部点位置（内部点存储在 constructionPoints[_surfaceBoundary..] 中）
     const internalCount = Math.min(
-      physicsState.internalCount, 
+      physicsState.internalCount,
       this.constructionPoints.length - this._surfaceBoundary
     );
     const internalStart = physicsState.internalStartIndex;
@@ -1714,14 +1754,11 @@ export class Object {
         surfaceCount
       );
 
-      // 同步法向量到 Point（直接操作 constructionPoints）
+      // 阶段1修改：同步法向量到 Point（直接使用 nx/ny/nz）
       for (let i = 0; i < surfaceCount; i++) {
-        const n = particles[i].normal;
-        if (n) {
-          this.constructionPoints[i].nx = n.x;
-          this.constructionPoints[i].ny = n.y;
-          this.constructionPoints[i].nz = n.z;
-        }
+        this.constructionPoints[i].nx = particles[i].nx;
+        this.constructionPoints[i].ny = particles[i].ny;
+        this.constructionPoints[i].nz = particles[i].nz;
       }
     }
 
@@ -1757,9 +1794,9 @@ export class Object {
         idealPositions[i] = null;
         continue;
       }
-      
+
       let theta, phi;
-      
+
       // 使用缓存的球坐标或重新计算
       if (p._sphericalCoords && p._sphericalCoords.centerVersion === this._centerVersion) {
         theta = p._sphericalCoords.theta;
@@ -1770,15 +1807,15 @@ export class Object {
           p.position.x, p.position.y, p.position.z,
           this.center.x, this.center.y, this.center.z
         );
-        
+
         if (spherical.r < 1e-10) {
           idealPositions[i] = { x: p.position.x, y: p.position.y, z: p.position.z };
           continue;
         }
-        
+
         theta = spherical.theta;
         phi = spherical.phi;
-        
+
         // 缓存球坐标
         if (!p._sphericalCoords) {
           p._sphericalCoords = {};
@@ -1789,7 +1826,7 @@ export class Object {
       }
 
       const r = sphericalHarmonics.evaluate(coefficients, theta, phi);
-      
+
       // 【修复】验证 evaluate 返回值
       if (!Number.isFinite(r) || r <= 0) {
         idealPositions[i] = { x: p.position.x, y: p.position.y, z: p.position.z };
@@ -1810,9 +1847,9 @@ export class Object {
         const i = constraint.i;
         const j = constraint.j;
 
-        if (i !== undefined && j !== undefined && 
-            idealPositions[i] && idealPositions[j]) {
-          
+        if (i !== undefined && j !== undefined &&
+          idealPositions[i] && idealPositions[j]) {
+
           const pi = idealPositions[i];
           const pj = idealPositions[j];
           const dx = pj.x - pi.x;
@@ -1893,8 +1930,8 @@ export class Object {
    * @returns {number|null}
    */
   getVolume() {
-    if (this.representation.type !== 'sphericalHarmonics' && 
-        this.representation.type !== 'volumetric') {
+    if (this.representation.type !== 'sphericalHarmonics' &&
+      this.representation.type !== 'volumetric') {
       return null;
     }
 
@@ -1921,8 +1958,8 @@ export class Object {
    * @returns {number|null}
    */
   getSurfaceArea() {
-    if (this.representation.type !== 'sphericalHarmonics' && 
-        this.representation.type !== 'volumetric') {
+    if (this.representation.type !== 'sphericalHarmonics' &&
+      this.representation.type !== 'volumetric') {
       return null;
     }
 
@@ -1950,8 +1987,8 @@ export class Object {
    * @returns {object|null}
    */
   getSection(plane) {
-    if (this.representation.type !== 'sphericalHarmonics' && 
-        this.representation.type !== 'volumetric') {
+    if (this.representation.type !== 'sphericalHarmonics' &&
+      this.representation.type !== 'volumetric') {
       return null;
     }
 
@@ -1966,7 +2003,7 @@ export class Object {
     if (!coefficients || !sphericalHarmonics) return null;
 
     const planeKey = `${plane.normal.x},${plane.normal.y},${plane.normal.z}:${plane.point.x},${plane.point.y},${plane.point.z}`;
-    
+
     if (this.representation.geometryCache.sections.has(planeKey)) {
       return this.representation.geometryCache.sections.get(planeKey);
     }
@@ -1987,8 +2024,8 @@ export class Object {
    * @returns {object|null}
    */
   createCollider() {
-    if (this.representation.type !== 'sphericalHarmonics' && 
-        this.representation.type !== 'volumetric') {
+    if (this.representation.type !== 'sphericalHarmonics' &&
+      this.representation.type !== 'volumetric') {
       return null;
     }
 

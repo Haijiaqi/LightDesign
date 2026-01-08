@@ -117,47 +117,47 @@ class PhysicsSystem {
     // ====================================================
     // 全局物理参数
     // ====================================================
-    
+
     this.gravity = options.gravity ?? { x: 0, y: -9.8, z: 0 };
     this.gravityEnabled = options.gravityEnabled ?? true;
-    
+
     this.airDamping = options.airDamping ?? 0.01;  // 空气阻力
     this.groundY = options.groundY ?? -10;          // 地面高度
     this.groundRestitution = options.groundRestitution ?? 0.3;  // 地面弹性
-    
+
     // ====================================================
     // 时间步进参数
     // ====================================================
-    
+
     this.timeStep = options.timeStep ?? 0.016;  // 默认 60 FPS
     this.substeps = options.substeps ?? 5;       // 子步数（提高稳定性）
     this.method = options.method ?? 'verlet';    // 'euler' | 'verlet' | 'rk4'
-    
+
     // ====================================================
     // 约束求解参数
     // ====================================================
-    
+
     this.constraintIterations = options.constraintIterations ?? 10;
     this.constraintRelaxation = options.constraintRelaxation ?? 1.0;
-    
+
     // ====================================================
     // 碰撞参数
     // ====================================================
-    
+
     this.collisionEnabled = options.collisionEnabled ?? true;
     this.collisionMargin = options.collisionMargin ?? 0.01;
     this.selfCollisionEnabled = options.selfCollisionEnabled ?? false;
-    
+
     // ====================================================
     // 管理的对象
     // ====================================================
-    
+
     this.objects = [];  // 注册的 Object 实例
-    
+
     // ====================================================
     // 统计信息
     // ====================================================
-    
+
     this.stats = {
       stepCount: 0,
       lastStepTime: 0,
@@ -166,11 +166,11 @@ class PhysicsSystem {
       constraintCount: 0,
       collisionCount: 0
     };
-    
+
     // ====================================================
     // 调试选项
     // ====================================================
-    
+
     this.verbose = options.verbose ?? false;
   }
 
@@ -185,7 +185,7 @@ class PhysicsSystem {
   addObject(object) {
     if (!this.objects.includes(object)) {
       this.objects.push(object);
-      
+
       if (this.verbose) {
         console.log(`[Physics] Added object: ${object.metadata.name}`);
       }
@@ -200,7 +200,7 @@ class PhysicsSystem {
     const index = this.objects.indexOf(object);
     if (index !== -1) {
       this.objects.splice(index, 1);
-      
+
       if (this.verbose) {
         console.log(`[Physics] Removed object: ${object.metadata.name}`);
       }
@@ -229,7 +229,7 @@ class PhysicsSystem {
 
     // 子步（提高稳定性）
     const subDt = dt / this.substeps;
-    
+
     for (let i = 0; i < this.substeps; i++) {
       this._substep(subDt);
     }
@@ -237,7 +237,7 @@ class PhysicsSystem {
     // 更新统计
     this.stats.stepCount++;
     this.stats.lastStepTime = Date.now() - startTime;
-    
+
     if (this.verbose && this.stats.stepCount % 60 === 0) {
       console.log('[Physics] Stats:', this.getStats());
     }
@@ -251,7 +251,7 @@ class PhysicsSystem {
   _substep(dt) {
     // 收集所有物理数据
     const physicsData = this._gatherPhysicsData();
-    
+
     if (physicsData.length === 0) return;
 
     // 1. 施加外力（重力、用户力）
@@ -287,7 +287,7 @@ class PhysicsSystem {
       if (!data._oldPositions || data._oldPositions.length !== data.particles.length) {
         data._oldPositions = data.particles.map(p => ({ x: 0, y: 0, z: 0 }));
       }
-      
+
       for (let i = 0; i < data.particles.length; i++) {
         const p = data.particles[i];
         data._oldPositions[i].x = p.position.x;
@@ -300,7 +300,7 @@ class PhysicsSystem {
     for (let i = 0; i < this.constraintIterations; i++) {
       this._solveConstraintsIteration(physicsData, dt);
     }
-    
+
     // ⭐ 4. 约束求解后更新速度（只执行一次）
     this._updateVelocitiesAfterConstraints(physicsData, dt);
 
@@ -339,14 +339,14 @@ class PhysicsSystem {
         console.error(`[Physics] Object missing getPhysicsView() interface:`, obj);
         continue;
       }
-      
+
       const view = obj.getPhysicsView();
-      
+
       if (!view.particles || !Array.isArray(view.particles)) {
         console.warn(`[Physics] Object.getPhysicsView() returned invalid particles:`, obj);
         continue;
       }
-      
+
       allData.push({
         object: obj,
         particles: view.particles,        // ✅ 直接引用（零拷贝）
@@ -458,12 +458,12 @@ class PhysicsSystem {
     // ⭐ 修正：支持每条边的独立刚度参数
     // 优先级：spring.stiffness > 粒子平均 stiffness > 默认值 1000
     let stiffness = spring.stiffness ?? spring.k;
-    
+
     if (stiffness === undefined) {
       // 尝试从粒子属性获取
       const s1 = p1.stiffness ?? p1.material?.stiffness;
       const s2 = p2.stiffness ?? p2.material?.stiffness;
-      
+
       if (s1 !== undefined && s2 !== undefined) {
         stiffness = (s1 + s2) / 2;
       } else if (s1 !== undefined) {
@@ -505,11 +505,11 @@ class PhysicsSystem {
     // ⭐ 修正：阻尼也支持独立参数
     // 优先级：spring.damping > 粒子平均 damping > 默认值 0（无阻尼）
     let damping = spring.damping;
-    
+
     if (damping === undefined) {
       const d1 = p1.damping ?? p1.material?.damping;
       const d2 = p2.damping ?? p2.material?.damping;
-      
+
       if (d1 !== undefined && d2 !== undefined) {
         damping = (d1 + d2) / 2;
       } else if (d1 !== undefined) {
@@ -595,10 +595,10 @@ class PhysicsSystem {
 
     // ⭐ 优化：初始化 oldPosition（复用对象）
     if (!p.oldPosition) {
-      p.oldPosition = { 
-        x: p.position.x, 
-        y: p.position.y, 
-        z: p.position.z 
+      p.oldPosition = {
+        x: p.position.x,
+        y: p.position.y,
+        z: p.position.z
       };
     }
 
@@ -620,7 +620,7 @@ class PhysicsSystem {
     p.oldPosition.x = p.position.x;
     p.oldPosition.y = p.position.y;
     p.oldPosition.z = p.position.z;
-    
+
     // 更新位置
     p.position.x = newX;
     p.position.y = newY;
@@ -664,7 +664,7 @@ class PhysicsSystem {
   // ====================================================
   // 约束求解（PBD/XPBD）
   // ====================================================
-  
+
   /**
    * ⭐ 约束系统语义：PBD/XPBD（Position Based Dynamics / Extended PBD）
    * 
@@ -754,7 +754,7 @@ class PhysicsSystem {
 
     this.stats.constraintCount = constraintCount;
   }
-  
+
   /**
    * 约束求解后更新速度
    * 
@@ -769,7 +769,7 @@ class PhysicsSystem {
    */
   _updateVelocitiesAfterConstraints(physicsData, dt) {
     if (dt <= 0) return;
-    
+
     for (const data of physicsData) {
       for (let i = 0; i < data.particles.length; i++) {
         const p = data.particles[i];
@@ -819,18 +819,18 @@ class PhysicsSystem {
 
     // 目标距离
     const targetDist = constraint.distance ?? constraint.restLength ?? constraint.length;
-    
+
     // 约束函数：C(x) = ||x₂ - x₁|| - d
     const C = currentDist - targetDist;
 
     // ⭐ XPBD 支持：检测 compliance 参数
     const compliance = constraint.compliance ?? 0;  // 默认 0（PBD）
-    
+
     // 质量倒数（权重）
     const w1 = p1.fixed ? 0 : 1 / p1.mass;
     const w2 = p2.fixed ? 0 : 1 / p2.mass;
     const wSum = w1 + w2;
-    
+
     if (wSum < 1e-10) return;
 
     // ⭐ XPBD 公式：Δλ = -C / (wSum + α/dt²)
@@ -840,24 +840,24 @@ class PhysicsSystem {
       // ⭐ 使用子步 dt（不是 this.timeStep）
       alpha = compliance / (dt * dt);
     }
-    
+
     const denominator = wSum + alpha;
     if (denominator < 1e-10) return;
-    
+
     // 计算 λ 增量
     const deltaLambda = -C / denominator;
-    
+
     // ⭐ XPBD 累积 lambda（在迭代内）
     if (constraint.lambda === undefined) {
       constraint.lambda = 0;
     }
     constraint.lambda += deltaLambda;
-    
+
     // 约束梯度方向（单位向量）
     const nx = dx / currentDist;
     const ny = dy / currentDist;
     const nz = dz / currentDist;
-    
+
     // ⭐ 显式分支：PBD vs XPBD
     let relaxation = 1.0;
     if (compliance === 0) {
@@ -902,7 +902,7 @@ class PhysicsSystem {
     p.position.x = constraint.position.x;
     p.position.y = constraint.position.y;
     p.position.z = constraint.position.z;
-    
+
     // ⭐ 清零速度（固定点不应移动）
     if (!p.velocity) {
       p.velocity = { x: 0, y: 0, z: 0 };
@@ -911,7 +911,7 @@ class PhysicsSystem {
       p.velocity.y = 0;
       p.velocity.z = 0;
     }
-    
+
     // ⚠️ 注意：不修改 p.fixed 状态
     // p.fixed 应在粒子初始化时设置，或通过 Object API 设置
   }
@@ -936,11 +936,11 @@ class PhysicsSystem {
    */
   _solveBendingConstraint(particles, constraint) {
     const [a, b, c, d] = constraint.particles.map(i => particles[i]);
-    
+
     // ⭐ 边界检查
     if (!a || !b || !c || !d) return;
     if (a.fixed && b.fixed && c.fixed && d.fixed) return;
-    
+
     // 计算两个三角形的法向量
     // 三角形 1: a-b-c
     const ab = {
@@ -953,72 +953,72 @@ class PhysicsSystem {
       y: c.position.y - a.position.y,
       z: c.position.z - a.position.z
     };
-    
+
     // 法向量 n1 = ab × ac
     const n1 = {
       x: ab.y * ac.z - ab.z * ac.y,
       y: ab.z * ac.x - ab.x * ac.z,
       z: ab.x * ac.y - ab.y * ac.x
     };
-    
+
     // 三角形 2: a-b-d
     const ad = {
       x: d.position.x - a.position.x,
       y: d.position.y - a.position.y,
       z: d.position.z - a.position.z
     };
-    
+
     // 法向量 n2 = ab × ad
     const n2 = {
       x: ab.y * ad.z - ab.z * ad.y,
       y: ab.z * ad.x - ab.x * ad.z,
       z: ab.x * ad.y - ab.y * ad.x
     };
-    
+
     // 归一化
     const mag1 = Math.sqrt(n1.x * n1.x + n1.y * n1.y + n1.z * n1.z);
     const mag2 = Math.sqrt(n2.x * n2.x + n2.y * n2.y + n2.z * n2.z);
-    
+
     if (mag1 < 1e-6 || mag2 < 1e-6) return;
-    
+
     n1.x /= mag1; n1.y /= mag1; n1.z /= mag1;
     n2.x /= mag2; n2.y /= mag2; n2.z /= mag2;
-    
+
     // 当前角度
     const dot = n1.x * n2.x + n1.y * n2.y + n1.z * n2.z;
     const currentAngle = Math.acos(Math.max(-1, Math.min(1, dot)));
-    
+
     // 约束函数
     const restAngle = constraint.restAngle ?? 0;
     const C = currentAngle - restAngle;
-    
+
     // ⭐ 简化处理：对于弯曲约束，使用较小的刚度
     // 完整的 XPBD 弯曲约束需要复杂的梯度计算
     // 这里使用简化版本：调整法向量方向
-    
+
     const compliance = constraint.compliance ?? 0.1;  // 默认较软
-    
+
     // 简化修正：朝着减小角度差的方向调整点
     const correction = C * compliance * 0.1;  // 小步修正
-    
+
     if (Math.abs(correction) < 1e-6) return;
-    
+
     // 修正方向：垂直于共享边 ab
     const edgeLen = Math.sqrt(ab.x * ab.x + ab.y * ab.y + ab.z * ab.z);
     if (edgeLen < 1e-6) return;
-    
+
     // 归一化边向量
     const abNorm = {
       x: ab.x / edgeLen,
       y: ab.y / edgeLen,
       z: ab.z / edgeLen
     };
-    
+
     // 修正点 c 和 d 的位置
     const w_c = c.fixed ? 0 : 1 / c.mass;
     const w_d = d.fixed ? 0 : 1 / d.mass;
     const wSum = w_c + w_d;
-    
+
     if (wSum > 1e-10) {
       // 沿法向量方向修正
       if (!c.fixed) {
@@ -1026,7 +1026,7 @@ class PhysicsSystem {
         c.position.y += n1.y * correction * w_c / wSum;
         c.position.z += n1.z * correction * w_c / wSum;
       }
-      
+
       if (!d.fixed) {
         d.position.x -= n2.x * correction * w_d / wSum;
         d.position.y -= n2.y * correction * w_d / wSum;
@@ -1059,56 +1059,56 @@ class PhysicsSystem {
     const p0 = particles[i];
     const p1 = particles[j];
     const p2 = particles[k];
-    
+
     // ⭐ 边界检查
     if (!p0 || !p1 || !p2) return;
     if (p0.fixed && p1.fixed && p2.fixed) return;
-    
+
     // 向量 v1 = p1 - p0
     const v1 = {
       x: p1.position.x - p0.position.x,
       y: p1.position.y - p0.position.y,
       z: p1.position.z - p0.position.z
     };
-    
+
     // 向量 v2 = p2 - p1
     const v2 = {
       x: p2.position.x - p1.position.x,
       y: p2.position.y - p1.position.y,
       z: p2.position.z - p1.position.z
     };
-    
+
     // 长度
     const mag1 = Math.sqrt(v1.x * v1.x + v1.y * v1.y + v1.z * v1.z);
     const mag2 = Math.sqrt(v2.x * v2.x + v2.y * v2.y + v2.z * v2.z);
-    
+
     if (mag1 < 1e-6 || mag2 < 1e-6) return;
-    
+
     // 当前角度
     const dot = (v1.x * v2.x + v1.y * v2.y + v1.z * v2.z) / (mag1 * mag2);
     const currentAngle = Math.acos(Math.max(-1, Math.min(1, dot)));
-    
+
     // 约束函数
     const restAngle = constraint.restAngle ?? Math.PI;  // 默认直线
     const C = currentAngle - restAngle;
-    
+
     if (Math.abs(C) < 1e-6) return;
-    
+
     // ⭐ XPBD 柔度
     const compliance = constraint.compliance ?? 0.05;  // 默认较软
-    
+
     // 质量权重
     const w0 = p0.fixed ? 0 : 1 / p0.mass;
     const w1 = p1.fixed ? 0 : 1 / p1.mass;
     const w2 = p2.fixed ? 0 : 1 / p2.mass;
-    
+
     // 简化修正：朝着减小角度差的方向调整中间点
     // 完整的梯度计算较复杂，这里使用简化版本
-    
+
     const correction = -C * compliance * 0.5;  // 修正量
-    
+
     if (Math.abs(correction) < 1e-6) return;
-    
+
     // 修正方向：垂直于 v1-v2 平面
     // 叉乘得到垂直向量
     const perp = {
@@ -1116,19 +1116,19 @@ class PhysicsSystem {
       y: v1.z * v2.x - v1.x * v2.z,
       z: v1.x * v2.y - v1.y * v2.x
     };
-    
+
     const perpMag = Math.sqrt(perp.x * perp.x + perp.y * perp.y + perp.z * perp.z);
     if (perpMag < 1e-6) return;
-    
+
     // 归一化
     perp.x /= perpMag;
     perp.y /= perpMag;
     perp.z /= perpMag;
-    
+
     // 修正点位置
     const totalW = w0 + w1 + w2;
     if (totalW < 1e-10) return;
-    
+
     // 主要修正中间点 p1
     if (!p1.fixed) {
       const factor = correction * (w1 / totalW);
@@ -1136,7 +1136,7 @@ class PhysicsSystem {
       p1.position.y += perp.y * factor;
       p1.position.z += perp.z * factor;
     }
-    
+
     // 轻微修正端点 p0 和 p2
     if (!p0.fixed) {
       const factor = -correction * 0.5 * (w0 / totalW);
@@ -1144,7 +1144,7 @@ class PhysicsSystem {
       p0.position.y += perp.y * factor;
       p0.position.z += perp.z * factor;
     }
-    
+
     if (!p2.fixed) {
       const factor = -correction * 0.5 * (w2 / totalW);
       p2.position.x += perp.x * factor;
@@ -1161,9 +1161,10 @@ class PhysicsSystem {
    * 2. 根据 restOffsets 计算目标位置（相对于质心）
    * 3. 将粒子朝目标位置移动
    * 
-   * ⭐ 支持 PBD 和 XPBD：
+   * ⭐ 支持 PBD、XPBD 和力驱动模式：
    * - PBD: compliance = 0（刚性形状匹配）
    * - XPBD: compliance > 0（柔性形状匹配）
+   * - Force: stiffness > 0（力驱动，阶段1新增）
    * 
    * @private
    * @param {Array} particles - 粒子数组
@@ -1171,38 +1172,39 @@ class PhysicsSystem {
    *   - particles: 参与的粒子索引数组
    *   - restOffsets: 每个粒子相对于质心的初始偏移 [{x, y, z}, ...]
    *   - compliance: XPBD 柔度（可选，默认 0）
-   *   - stiffness: 刚度（可选，仅用于力模式）
+   *   - stiffness: 刚度（可选，力模式使用）
+   *   - damping: 阻尼（可选，力模式使用）
    * @param {number} dt - 时间步长
    */
   _solveShapeMatchingConstraint(particles, constraint, dt) {
     const indices = constraint.particles;
     const restOffsets = constraint.restOffsets;
-    
+
     // ⭐ 边界检查
     if (!indices || indices.length === 0) return;
     if (!restOffsets || restOffsets.length !== indices.length) return;
-    
+
     // 收集有效粒子
     const validParticles = [];
     const validOffsets = [];
     let totalMass = 0;
     let allFixed = true;
-    
+
     for (let i = 0; i < indices.length; i++) {
       const idx = indices[i];
       const p = particles[idx];
       if (!p) continue;
-      
+
       validParticles.push(p);
       validOffsets.push(restOffsets[i]);
       totalMass += p.mass;
-      
+
       if (!p.fixed) allFixed = false;
     }
-    
+
     if (validParticles.length === 0 || allFixed) return;
     if (totalMass < 1e-10) return;
-    
+
     // 1. 计算当前质心
     let cx = 0, cy = 0, cz = 0;
     for (const p of validParticles) {
@@ -1213,54 +1215,118 @@ class PhysicsSystem {
     cx /= totalMass;
     cy /= totalMass;
     cz /= totalMass;
-    
-    // 2. 计算目标位置并修正
+
+    // ========== 阶段1新增：力驱动模式判断 ==========
+    const useForce = constraint.stiffness !== undefined && constraint.stiffness > 0;
+
+    if (useForce) {
+      // 力驱动模式（质点弹簧）
+      this._solveShapeMatchingForce(validParticles, validOffsets, constraint, dt, cx, cy, cz);
+    } else {
+      // 位置投影模式（PBD/XPBD）
+      this._solveShapeMatchingPBD(validParticles, validOffsets, constraint, dt, cx, cy, cz);
+    }
+    // ================================================
+  }
+
+  /**
+   * 形状匹配 - 力驱动模式（阶段1新增）
+   * 对每个粒子施加朝向目标位置的弹簧力
+   * @private
+   */
+  _solveShapeMatchingForce(particles, offsets, constraint, dt, cx, cy, cz) {
+    const stiffness = constraint.stiffness;
+    const damping = constraint.damping ?? 0.1;
+
+    for (let i = 0; i < particles.length; i++) {
+      const p = particles[i];
+      const offset = offsets[i];
+
+      if (p.fixed) continue;
+
+      // 目标位置
+      const targetX = cx + offset.x;
+      const targetY = cy + offset.y;
+      const targetZ = cz + offset.z;
+
+      // 位置差
+      const dx = targetX - p.position.x;
+      const dy = targetY - p.position.y;
+      const dz = targetZ - p.position.z;
+
+      // 弹簧力 F = k * dx
+      const fx = stiffness * dx;
+      const fy = stiffness * dy;
+      const fz = stiffness * dz;
+
+      // 阻尼力 F_d = -c * v
+      const fdx = -damping * p.velocity.x;
+      const fdy = -damping * p.velocity.y;
+      const fdz = -damping * p.velocity.z;
+
+      // 加速度 a = F / m
+      const ax = (fx + fdx) / p.mass;
+      const ay = (fy + fdy) / p.mass;
+      const az = (fz + fdz) / p.mass;
+
+      // 速度更新
+      p.velocity.x += ax * dt;
+      p.velocity.y += ay * dt;
+      p.velocity.z += az * dt;
+    }
+  }
+
+  /**
+   * 形状匹配 - 位置投影模式（原有逻辑）
+   * @private
+   */
+  _solveShapeMatchingPBD(particles, offsets, constraint, dt, cx, cy, cz) {
     // ⭐ XPBD 支持
     const compliance = constraint.compliance ?? 0;
     let alpha = 0;
     if (compliance > 0 && dt > 0) {
       alpha = compliance / (dt * dt);
     }
-    
+
     // 计算总权重（用于归一化）
     let totalW = 0;
-    for (const p of validParticles) {
+    for (const p of particles) {
       if (!p.fixed) {
         totalW += 1 / p.mass;
       }
     }
-    
+
     if (totalW < 1e-10) return;
-    
+
     // 应用修正
-    for (let i = 0; i < validParticles.length; i++) {
-      const p = validParticles[i];
-      const offset = validOffsets[i];
-      
+    for (let i = 0; i < particles.length; i++) {
+      const p = particles[i];
+      const offset = offsets[i];
+
       if (p.fixed) continue;
-      
+
       // 目标位置 = 质心 + restOffset
       const targetX = cx + offset.x;
       const targetY = cy + offset.y;
       const targetZ = cz + offset.z;
-      
+
       // 位置差（约束函数）
       const dx = targetX - p.position.x;
       const dy = targetY - p.position.y;
       const dz = targetZ - p.position.z;
-      
+
       // 计算修正量
       const w = 1 / p.mass;
-      
+
       // ⭐ XPBD 公式：Δx = w * Δλ * ∇C / (w + α)
       // 简化情况：∇C ≈ -1（朝目标方向）
       // Δλ = C / (w + α)
       const denominator = w + alpha;
       if (denominator < 1e-10) continue;
-      
+
       const lambda = 1 / denominator;
       const factor = w * lambda * this.constraintRelaxation;
-      
+
       // 应用修正
       p.position.x += dx * factor;
       p.position.y += dy * factor;
@@ -1291,9 +1357,9 @@ class PhysicsSystem {
       // 2. 自碰撞（布料）
       // ⭐ 修复：基于对象属性而不是 data.type
       // 判断是否为布料：有大量距离约束且粒子数 > 阈值
-      const isCloth = data.particles.length > 50 && 
-                     data.constraints.filter(c => c.type === 'distance').length > 100;
-      
+      const isCloth = data.particles.length > 50 &&
+        data.constraints.filter(c => c.type === 'distance').length > 100;
+
       if (this.selfCollisionEnabled && isCloth) {
         collisionCount += this._handleSelfCollision(data);
       }
@@ -1321,7 +1387,7 @@ class PhysicsSystem {
       if (p.velocity) {
         // 弹性碰撞
         p.velocity.y = -p.velocity.y * this.groundRestitution;
-        
+
         // 摩擦
         p.velocity.x *= 0.95;
         p.velocity.z *= 0.95;
@@ -1409,21 +1475,21 @@ class PhysicsSystem {
     for (const data of physicsData) {
       // 只对布料约束生效
       if (!data.constraints || data.constraints.length === 0) continue;
-      
+
       const constraints = data.constraints;
       const particles = data.particles;
 
       // ⭐ 检测过度拉伸的距离约束（可撕裂边）
       for (let i = constraints.length - 1; i >= 0; i--) {
         const constraint = constraints[i];
-        
+
         // 只处理可撕裂的距离约束
         if (constraint.type !== 'distance') continue;
         if (!constraint.edgeType) continue;  // 必须有 edgeType 元数据
-        
+
         // 只有结构边和剪切边可撕裂（弯曲边不撕裂）
         if (constraint.edgeType !== 'structural' && constraint.edgeType !== 'shear') continue;
-        
+
         const p1 = particles[constraint.i];
         const p2 = particles[constraint.j];
 
@@ -1472,7 +1538,7 @@ class PhysicsSystem {
       } else {
         console.warn('[Physics] Missing commit() function:', data.object);
       }
-      
+
       // 更新平均速度（用于渲染）
       if (data.particles.length > 0 && data.particles[0].velocity) {
         const avgVel = { x: 0, y: 0, z: 0 };
@@ -1484,7 +1550,7 @@ class PhysicsSystem {
         avgVel.x /= data.particles.length;
         avgVel.y /= data.particles.length;
         avgVel.z /= data.particles.length;
-        
+
         data.object.physics.velocity = avgVel;
       }
     }

@@ -72,7 +72,8 @@ export class PhysicsBridgeImpl {
         _index: i,
         _type: 'surface',
         _sphericalCoords: sphericalCoordsArray ? sphericalCoordsArray[i] : null,
-        normal: { x: 0, y: 0, z: 0 }
+        // 阶段1修改：法向量统一为 nx/ny/nz
+        nx: 0, ny: 0, nz: 0
       };
     }
 
@@ -88,15 +89,15 @@ export class PhysicsBridgeImpl {
 
     for (let i = 0; i < count; i++) {
       particles[i] = {
-        position: { 
-          x: internalPositions[i].x, 
-          y: internalPositions[i].y, 
-          z: internalPositions[i].z 
+        position: {
+          x: internalPositions[i].x,
+          y: internalPositions[i].y,
+          z: internalPositions[i].z
         },
-        prevPosition: { 
-          x: internalPositions[i].x, 
-          y: internalPositions[i].y, 
-          z: internalPositions[i].z 
+        prevPosition: {
+          x: internalPositions[i].x,
+          y: internalPositions[i].y,
+          z: internalPositions[i].z
         },
         velocity: { x: 0, y: 0, z: 0 },
         mass: massPerParticle,
@@ -105,7 +106,8 @@ export class PhysicsBridgeImpl {
         _index: surfaceCount + i,
         _type: 'internal',
         _sphericalCoords: sphericalCoordsArray ? sphericalCoordsArray[i] : null,
-        normal: null
+        // 阶段1修改：法向量统一为 nx/ny/nz（内部点通常无法向量）
+        nx: 0, ny: 0, nz: 0
       };
     }
 
@@ -174,7 +176,7 @@ export class PhysicsBridgeImpl {
 
       const tri1 = triangles[triPair[0]];
       const tri2 = triangles[triPair[1]];
-      
+
       // 【修复】验证三角形存在
       if (!tri1 || !tri2) {
         continue;
@@ -444,7 +446,7 @@ export class PhysicsBridgeImpl {
     // 计算加权质心
     let cx = 0, cy = 0, cz = 0;
     let totalMass = 0;
-    
+
     for (const p of particles) {
       if (p && p.position && p.mass > 0) {
         cx += p.position.x * p.mass;
@@ -494,7 +496,7 @@ export class PhysicsBridgeImpl {
       const p = particles[i];
       const ideal = idealPositions[i];
       if (!p || !ideal) continue;
-      
+
       cx += ideal.x * p.mass;
       cy += ideal.y * p.mass;
       cz += ideal.z * p.mass;
@@ -696,15 +698,13 @@ export class PhysicsBridgeImpl {
   // ==========================================================================
 
   static computeNormals(particles, triangles, surfaceCount) {
+    // 阶段1修改：使用 nx/ny/nz 代替 normal.x/y/z
+
     // 清零
     for (let i = 0; i < surfaceCount; i++) {
-      if (!particles[i].normal) {
-        particles[i].normal = { x: 0, y: 0, z: 0 };
-      } else {
-        particles[i].normal.x = 0;
-        particles[i].normal.y = 0;
-        particles[i].normal.z = 0;
-      }
+      particles[i].nx = 0;
+      particles[i].ny = 0;
+      particles[i].nz = 0;
     }
 
     // 累加面法向
@@ -714,7 +714,7 @@ export class PhysicsBridgeImpl {
       if (i0 >= surfaceCount || i1 >= surfaceCount || i2 >= surfaceCount) {
         continue;
       }
-      
+
       // 【修复】验证粒子和位置存在
       if (!particles[i0]?.position || !particles[i1]?.position || !particles[i2]?.position) {
         continue;
@@ -731,31 +731,31 @@ export class PhysicsBridgeImpl {
       const ny = e1z * e2x - e1x * e2z;
       const nz = e1x * e2y - e1y * e2x;
 
-      particles[i0].normal.x += nx;
-      particles[i0].normal.y += ny;
-      particles[i0].normal.z += nz;
+      particles[i0].nx += nx;
+      particles[i0].ny += ny;
+      particles[i0].nz += nz;
 
-      particles[i1].normal.x += nx;
-      particles[i1].normal.y += ny;
-      particles[i1].normal.z += nz;
+      particles[i1].nx += nx;
+      particles[i1].ny += ny;
+      particles[i1].nz += nz;
 
-      particles[i2].normal.x += nx;
-      particles[i2].normal.y += ny;
-      particles[i2].normal.z += nz;
+      particles[i2].nx += nx;
+      particles[i2].ny += ny;
+      particles[i2].nz += nz;
     }
 
     // 归一化
     for (let i = 0; i < surfaceCount; i++) {
-      const n = particles[i].normal;
-      const len = Math.sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
+      const p = particles[i];
+      const len = Math.sqrt(p.nx * p.nx + p.ny * p.ny + p.nz * p.nz);
       if (len > PhysicsBridgeImpl.NORMAL_EPSILON) {
-        n.x /= len;
-        n.y /= len;
-        n.z /= len;
+        p.nx /= len;
+        p.ny /= len;
+        p.nz /= len;
       } else {
-        n.x = 0;
-        n.y = 1;
-        n.z = 0;
+        p.nx = 0;
+        p.ny = 1;
+        p.nz = 0;
       }
     }
   }

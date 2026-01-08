@@ -111,7 +111,7 @@ export class Window {
       }
     }
     if (this.eyeD && this.windowObjects.length == 0) {
-      const gridConfig = 
+      const gridConfig =
       {
         DPIx: this.DPIx,
         DPIy: this.DPIy,
@@ -137,8 +137,13 @@ export class Window {
     // 处理 objects 集合（原 calculateAPoint 逻辑）
     for (let oi = 0; oi < objects.length; oi++) {
       const object = objects[oi];
-      for (let pi = 0; pi < object.points.length; pi++) {
-        const point = object.points[pi];
+      // 阶段1修改：优先使用 displayPoints（渲染用），回退到 constructionPoints
+      const renderPoints = (object.displayPoints && object.displayPoints.length > 0)
+        ? object.displayPoints
+        : object.constructionPoints;
+      if (!renderPoints || renderPoints.length === 0) continue;
+      for (let pi = 0; pi < renderPoints.length; pi++) {
+        const point = renderPoints[pi];
         // 1. 执行公共基础计算
         const inverseRate = this.calculateBasePoint(
           head,
@@ -156,8 +161,13 @@ export class Window {
     if (!light) {
       for (let oi = 0; oi < otherObjects.length; oi++) {
         const object = otherObjects[oi];
-        for (let pi = 0; pi < object.points.length; pi++) {
-          const point = object.points[pi];
+        // 阶段1修改：优先使用 displayPoints，回退到 constructionPoints
+        const renderPoints = (object.displayPoints && object.displayPoints.length > 0)
+          ? object.displayPoints
+          : object.constructionPoints;
+        if (!renderPoints || renderPoints.length === 0) continue;
+        for (let pi = 0; pi < renderPoints.length; pi++) {
+          const point = renderPoints[pi];
           // 1. 初始化 otherPoint 特有属性（light 初始值）
           point.light = 1;
           // 2. 仅执行公共基础计算（无额外特有逻辑）
@@ -379,12 +389,12 @@ export class Window {
             points[i].light *= Math.pow(0.075, (i - 0));
             // 计算当前索引与 e 的差值：如果是奇数，说明是需要剔除的间隔元素
             // if ((i - e) % 2 === 1) {
-              // points.splice(i, 1); // 从原数组中删除该元素
+            // points.splice(i, 1); // 从原数组中删除该元素
             // }
           }
           // 剩余元素（e, e+2, e+4...）执行 light 乘以 0.75 的操作
           // for (let i = e; i < points.length; i++) {
-            // points[i].light *= 0.075;
+          // points[i].light *= 0.075;
           // }
           // 前3个点深度差异大，跳过
           continue;
@@ -405,12 +415,12 @@ export class Window {
         for (let i = points.length - 1; i > e; i--) {
           // 计算当前索引与 e 的差值：如果是奇数，说明是需要剔除的间隔元素
           // if ((i - e) % 2 === 1) {
-            points.splice(i, 1); // 从原数组中删除该元素
+          points.splice(i, 1); // 从原数组中删除该元素
           // }
         }
         // 剩余元素（e, e+2, e+4...）执行 light 乘以 0.75 的操作
         // for (let i = e; i < points.length; i++) {
-          // points[i].light *= 0.075;
+        // points[i].light *= 0.075;
         // }
         // 检查 XY 分布是否足够广（单位：像素）
         let xmin = Infinity,
