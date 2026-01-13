@@ -442,6 +442,9 @@ export class Window {
           // 假设 end 是起始前的索引，e 从 end + 1 开始处理
           let e = 1;
           for (let i = e; i < points.length; i++) {
+            // 保护 LOCAL_GRID 不被剔除或衰减
+            if (points[i].tag === 'LOCAL_GRID') continue;
+
             points[i].light *= Math.pow(0.075, (i - 0));
             // 计算当前索引与 e 的差值：如果是奇数，说明是需要剔除的间隔元素
             // if ((i - e) % 2 === 1) {
@@ -469,6 +472,9 @@ export class Window {
         // 假设 end 是起始前的索引，e 从 end + 1 开始处理
         let e = end + 1;
         for (let i = points.length - 1; i > e; i--) {
+          // 保护 LOCAL_GRID
+          if (points[i].tag === 'LOCAL_GRID') continue;
+
           // 计算当前索引与 e 的差值：如果是奇数，说明是需要剔除的间隔元素
           // if ((i - e) % 2 === 1) {
           points.splice(i, 1); // 从原数组中删除该元素

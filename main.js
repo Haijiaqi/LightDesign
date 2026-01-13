@@ -1428,9 +1428,21 @@ function findNearestAttractableExpanding(mouseX, mouseY) {
         for (const p of win.grid[gx][gy]) {
           if (!p.isAttractable) continue;
 
-          const dist = Math.sqrt((p.xM - mouseX) ** 2 + (p.yM - mouseY) ** 2);
-          if (dist < minDist) {
-            minDist = dist;
+          // 阶段16新增：EDIT 态只吸附屏幕平面附近的 局部格网点
+          if (SystemState.interactionState === 'EDIT') {
+            // 1. 只吸附局部格网点 (Control points snap to VM, so VM snaps to Grid)
+            if (p.tag !== 'LOCAL_GRID') continue;
+
+            // 2. 距离检测已移至 updateLocalGrid 控制 p.isAttractable
+          }
+
+          const dx = p.xM - mouseX;
+          const dy = p.yM - mouseY;
+          const distSq = dx * dx + dy * dy;
+
+          // 找到更近的点
+          if (distSq < minDist) {
+            minDist = distSq;
             nearest = p;
             foundInThisLayer = true;
           }
@@ -1625,7 +1637,7 @@ function handleInput() {
   // ========== FOCUS_ENTERING 态不处理输入 ==========
   if (SystemState.interactionState === 'FOCUS_ENTERING') return;
 
-  // ========== EDIT 态不处理 VIEW 态的视角输入 ==========
+  // ========== EDIT 态不处理 VIEW/FOCUS 态的连续输入 (使用独立事件处理) ==========
   if (SystemState.interactionState === 'EDIT') return;
   // =========================================
 
@@ -1754,22 +1766,17 @@ function setupEventListeners() {
       }
     }
 
-    // 阶段16新增：EDIT 态 WASD 步进旋转
+    // 阶段16新增：EDIT 态 WASD/QE 离散旋转
     if (SystemState.interactionState === 'EDIT') {
       const obj = SystemState.focusedObject;
       if (obj) {
-        const stepAngle = Math.PI / 12;  // 15 度步进
         const key = e.key.toLowerCase();
-
-        if (key === 'w') {
-          rotateEditObject(-stepAngle, 0);  // X轴负向旋转
-        } else if (key === 's') {
-          rotateEditObject(stepAngle, 0);   // X轴正向旋转
-        } else if (key === 'a') {
-          rotateEditObject(0, -stepAngle);  // Z轴负向旋转
-        } else if (key === 'd') {
-          rotateEditObject(0, stepAngle);   // Z轴正向旋转
+        console.log(`Key pressed in EDIT: ${key}`); // Debug Log
+        if (['w', 's', 'a', 'd', 'q', 'e'].includes(key)) {
+          OrientationUtils.transition(key, obj);
         }
+      } else {
+        console.warn('EDIT state but no focusedObject'); // Debug Log
       }
     }
   });
@@ -1779,6 +1786,68 @@ function setupEventListeners() {
 
   // 阶段10新增：click 事件用于双击检测
   SystemState.canvas.addEventListener("click", onMouseClick);
+
+  // 阶段16新增：EDIT 态滚轮切片深度调节
+  SystemState.canvas.addEventListener("wheel", (e) => {
+    if (SystemState.interactionState === 'EDIT') {
+      e.preventDefault();
+      const obj = SystemState.focusedObject;
+      if (!obj) return;
+
+      // 初始化滚动累加器
+      if (typeof SystemState._scrollAccumulator === 'undefined') {
+        SystemState._scrollAccumulator = 0;
+      }
+
+      // 累加 deltaY
+      SystemState._scrollAccumulator += e.deltaY;
+
+      // 设定阈值：通常一格滚轮 deltaY 为 100 或 125
+      // "滚三格滚轮" -> 约 300
+      const TICK_THRESHOLD = 300;
+
+      if (Math.abs(SystemState._scrollAccumulator) >= TICK_THRESHOLD) {
+        // 触发切片移动
+        const sign = Math.sign(SystemState._scrollAccumulator);
+        const steps = Math.floor(Math.abs(SystemState._scrollAccumulator) / TICK_THRESHOLD);
+
+        // 消耗累加器 (保留余数以平滑连续滚动，或者清零以强制步进？)
+        // 用户要求"不要停在层面之间"，暗示强制步进。
+        // 清零可能导致快速滚动时丢失操作，减去阈值更好。
+        SystemState._scrollAccumulator -= sign * steps * TICK_THRESHOLD;
+
+        const dir = SystemState.mainWindow.direction;
+        const stepSize = 2.0; // 2cm 间距 (一层)
+        // 总移动距离 = 步数 * 方向 * 2cm
+        const moveAmount = steps * stepSize;
+
+        // sign > 0 (下游/后拉) -> +dir (远离屏幕)
+        // sign < 0 (上游/前推) -> -dir (靠近屏幕)
+        const moveX = dir.x * moveAmount * sign;
+        const moveY = dir.y * moveAmount * sign;
+        const moveZ = dir.z * moveAmount * sign;
+
+        // 使用 moveObjectTo 移动物体及其所有点
+        if (typeof moveObjectTo === 'function') {
+          moveObjectTo(obj,
+            obj.center.x + moveX,
+            obj.center.y + moveY,
+            obj.center.z + moveZ
+          );
+        } else {
+          obj.center.x += moveX;
+          obj.center.y += moveY;
+          obj.center.z += moveZ;
+        }
+
+        // 立即更新局部格网以便下一帧渲染正确
+        updateLocalGrid();
+
+        SystemState.ifControl = true;
+        console.log(`Slice Scroll: ${sign > 0 ? 'Push' : 'Pull'} (${steps} steps), Center: (${obj.center.x.toFixed(1)}, ${obj.center.y.toFixed(1)}, ${obj.center.z.toFixed(1)})`);
+      }
+    }
+  }, { passive: false });
 
   // 鼠标事件
   SystemState.canvas.addEventListener("mousedown", (e) => {
@@ -3234,16 +3303,23 @@ function createLocalGridObject(targetObj) {
   const finalSize = Math.round(minDim / 10) * 10;
 
   const halfSize = finalSize / 2;
-  const spacing = 1.0; // 1cm 间距
+  const spacing = 2.0; // 调整为 2cm 间距 (用户反馈过于密集)
 
-  console.log(`创建局部格网: 尺寸 ${finalSize}cm (屏幕Min: ${minDim.toFixed(1)}cm)`);
+  console.log(`创建局部格网: 尺寸 ${finalSize}cm (屏幕Min: ${minDim.toFixed(1)}cm), 间距 ${spacing}cm`);
 
   const points = [];
 
-  // 生成立方体点阵
-  for (let x = -halfSize; x <= halfSize; x += spacing) {
-    for (let y = -halfSize; y <= halfSize; y += spacing) {
-      for (let z = -halfSize; z <= halfSize; z += spacing) {
+  // 生成立方体点阵 (保证中心对称, 必须包含 0 点)
+  // 使用整数索引生成，确保 0, +/-2, +/-4... 始终存在
+  const count = Math.floor(halfSize / spacing);
+
+  for (let ix = -count; ix <= count; ix++) {
+    for (let iy = -count; iy <= count; iy++) {
+      for (let iz = -count; iz <= count; iz++) {
+        const x = ix * spacing;
+        const y = iy * spacing;
+        const z = iz * spacing;
+
         // 创建点，相对于中心的局部坐标
         // 注意：这里我们创建一个独立的对象，它的 center 会被设置到 targetObj.center
         // 所以点的坐标应该是相对坐标。
@@ -3293,12 +3369,14 @@ function createLocalGridObject(targetObj) {
 /**
  * 更新局部格网（每一帧调用）
  * 确保格网与目标物体位置、姿态完全同步
+ * 并根据与屏幕平面的距离设置吸附性和视觉效果（切片反馈）
  */
 function updateLocalGrid() {
   const grid = SystemState.localGrid;
   const target = SystemState.focusedObject;
+  const win = SystemState.mainWindow;
 
-  if (!grid || !target) return;
+  if (!grid || !target || !win) return;
 
   // 1. 同步中心
   grid.center.x = target.center.x;
@@ -3310,8 +3388,10 @@ function updateLocalGrid() {
     grid.quaternion = { ...target.quaternion };
   }
 
+  const dir = win.direction; // 视线/屏幕法向
+  const planePt = dir.start; // 屏幕平面上的点
+
   // 3. 更新所有点的位置
-  // P_world = Center + Rotate(P_local)
   for (const p of grid.displayPoints) {
     if (p._localX === undefined) continue;
 
@@ -3320,6 +3400,27 @@ function updateLocalGrid() {
     p.x = grid.center.x + rotated.x;
     p.y = grid.center.y + rotated.y;
     p.z = grid.center.z + rotated.z;
+
+    // 4. 切片可视性与吸附性计算 (阶段16改进)
+    // 计算点到屏幕平面的距离
+    const dist = (p.x - planePt.x) * dir.x +
+      (p.y - planePt.y) * dir.y +
+      (p.z - planePt.z) * dir.z;
+
+    // 阈值：0.2cm (半格间距以内)
+    if (Math.abs(dist) <= 0.2) {
+      p.isAttractable = true;
+      // 高亮显示 (模拟) - 实际渲染可能需要 renderPoint 支持 color 属性
+      // 或者我们可以利用 tag 让 vertex shader 处理? 
+      // 目前 render pipeline 似乎使用 p.light ?
+      // 这里的点是 displayPoints，会被 projectAndAdd 处处理。
+      // 为简单起见，我们假设它们正常渲染。
+      // 可以设置一个特殊 tag 方便调试或未来高亮
+      p._isActiveSlice = true;
+    } else {
+      p.isAttractable = false;
+      p._isActiveSlice = false;
+    }
   }
 }
 
@@ -3339,6 +3440,259 @@ function applyQuaternion(v, q) {
     y: iy * q.w + iw * -q.y + iz * -q.x - ix * -q.z,
     z: iz * q.w + iw * -q.z + ix * -q.y - iy * -q.x
   };
+}
+
+// ========================
+// 阶段16新增：离散姿态系统 (18态)
+// ========================
+
+const OrientationUtils = {
+  // 预定义的18个标准四元数
+  STATES: [],
+
+  init() {
+    if (this.STATES.length > 0) return;
+
+    // 定义欧拉角 (Pitch-X, Yaw-Y, Roll-Z) 度数
+    const definitions = [
+      // 6 Face States (面)
+      { type: 'FACE', axis: 'Front', e: [0, 0, 0] },
+      { type: 'FACE', axis: 'Back', e: [0, 180, 0] },
+      { type: 'FACE', axis: 'Left', e: [0, 90, 0] },
+      { type: 'FACE', axis: 'Right', e: [0, -90, 0] },
+      { type: 'FACE', axis: 'Top', e: [90, 0, 0] },
+      { type: 'FACE', axis: 'Bottom', e: [-90, 0, 0] },
+
+      // 4 Horizontal Edges (横棱, Pitch 45)
+      { type: 'H_EDGE', axis: 'Top-Front', e: [45, 0, 0] },
+      { type: 'H_EDGE', axis: 'Bottom-Front', e: [-45, 0, 0] },
+      { type: 'H_EDGE', axis: 'Top-Back', e: [135, 0, 0] },     // Pitch 135
+      { type: 'H_EDGE', axis: 'Bottom-Back', e: [-135, 0, 0] },    // Pitch -135
+
+      // 4 Vertical Edges (纵棱, Yaw 45)
+      { type: 'V_EDGE', axis: 'Front-Left', e: [0, 45, 0] },
+      { type: 'V_EDGE', axis: 'Front-Right', e: [0, -45, 0] },
+      { type: 'V_EDGE', axis: 'Back-Left', e: [0, 135, 0] },
+      { type: 'V_EDGE', axis: 'Back-Right', e: [0, -135, 0] },
+
+      // 4 Longitudinal Edges (Roll 45) - 对角
+      { type: 'L_EDGE', axis: 'Diag-1', e: [0, 0, 45] },
+      { type: 'L_EDGE', axis: 'Diag-2', e: [0, 0, -45] },
+      { type: 'L_EDGE', axis: 'Diag-3', e: [0, 0, 135] },
+      { type: 'L_EDGE', axis: 'Diag-4', e: [0, 0, -135] }
+    ];
+
+    for (const def of definitions) {
+      this.STATES.push({
+        type: def.type,
+        axis: def.axis,
+        euler: def.e,
+        q: this.eulerToQuaternion(def.e[0], def.e[1], def.e[2])
+      });
+    }
+  },
+
+  // 欧拉角转四元数 (Degree) -> {w, x, y, z}
+  // Order: YXZ (Yaw -> Pitch -> Roll) 通常较好，或者 System default.
+  // 这里简化使用 XYZ 顺序
+  eulerToQuaternion(pitch, yaw, roll) {
+    const c1 = Math.cos(pitch * Math.PI / 360);
+    const s1 = Math.sin(pitch * Math.PI / 360);
+    const c2 = Math.cos(yaw * Math.PI / 360);
+    const s2 = Math.sin(yaw * Math.PI / 360);
+    const c3 = Math.cos(roll * Math.PI / 360);
+    const s3 = Math.sin(roll * Math.PI / 360);
+
+    return {
+      w: c1 * c2 * c3 - s1 * s2 * s3,
+      x: s1 * c2 * c3 + c1 * s2 * s3,
+      y: c1 * s2 * c3 - s1 * c2 * s3,
+      z: c1 * c2 * s3 + s1 * s2 * c3
+    };
+  },
+
+  // 找到最近的姿态
+  getNearestState(currentQ) {
+    this.init();
+
+    let bestState = null;
+    let maxDot = -1;
+
+    for (const state of this.STATES) {
+      // 四元数点积衡量相似度
+      // Dot = w1w2 + x1x2 + y1y2 + z1z2
+      const dot = Math.abs(currentQ.w * state.q.w + currentQ.x * state.q.x + currentQ.y * state.q.y + currentQ.z * state.q.z);
+
+      if (dot > maxDot) {
+        maxDot = dot;
+        bestState = state;
+      }
+    }
+    return bestState;
+  },
+
+  // 插值动画 (Slerp)
+  slerp(qa, qb, t) {
+    // 简化版 Slerp
+    let dot = qa.w * qb.w + qa.x * qb.x + qa.y * qb.y + qa.z * qb.z;
+
+    // 反转 qb 如果点积为负 (走短路径)
+    let sign = 1;
+    if (dot < 0) {
+      dot = -dot;
+      sign = -1;
+    }
+
+    if (dot > 0.9995) {
+      // 线性插值
+      const result = {
+        w: qa.w + t * (sign * qb.w - qa.w),
+        x: qa.x + t * (sign * qb.x - qa.x),
+        y: qa.y + t * (sign * qb.y - qa.y),
+        z: qa.z + t * (sign * qb.z - qa.z)
+      };
+      return this.normalize(result);
+    }
+
+    const theta_0 = Math.acos(dot);
+    const theta = theta_0 * t;
+    const sin_theta = Math.sin(theta);
+    const sin_theta_0 = Math.sin(theta_0);
+
+    const s0 = Math.cos(theta) - dot * sin_theta / sin_theta_0;
+    const s1 = sin_theta / sin_theta_0;
+
+    return {
+      w: s0 * qa.w + s1 * sign * qb.w,
+      x: s0 * qa.x + s1 * sign * qb.x,
+      y: s0 * qa.y + s1 * sign * qb.y,
+      z: s0 * qa.z + s1 * sign * qb.z
+    };
+  },
+
+  normalize(q) {
+    const len = Math.sqrt(q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z);
+    if (len === 0) return { w: 1, x: 0, y: 0, z: 0 };
+    return { w: q.w / len, x: q.x / len, y: q.y / len, z: q.z / len };
+  },
+
+  // 状态流转逻辑 (阶段16核心)
+  transition(key, obj) {
+    if (!obj.quaternion) return;
+
+    // 1. 获取当前状态 (如果没有则重新吸附)
+    let currentState = obj._currentOrientationState;
+    if (!currentState) {
+      currentState = this.getNearestState(obj.quaternion);
+      if (!currentState) return;
+      obj._currentOrientationState = currentState;
+    }
+
+    const type = currentState.type;
+    let axis = null; // {x, y, z}
+    let angle = 0;   // degree
+
+    // 2. 根据状态和按键决定旋转轴和角度
+    // W/S: Pitch (X轴)
+    // A/D: Yaw (Y轴)
+    // Q/E: Roll (Z轴) (注意：这里的XYZ是相对于屏幕坐标系的，即 View Space)
+
+    // 辅助：View Space X=(1,0,0), Y=(0,1,0), Z=(0,0,1)
+
+    if (key === 'w') { // Pitch Up
+      axis = { x: 1, y: 0, z: 0 };
+      // H_EDGE/FACE: 45度
+      // V_EDGE: 强转 90度 (Face -> Top/Bottom)
+      angle = (type === 'V_EDGE') ? 90 : 45;
+
+    } else if (key === 's') { // Pitch Down
+      axis = { x: 1, y: 0, z: 0 };
+      angle = (type === 'V_EDGE') ? -90 : -45;
+
+    } else if (key === 'a') { // Yaw Left
+      axis = { x: 0, y: 1, z: 0 };
+      // V_EDGE/FACE: 45度
+      // H_EDGE: 强转 90度 (Face -> Side)
+      angle = (type === 'H_EDGE') ? 90 : 45;
+
+    } else if (key === 'd') { // Yaw Right
+      axis = { x: 0, y: 1, z: 0 };
+      angle = (type === 'H_EDGE') ? -90 : -45;
+
+    } else if (key === 'q') { // Roll Left
+      axis = { x: 0, y: 0, z: 1 };
+      // Face: 45度 -> L_EDGE
+      // H_EDGE/V_EDGE: 90度 -> V_EDGE/H_EDGE
+      angle = (type === 'FACE') ? 45 : 90;
+
+    } else if (key === 'e') { // Roll Right
+      axis = { x: 0, y: 0, z: 1 };
+      angle = (type === 'FACE') ? -45 : -90;
+    }
+
+    if (!axis) return;
+
+    console.log(`State: ${type}, Key: ${key} -> Rotate ${angle}° around ${JSON.stringify(axis)}`);
+
+    // 3. 执行旋转 (应用四元数旋转: q_new = q_rot * q_obj)
+    // 注意：这里的旋转是相对于屏幕坐标系的。
+    // 如果我们要绕屏幕轴旋转，应该是 q_new = q_rot * q_obj
+
+    const rotQ = this.eulerToQuaternion(
+      axis.x * angle,
+      axis.y * angle,
+      axis.z * angle
+    );
+
+    // Quaternion multiplication: A * B
+    // w = a.w*b.w - dot(a.v, b.v)
+    // v = a.w*b.v + b.w*a.v + cross(a.v, b.v)
+    const qa = rotQ;
+    const qb = obj.quaternion;
+
+    const newQ = {
+      w: qa.w * qb.w - qa.x * qb.x - qa.y * qb.y - qa.z * qb.z,
+      x: qa.w * qb.x + qa.x * qb.w + qa.y * qb.z - qa.z * qb.y,
+      y: qa.w * qb.y - qa.x * qb.z + qa.y * qb.w + qa.z * qb.x,
+      z: qa.w * qb.z + qa.x * qb.y - qa.y * qb.x + qa.z * qb.w
+    };
+
+    // 4. 吸附到最近的标准态 (消除误差)
+    const nextState = this.getNearestState(newQ);
+    if (nextState) {
+      obj.quaternion = { ...nextState.q };
+      obj._currentOrientationState = nextState;
+      // 同时更新局部格网
+      if (SystemState.localGrid) {
+        SystemState.localGrid.quaternion = { ...obj.quaternion };
+      }
+      SystemState.ifControl = true;
+      console.log(`-> New State: ${nextState.type} (${nextState.axis})`);
+    }
+  }
+};
+
+/**
+ */
+function snapToNearestOrientation(obj) {
+  if (!obj.quaternion) return;
+
+  const bestState = OrientationUtils.getNearestState(obj.quaternion);
+  if (bestState) {
+    console.log(`自动吸附到姿态: ${bestState.type} (${bestState.axis})`);
+
+    // 直接设置（或者可以启动动画）
+    // 为了平滑，这里我们也许应该用动画？
+    // 但 Phase 16 要求 entry transition 自动 snap (animate)。
+    // 暂时先直接设置，确认逻辑正确。后续可改为 rotateObjectAroundAxis 风格的动画。
+
+    // 由于 rotateObjectAroundAxis 是增量旋转，这里我们是直接设置目标四元数。
+    // 我们可能需要一个新的动画机制：rotateToQuaternion(targetQ, duration)
+
+    // 暂时直接设置
+    obj.quaternion = { ...bestState.q };
+    obj._currentOrientationState = bestState; // 记录当前状态，用于WASD状态机
+  }
 }
 
 /**
@@ -3362,6 +3716,9 @@ function enterEditState() {
 
   // 1. 临时移除世界格网（隐藏且不可吸附）
   SystemState.objects = SystemState.objects.filter(o => o !== SystemState.worldGrid);
+
+  // 1.5 自动吸附到最近的标准姿态（阶段16新增）
+  snapToNearestOrientation(obj);
 
   // 2. 创建并显示局部格网（阶段16新增）
   const localGrid = createLocalGridObject(obj);
@@ -3672,6 +4029,9 @@ function gameLoop(timestamp = 0) {
 
   // 3. 物理步进
   physicsStep(dt);
+
+  // 3.5 更新局部格网（阶段16新增）
+  updateLocalGrid();
 
   // 4. 摄像头显示
   drawCameraFeedOnMainCanvas(SystemState.ctx);
