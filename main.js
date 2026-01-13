@@ -475,6 +475,11 @@ const SystemState = {
     snappedTo: null,              // 吸附到的点引用
   },
   // ========================================
+
+  // ========== VIEW 态物体拖拽 ==========
+  draggingObject: null,      // 正在拖拽的物体
+  dragStartCenter: null,     // 拖拽开始时物心位置
+  // ========================================
 };
 const C = new Classifier();
 
@@ -1752,7 +1757,19 @@ function setupEventListeners() {
       SystemState.isDragging = true;
       SystemState.lastMouseX = e.clientX;
       SystemState.lastMouseY = e.clientY;
-    } else if (SystemState.interactionState === 'VIEW') {
+    } else if (SystemState.interactionState === 'VIEW' && e.button === 0) {
+      // VIEW 态：检测虚拟鼠标是否吸附在物心
+      const snapped = SystemState.virtualMouse.snappedTo;
+      if (snapped && snapped.isObjectCenter && snapped.ownerObject) {
+        // 开始拖拽物体
+        SystemState.draggingObject = snapped.ownerObject;
+        SystemState.dragStartCenter = {
+          x: snapped.ownerObject.center.x,
+          y: snapped.ownerObject.center.y,
+          z: snapped.ownerObject.center.z
+        };
+        console.log('开始拖拽物体');
+      }
       SystemState.isDragging = true;
       SystemState.lastMouseX = e.clientX;
       SystemState.lastMouseY = e.clientY;
@@ -1786,6 +1803,18 @@ function setupEventListeners() {
       SystemState.chargeHitPoint = null;
     }
 
+    // VIEW 态：释放拖拽物体
+    if (SystemState.draggingObject) {
+      const snapped = SystemState.virtualMouse.snappedTo;
+      if (snapped && snapped.isGridPoint) {
+        // 吸附到格点
+        moveObjectTo(SystemState.draggingObject, snapped.x, snapped.y, snapped.z);
+        console.log('物体放置到格点:', snapped.x, snapped.y, snapped.z);
+      }
+      SystemState.draggingObject = null;
+      SystemState.dragStartCenter = null;
+    }
+
     SystemState.isDragging = false;
   });
 
@@ -1810,6 +1839,14 @@ function setupEventListeners() {
         SystemState.lastMouseX = e.clientX;
         SystemState.lastMouseY = e.clientY;
         SystemState.ifControl = true;
+      }
+    }
+    // VIEW 态：物体跟随虚拟鼠标拖拽
+    if (SystemState.interactionState === 'VIEW' && SystemState.draggingObject) {
+      const snapped = SystemState.virtualMouse.snappedTo;
+      if (snapped && snapped.isGridPoint) {
+        // 物体跟随到格点
+        moveObjectTo(SystemState.draggingObject, snapped.x, snapped.y, snapped.z);
       }
     }
     // FOCUS 态：不再使用拖动旋转，改为边缘控制（在 handleInput 中处理）
@@ -3361,6 +3398,43 @@ function addControlPointAt(screenX, screenY) {
 
   console.log('新增控制点，总数:', obj.controlPoints.length);
   updateControlPointsDisplay();
+}
+
+/**
+ * 移动物体到指定坐标（VIEW 态拖拽用）
+ * @param {Object} obj - 物体对象
+ * @param {number} x - 目标 X 坐标
+ * @param {number} y - 目标 Y 坐标
+ * @param {number} z - 目标 Z 坐标
+ */
+function moveObjectTo(obj, x, y, z) {
+  if (!obj || !obj.center) return;
+
+  const dx = x - obj.center.x;
+  const dy = y - obj.center.y;
+  const dz = z - obj.center.z;
+
+  // 移动所有点
+  const points = obj.displayPoints.length > 0 ? obj.displayPoints : obj.constructionPoints;
+  for (const p of points) {
+    p.x += dx;
+    p.y += dy;
+    p.z += dz;
+  }
+
+  // 更新中心
+  obj.center.x = x;
+  obj.center.y = y;
+  obj.center.z = z;
+
+  // 更新物心点
+  if (obj.centerPoint) {
+    obj.centerPoint.x = x;
+    obj.centerPoint.y = y;
+    obj.centerPoint.z = z;
+  }
+
+  SystemState.ifControl = true;
 }
 
 /**
