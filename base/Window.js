@@ -283,6 +283,17 @@ export class Window {
     const rate = this.disOfPointToPlane / disOfPointToHeadPlane;
     const inverseRate = 1 - rate;
 
+    // Debug CenterPoint
+    if (point.isObjectCenter && Math.random() < 0.01) {
+      console.log('CenterPoint Debug:',
+        'DisToPlane:', this.disOfPointToPlane.toFixed(2),
+        'DisToHead:', disOfPointToHeadPlane.toFixed(2),
+        'Rate:', rate.toFixed(4),
+        'InvRate:', inverseRate.toFixed(4),
+        'DisParallax:', ((eyeD / 2) * inverseRate).toFixed(4)
+      );
+    }
+
     // 5. 屏幕坐标转换（公共）
     const disOfPointProjToHeadPlaneXaxis = this.vy.projL(hpdx, hpdy, hpdz);
     const y =

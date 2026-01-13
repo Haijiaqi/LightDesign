@@ -327,6 +327,54 @@ function createWorldGrid(spacing = 10, radius = 100) {
 // ========================
 
 /**
+ * 创建全整数坐标的网格对象（表面点）
+ * @param {number} cx - 中心 X
+ * @param {number} cy - 中心 Y
+ * @param {number} cz - 中心 Z
+ * @param {number} size - 边长点数
+ * @param {number} spacing - 间距
+ */
+function createIntegerGridObject(cx, cy, cz, size = 6, spacing = 1) {
+  const points = [];
+  // 范围：[-size/2, size/2]
+  // 对于 size=5: -2 到 2 (中心 0)
+  // 对于 size=6: -3 到 2 (中心 -0.5)
+  const startOffset = -Math.floor(size / 2);
+  const endOffset = startOffset + size - 1;
+
+  for (let ix = startOffset; ix <= endOffset; ix++) {
+    for (let iy = startOffset; iy <= endOffset; iy++) {
+      for (let iz = startOffset; iz <= endOffset; iz++) {
+        // 判断是否为表面点
+        const isSurface = (
+          ix === startOffset || ix === endOffset ||
+          iy === startOffset || iy === endOffset ||
+          iz === startOffset || iz === endOffset
+        );
+
+        if (isSurface) {
+          const x = cx + ix * spacing;
+          const y = cy + iy * spacing;
+          const z = cz + iz * spacing;
+
+          const p = new Point(x, y, z);
+          p.isAttractable = false; // 不可吸附
+          // p.tag = 'CONTROL_GRID'; // 可选：添加特定标签
+          points.push(p);
+        }
+      }
+    }
+  }
+
+  return new Object(points, {
+    center: { x: cx, y: cy, z: cz },
+    frontDirection: { x: 0, y: -1, z: 0 },
+    upDirection: { x: 0, y: 0, z: 1 },
+    name: 'IntegerGrid'
+  });
+}
+
+/**
  * 创建测试场景物体
  * 物体位于屏幕附近（Y ≈ screenDistance）
  */
@@ -334,6 +382,7 @@ function createTestScene() {
   return [
     createSphere(0, 50, 0, 3, 2000),     // 屏幕处主球（固定于 Y=50）
     createCube(5, 100, -10, 50, 0, 0),    // 正六面体（边长5cm，固定于 Y=50）
+    createIntegerGridObject(10, 50, 0, 5, 1), // 新增：5x5x5 整数网格，位于 (10, 50, 0)
   ];
 }
 
@@ -2473,8 +2522,15 @@ function rotateObjectAroundAxis(obj, axis, amount) {
  * 使用 direction.start 作为目标位置（这是屏幕平面上的参考点，代表视窗中心）
  */
 function calculateCenterPosition() {
+  // 更加鲁棒的计算：将物体放置在逻辑屏幕中心
+  // 无论人眼在哪里 (Capital)，FOCUS 态下物体都应该回到 逻辑屏幕中心
+
+  // 逻辑屏幕中心 = direction.start
+  // direction.start 是屏幕平面上的参考点，初始化时为 (0, 50, screenCenterHeight)
+  // 当用户绕旋转中心旋转时，该点也会同步旋转，因此它始终代表"对用户而言的屏幕中心"
+
   const dirStart = SystemState.mainWindow.direction.start;
-  // direction.start 是屏幕平面上的参考点，代表视窗中心
+
   return {
     x: dirStart.x,
     y: dirStart.y,
@@ -3080,16 +3136,15 @@ function onMouseClick(event) {
     lastClickTime = now;
     lastClickTarget = target;
   }
-  // FOCUS 态：双击表面进入 EDIT 态（阶段15新增）
+  // FOCUS 态：双击任意位置进入 EDIT 态（阶段15精简）
   else if (SystemState.interactionState === 'FOCUS') {
-    const hitPoint = findSurfaceHit(event.clientX, event.clientY);
-
-    if (hitPoint && lastClickTarget === 'focus_surface' && now - lastClickTime < DOUBLE_CLICK_THRESHOLD) {
+    // 整饬修改：不再需要点击物体表面，双击任意位置即可
+    if (lastClickTarget === 'focus_click' && now - lastClickTime < DOUBLE_CLICK_THRESHOLD) {
       enterEditState();
     }
 
     lastClickTime = now;
-    lastClickTarget = hitPoint ? 'focus_surface' : null;
+    lastClickTarget = 'focus_click';
   }
   // EDIT 态：双击空白处新增控制点（阶段16新增）
   else if (SystemState.interactionState === 'EDIT') {
@@ -3161,6 +3216,135 @@ function findClickedObjectCenter(screenX, screenY) {
  * 进入 EDIT 态（阶段15完善）
  * EDIT 态：编辑模式，可操作控制点
  */
+// ========================
+// 阶段16新增：局部格网系统
+// ========================
+
+/**
+ * 创建局部格网对象
+ * 尺寸基于屏幕大小动态计算，点间距 1cm
+ */
+function createLocalGridObject(targetObj) {
+  // 1. 计算格网尺寸
+  // 取屏幕长宽较小值，向下取整到最近的10cm (按照用户最新纠正: Min(31) -> 30)
+  const minDim = Math.min(CONFIG.screenXLengthCm, CONFIG.screenYLengthCm);
+  const gridSize = Math.floor(minDim / 10) * 10;
+  // 修正：如果太小（例如屏幕只有17cm -> 10cm），至少保证一定尺寸？
+  // 用户例子：17.4 -> 20。所以应该是 Round(x/10)*10
+  const finalSize = Math.round(minDim / 10) * 10;
+
+  const halfSize = finalSize / 2;
+  const spacing = 1.0; // 1cm 间距
+
+  console.log(`创建局部格网: 尺寸 ${finalSize}cm (屏幕Min: ${minDim.toFixed(1)}cm)`);
+
+  const points = [];
+
+  // 生成立方体点阵
+  for (let x = -halfSize; x <= halfSize; x += spacing) {
+    for (let y = -halfSize; y <= halfSize; y += spacing) {
+      for (let z = -halfSize; z <= halfSize; z += spacing) {
+        // 创建点，相对于中心的局部坐标
+        // 注意：这里我们创建一个独立的对象，它的 center 会被设置到 targetObj.center
+        // 所以点的坐标应该是相对坐标。
+        // 为了方便同步，我们直接存储相对坐标，但在渲染时通过 applyRotation+Translation 计算
+
+        // 实际上 LightDesign 的 Point 存储的是世界坐标。
+        // 所以我们初始化时，假设它在原点 (0,0,0) 并未旋转。
+        // 之后在 updateLocalGrid 中每一帧都将其变换到 targetObj 的位置。
+
+        // 但为了性能，或许我们应该只存储"相对位置"，在渲染/计算时变换？
+        // 现有渲染管道是基于 Point.x/y/z (世界坐标) 的。
+        // 所以 LocalGrid 必须拥有真实的 point.x/y/z。
+
+        // 优化策略：
+        // LocalGrid.localPoints = [{lx, ly, lz}, ...]
+        // LocalGrid.displayPoints = [Point, ...]
+        // update 时遍历 localPoints -> transform -> displayPoints
+
+        const p = new Point(x, y, z);
+        p._localX = x; // 存储局部坐标
+        p._localY = y;
+        p._localZ = z;
+        p.isAttractable = true;
+        p.tag = 'LOCAL_GRID'; // 标记为局部格网点
+        points.push(p);
+      }
+    }
+  }
+
+  const gridObj = new Object();
+  gridObj.displayPoints = points;
+  gridObj.center = { x: targetObj.center.x, y: targetObj.center.y, z: targetObj.center.z };
+  // 复制四元数旋转
+  if (targetObj.quaternion) {
+    gridObj.quaternion = { ...targetObj.quaternion };
+  } else {
+    gridObj.quaternion = { w: 1, x: 0, y: 0, z: 0 };
+  }
+
+  // 标记为局部格网
+  gridObj.isLocalGrid = true;
+  gridObj.owner = targetObj; // 记录它跟随谁
+
+  return gridObj;
+}
+
+/**
+ * 更新局部格网（每一帧调用）
+ * 确保格网与目标物体位置、姿态完全同步
+ */
+function updateLocalGrid() {
+  const grid = SystemState.localGrid;
+  const target = SystemState.focusedObject;
+
+  if (!grid || !target) return;
+
+  // 1. 同步中心
+  grid.center.x = target.center.x;
+  grid.center.y = target.center.y;
+  grid.center.z = target.center.z;
+
+  // 2. 同步四元数
+  if (target.quaternion) {
+    grid.quaternion = { ...target.quaternion };
+  }
+
+  // 3. 更新所有点的位置
+  // P_world = Center + Rotate(P_local)
+  for (const p of grid.displayPoints) {
+    if (p._localX === undefined) continue;
+
+    const rotated = applyQuaternion({ x: p._localX, y: p._localY, z: p._localZ }, grid.quaternion);
+
+    p.x = grid.center.x + rotated.x;
+    p.y = grid.center.y + rotated.y;
+    p.z = grid.center.z + rotated.z;
+  }
+}
+
+/**
+ * 四元数旋转辅助函数
+ * q: {w, x, y, z}
+ * v: {x, y, z}
+ */
+function applyQuaternion(v, q) {
+  const ix = q.w * v.x + q.y * v.z - q.z * v.y;
+  const iy = q.w * v.y + q.z * v.x - q.x * v.z;
+  const iz = q.w * v.z + q.x * v.y - q.y * v.x;
+  const iw = -q.x * v.x - q.y * v.y - q.z * v.z;
+
+  return {
+    x: ix * q.w + iw * -q.x + iy * -q.z - iz * -q.y,
+    y: iy * q.w + iw * -q.y + iz * -q.x - ix * -q.z,
+    z: iz * q.w + iw * -q.z + ix * -q.y - iy * -q.x
+  };
+}
+
+/**
+ * 进入 EDIT 态（阶段15/16完善）
+ * EDIT 态：编辑模式，可操作控制点
+ */
 function enterEditState() {
   if (SystemState.interactionState !== 'FOCUS') {
     console.warn('enterEditState: 只能从 FOCUS 态进入 EDIT 态');
@@ -3176,10 +3360,18 @@ function enterEditState() {
   SystemState.interactionState = 'EDIT';
   console.log('进入 EDIT 态');
 
-  // 1. 显示控制点
+  // 1. 临时移除世界格网（隐藏且不可吸附）
+  SystemState.objects = SystemState.objects.filter(o => o !== SystemState.worldGrid);
+
+  // 2. 创建并显示局部格网（阶段16新增）
+  const localGrid = createLocalGridObject(obj);
+  SystemState.localGrid = localGrid;
+  SystemState.objects.push(localGrid); // 加入渲染列表
+
+  // 3. 显示控制点
   showControlPoints(obj);
 
-  // 2. 触发渲染
+  // 4. 触发渲染
   SystemState.ifControl = true;
 }
 
@@ -3201,8 +3393,9 @@ function showControlPoints(obj) {
   }
 
   // 整饬修改：直接为控制点设置 tag（不再创建副本到 screenPoints）
+  // 按照用户要求：像普通点一样显示，不设置特殊 tag
   for (const cp of points) {
-    cp.tag = 'CONTROL';
+    cp.tag = null; // 清除特殊标签，使用普通点渲染
     cp.isAttractable = true;
   }
 
@@ -3234,11 +3427,22 @@ function exitEditState() {
   // 1. 清除控制点显示
   hideControlPoints();
 
-  // 2. 切换到 FOCUS 态
+  // 2. 移除局部格网（阶段16新增）
+  if (SystemState.localGrid) {
+    SystemState.objects = SystemState.objects.filter(o => o !== SystemState.localGrid);
+    SystemState.localGrid = null;
+  }
+
+  // 3. 恢复世界格网
+  if (!SystemState.objects.includes(SystemState.worldGrid)) {
+    SystemState.objects.push(SystemState.worldGrid);
+  }
+
+  // 4. 切换到 FOCUS 态
   SystemState.interactionState = 'FOCUS';
   console.log('返回 FOCUS 态');
 
-  // 3. 触发渲染
+  // 5. 触发渲染
   SystemState.ifControl = true;
 }
 
