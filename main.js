@@ -293,9 +293,13 @@ function createSphereWithMeridians(
 function createWorldGrid(spacing = 10, radius = 100) {
   const points = [];
 
-  for (let x = -radius; x <= radius; x += spacing) {
-    for (let y = -radius; y <= radius; y += spacing) {
-      for (let z = -radius; z <= radius; z += spacing) {
+  // 确保格点坐标是 spacing 的整数倍（包含原点）
+  const minBound = Math.ceil(-radius / spacing) * spacing;
+  const maxBound = Math.floor(radius / spacing) * spacing;
+
+  for (let x = minBound; x <= maxBound; x += spacing) {
+    for (let y = minBound; y <= maxBound; y += spacing) {
+      for (let z = minBound; z <= maxBound; z += spacing) {
         const dist = Math.sqrt(x * x + y * y + z * z);
         if (dist <= radius) {
           const p = new Point(x, y, z);
@@ -328,8 +332,8 @@ function createWorldGrid(spacing = 10, radius = 100) {
  */
 function createTestScene() {
   return [
-    createSphere(0, CONFIG.screenDistance, 0, 3, 2000),     // 屏幕处主球（高度 0cm）
-    createCube(5, 100, -10, CONFIG.screenDistance, 0, 0),    // 正六面体（边长5cm，位于(-10, 50, 0)）
+    createSphere(0, 50, 0, 3, 2000),     // 屏幕处主球（固定于 Y=50）
+    createCube(5, 100, -10, 50, 0, 0),    // 正六面体（边长5cm，固定于 Y=50）
   ];
 }
 
@@ -689,6 +693,14 @@ async function init() {
     "main",
   );
 
+
+  // 1. 设置视窗距离为 1 倍显示器宽度 (User <-> Screen)
+  const displayWidth = CONFIG.screenXLengthCm;
+  // 视屏距离 = 1.0 * 宽度
+  const eyeToScreenDist = 1.0 * displayWidth;
+  // 屏幕位置 = 人眼位置 + 视屏距离
+  CONFIG.screenDistance = CONFIG.userDistanceFromOrigin + eyeToScreenDist;
+
   // ========== 阶段1修改：用户初始位置 ==========
   const eyeZ = CONFIG.userEyeHeight;
   const screenZ = CONFIG.screenCenterHeight;  // 视窗中心高度（独立于人眼高度）
@@ -712,14 +724,22 @@ async function init() {
   // =============================================
 
 
+
+
   // 估算法向量
   estimateNormals();
 
   // 计算初始光源
   updateLight();
 
-  // 创建世界格网
-  SystemState.worldGrid = createWorldGrid(10, 100);
+  // 2. 创建世界格网 (半径 = 2 倍显示器宽度)
+  SystemState.worldGrid = createWorldGrid(10, displayWidth * 2);
+
+  // 3. 初始化移动限制 (保存初始位置)
+  SystemState.movementConstraints = {
+    initialY: CONFIG.userDistanceFromOrigin, // 人眼初始 Y
+    range: 0.5 * displayWidth                // 限制范围 +/- 0.5 Width
+  };
   SystemState.objects.push(SystemState.worldGrid);
   console.log("世界格网已创建，格点数:", SystemState.worldGrid.displayPoints.length);
 
@@ -1845,22 +1865,34 @@ function setupEventListeners() {
     const dir = SystemState.mainWindow.direction;
     const speed = CONFIG.moveSpeed * 2;  // 滚轮速度稍快
 
+    // 移动限制逻辑
+    const currentY = SystemState.mainWindow.capital.y;
+    const initialY = SystemState.movementConstraints?.initialY ?? CONFIG.userDistanceFromOrigin;
+    const range = SystemState.movementConstraints?.range ?? (CONFIG.screenXLengthCm * 0.5);
+    const minY = initialY - range;
+    const maxY = initialY + range;
+
+    // 预计算移动增量
+    let dx = 0, dy = 0, dz = 0;
     if (e.deltaY < 0) {
-      // 滚轮向上 -> 前进（相当于 FG）
-      SystemState.mainWindow.capital.x += dir.x * speed;
-      SystemState.mainWindow.capital.y += dir.y * speed;
-      SystemState.mainWindow.capital.z += dir.z * speed;
-      dir.start.x += dir.x * speed;
-      dir.start.y += dir.y * speed;
-      dir.start.z += dir.z * speed;
+      // 前进
+      dx = dir.x * speed; dy = dir.y * speed; dz = dir.z * speed;
     } else {
-      // 滚轮向下 -> 后退（相当于 V）
-      SystemState.mainWindow.capital.x -= dir.x * speed;
-      SystemState.mainWindow.capital.y -= dir.y * speed;
-      SystemState.mainWindow.capital.z -= dir.z * speed;
-      dir.start.x -= dir.x * speed;
-      dir.start.y -= dir.y * speed;
-      dir.start.z -= dir.z * speed;
+      // 后退
+      dx = -dir.x * speed; dy = -dir.y * speed; dz = -dir.z * speed;
+    }
+
+    // 检查 Y 轴限制 (假设主要沿 Y 轴移动)
+    const nextY = currentY + dy;
+    if (nextY >= minY && nextY <= maxY) {
+      SystemState.mainWindow.capital.x += dx;
+      SystemState.mainWindow.capital.y += dy;
+      SystemState.mainWindow.capital.z += dz;
+      dir.start.x += dx;
+      dir.start.y += dy;
+      dir.start.z += dz;
+    } else {
+      console.log("已达到移动限制");
     }
     SystemState.ifControl = true;
   });
