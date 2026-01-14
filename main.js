@@ -5,6 +5,8 @@ import { Vector } from "./base/Vector.js";
 import { Classifier } from "./math/Classifier.js";
 import { StyleImpl } from "./manage/StyleImpl.js";
 import { AnimationImpl } from "./manage/AnimationImpl.js";
+import { ObjectFactoryImpl } from "./manage/ObjectFactoryImpl.js";
+import { OrientationImpl } from "./manage/OrientationImpl.js";
 
 // ========================
 // 1. 配置参数（预留接口）
@@ -64,332 +66,13 @@ const CONFIG = {
 
 
 // ========================
-// 2. 对象创建函数
+// 2. 系统状态管理
 // ========================
-function createCube(
-  size = 5,
-  pointsPerFace = 100,
-  x = 0,
-  y = -30,
-  z = 0,
-  alpha = 0,
-  ifEntity = false,
-) {
-  const points = [];
-  const halfSize = size / 2;
-  const rad = (alpha * Math.PI) / 180;
-  const cosA = Math.cos(rad);
-  const sinA = Math.sin(rad);
-
-  const faceGenerators = [
-    () => ({
-      x: (Math.random() - 0.5) * size,
-      y: (Math.random() - 0.5) * size,
-      z: halfSize,
-    }), // 前
-    () => ({
-      x: (Math.random() - 0.5) * size,
-      y: (Math.random() - 0.5) * size,
-      z: -halfSize,
-    }), // 后
-    () => ({
-      x: -halfSize,
-      y: (Math.random() - 0.5) * size,
-      z: (Math.random() - 0.5) * size,
-    }), // 左
-    () => ({
-      x: halfSize,
-      y: (Math.random() - 0.5) * size,
-      z: (Math.random() - 0.5) * size,
-    }), // 右
-    () => ({
-      x: (Math.random() - 0.5) * size,
-      y: halfSize,
-      z: (Math.random() - 0.5) * size,
-    }), // 上
-    () => ({
-      x: (Math.random() - 0.5) * size,
-      y: -halfSize,
-      z: (Math.random() - 0.5) * size,
-    }), // 下
-  ];
-
-  for (let i = 0; i < pointsPerFace; i++) {
-    faceGenerators.forEach((gen) => {
-      const { x: px, y: py, z: pz } = gen(); // 修复解构赋值
-      const rotatedX = px * cosA - py * sinA;
-      const rotatedY = px * sinA + py * cosA;
-      const rotatedZ = pz;
-      points.push(new Point(rotatedX + x, rotatedY + y, rotatedZ + z));
-    });
-
-    if (ifEntity) {
-      const intX = (Math.random() - 0.5) * size;
-      const intY = (Math.random() - 0.5) * size;
-      const intZ = (Math.random() - 0.5) * size;
-      const rotatedX = intX * cosA - intY * sinA;
-      const rotatedY = intX * sinA + intY * cosA;
-      const rotatedZ = intZ;
-      points.push(new Point(rotatedX + x, rotatedY + y, rotatedZ + z));
-    }
-  }
-  // 计算初始 frontDirection（默认朝向 -Y，即(0,-1,0)）
-  // 因为 createCube 创建时绕 Z 轴旋转了 alpha 度
-  // 原 front (0,-1,0) 绕 Z 轴旋转 alpha：
-  // x' = 0*cos - (-1)*sin = sin(alpha)
-  // y' = 0*sin + (-1)*cos = -cos(alpha)
-  // z' = 0
-  const frontX = Math.sin(rad);
-  const frontY = -Math.cos(rad);
-  const frontZ = 0;
-
-  // 显式传入 center（避免 automatic averaging）
-  // 对于立方体，中心即为传入的 {x,y,z}
-  return new Object(points, {
-    frontDirection: { x: frontX, y: frontY, z: frontZ },
-    center: { x, y, z }
-  });
-}
-function createPlane(
-  width = 20,
-  height = 10,
-  pointsPerFace = 10000,
-  x = 0,
-  y = 0,
-  z = 0,
-  alpha = 5,
-  ifEntity = false,
-) {
-  const points = [];
-  const halfWidth = width / 2; // 宽度半值（X方向范围）
-  const halfHeight = height / 2; // 高度半值（Z方向范围）
-  const rad = (alpha * Math.PI) / 180; // 角度转弧度
-  const cosA = Math.cos(rad);
-  const sinA = Math.sin(rad);
-
-  // 生成平面表面点（Z轴在平面上，中心位于Z轴）
-  const generateSurfacePoint = () => {
-    // 原始坐标：X范围[-halfWidth, halfWidth]，Z范围[-halfHeight, halfHeight]，Y=0（下边框初始在xy平面）
-    const px = (Math.random() - 0.5) * width;
-    const pz = (Math.random() - 0.5) * height;
-    const py = 0;
-
-    // 绕Z轴旋转点坐标
-    const rotatedX = px * cosA - py * sinA;
-    const rotatedY = px * sinA + py * cosA;
-    const rotatedZ = pz;
-
-    // 计算法向量（默认(0,-1,0)，同步绕Z轴旋转）
-    const nx = 0 * cosA - -1 * sinA; // 原法向量(0,-1,0)旋转后x分量
-    const ny = 0 * sinA + -1 * cosA; // 原法向量(0,-1,0)旋转后y分量
-    const nz = 0; // Z分量不变
-
-    const p = new Point(rotatedX + x, rotatedY + y, rotatedZ + z);
-    p.nx = nx;
-    p.ny = ny;
-    p.nz = nz;
-    // 平移到目标位置并返回点（包含法向量）
-    return p;
-  };
-
-  // 生成平面点（表面点）
-  for (let i = 0; i < pointsPerFace; i++) {
-    points.push(generateSurfacePoint());
-  }
-
-  // 若需要实体点（内部填充点，逻辑同表面点）
-  if (ifEntity) {
-    for (let i = 0; i < pointsPerFace; i++) {
-      points.push(generateSurfacePoint());
-    }
-  }
-
-  return new Object(points);
-}
-function createSphere(x0, y0, z0, radius = 5, numPoints = 5000) {
-  const points = [];
-  for (let i = 0; i < numPoints; i++) {
-    const u = Math.random();
-    const v = Math.random();
-    const theta = 2 * Math.PI * u;
-    const phi = Math.acos(2 * v - 1);
-    const x = radius * Math.sin(phi) * Math.cos(theta) + x0;
-    const y = radius * Math.sin(phi) * Math.sin(theta) + y0;
-    const z = radius * Math.cos(phi) + z0;
-    points.push(new Point(x, y, z));
-  }
-  // 传递明确的 center 坐标，使物心位置为创建时的坐标
-  return new Object(points, { center: { x: x0, y: y0, z: z0 } });
-}
-
-function createSphereWithMeridians(
-  x0,
-  y0,
-  z0,
-  radius = 2.5,
-  numMeridians = 12,     // 每组大圆的数量（实际每组只有1个，但可旋转生成多个）
-  pointsPerCircle = 50
-) {
-  const points = [];
-
-  // 1. XY 平面大圆（绕Z轴）及其旋转副本
-  const angleStep = (2 * Math.PI) / numMeridians;
-  for (let i = 0; i < numMeridians; i++) {
-    const angle = i * angleStep;
-    for (let p = 0; p <= pointsPerCircle; p++) {
-      const theta = (p / pointsPerCircle) * 2 * Math.PI;
-      // 基础圆在 XY 平面
-      let x = radius * Math.cos(theta);
-      let y = radius * Math.sin(theta);
-      let z = 0;
-      // 绕 Z 轴旋转 angle（其实不需要，因为XY平面圆绕Z轴旋转还是自己）
-      // 但为了生成多条，我们可以绕其他轴旋转这个圆
-      // 更好的方式：直接生成三个坐标平面的圆
-
-      // 实际上，我们只需要三个正交圆，然后可以旋转它们
-    }
-  }
-
-  // 更简单：直接生成三个正交大圆
-  // 圆1: XY平面 (z=z0)
-  for (let p = 0; p <= pointsPerCircle; p++) {
-    const theta = (p / pointsPerCircle) * 2 * Math.PI;
-    points.push(new Point(
-      x0 + radius * Math.cos(theta),
-      y0 + radius * Math.sin(theta),
-      z0
-    ));
-  }
-
-  // 圆2: XZ平面 (y=y0)
-  for (let p = 0; p <= pointsPerCircle; p++) {
-    const theta = (p / pointsPerCircle) * 2 * Math.PI;
-    points.push(new Point(
-      x0 + radius * Math.cos(theta),
-      y0,
-      z0 + radius * Math.sin(theta)
-    ));
-  }
-
-  // 圆3: YZ平面 (x=x0)
-  for (let p = 0; p <= pointsPerCircle; p++) {
-    const theta = (p / pointsPerCircle) * 2 * Math.PI;
-    points.push(new Point(
-      x0,
-      y0 + radius * Math.cos(theta),
-      z0 + radius * Math.sin(theta)
-    ));
-  }
-
-  return new Object(points, { center: { x: x0, y: y0, z: z0 } });
-}
-
-/**
- * 创建世界格网（以原点为球心的整数格点）
- * @param {number} spacing - 格点间距（厘米），默认 10
- * @param {number} radius - 球形范围半径（厘米），默认 100
- * @returns {Object} 世界格网 Object
- */
-function createWorldGrid(spacing = 10, radius = 100) {
-  const points = [];
-
-  // 确保格点坐标是 spacing 的整数倍（包含原点）
-  const minBound = Math.ceil(-radius / spacing) * spacing;
-  const maxBound = Math.floor(radius / spacing) * spacing;
-
-  for (let x = minBound; x <= maxBound; x += spacing) {
-    for (let y = minBound; y <= maxBound; y += spacing) {
-      for (let z = minBound; z <= maxBound; z += spacing) {
-        const dist = Math.sqrt(x * x + y * y + z * z);
-        if (dist <= radius) {
-          const p = new Point(x, y, z);
-          p.isAttractable = true;   // 可被吸附
-          p.isGridPoint = true;     // 标记为世界格点
-          p.light = 0.3;            // 较暗的固定亮度
-          points.push(p);
-        }
-      }
-    }
-  }
-
-  const grid = new Object([]);  // 传入空数组，避免属性丢失
-  grid.isWorldGrid = true;
-  grid.centerPoint = null;  // 世界格网不需要物心
-
-  // 直接设置 displayPoints，保留所有自定义属性
-  grid.displayPoints = points;
-
-  return grid;
-}
-
-// ========================
-// 3. 系统状态管理
-// ========================
-
-/**
- * 创建全整数坐标的网格对象（表面点）
- * @param {number} cx - 中心 X
- * @param {number} cy - 中心 Y
- * @param {number} cz - 中心 Z
- * @param {number} size - 边长点数
- * @param {number} spacing - 间距
- */
-function createIntegerGridObject(cx, cy, cz, size = 6, spacing = 1) {
-  const points = [];
-  // 范围：[-size/2, size/2]
-  // 对于 size=5: -2 到 2 (中心 0)
-  // 对于 size=6: -3 到 2 (中心 -0.5)
-  const startOffset = -Math.floor(size / 2);
-  const endOffset = startOffset + size - 1;
-
-  for (let ix = startOffset; ix <= endOffset; ix++) {
-    for (let iy = startOffset; iy <= endOffset; iy++) {
-      for (let iz = startOffset; iz <= endOffset; iz++) {
-        // 判断是否为表面点
-        const isSurface = (
-          ix === startOffset || ix === endOffset ||
-          iy === startOffset || iy === endOffset ||
-          iz === startOffset || iz === endOffset
-        );
-
-        if (isSurface) {
-          const x = cx + ix * spacing;
-          const y = cy + iy * spacing;
-          const z = cz + iz * spacing;
-
-          const p = new Point(x, y, z);
-          p.isAttractable = false; // 不可吸附
-          // p.tag = 'CONTROL_GRID'; // 可选：添加特定标签
-          points.push(p);
-        }
-      }
-    }
-  }
-
-  return new Object(points, {
-    center: { x: cx, y: cy, z: cz },
-    frontDirection: { x: 0, y: -1, z: 0 },
-    upDirection: { x: 0, y: 0, z: 1 },
-    name: 'IntegerGrid'
-  });
-}
-
-/**
- * 创建测试场景物体
- * 物体位于屏幕附近（Y ≈ screenDistance）
- */
-function createTestScene() {
-  return [
-    createSphere(0, 50, 0, 3, 2000),     // 屏幕处主球（固定于 Y=50）
-    createCube(5, 100, -10, 50, 0, 0),    // 正六面体（边长5cm，固定于 Y=50）
-    createIntegerGridObject(10, 50, 0, 5, 1), // 新增：5x5x5 整数网格，位于 (10, 50, 0)
-  ];
-}
 
 const SystemState = {
   ifControl: true,
-  // 对象列表
-  objects: createTestScene(),
+  // 对象列表（使用 ObjectFactoryImpl 创建）
+  objects: ObjectFactoryImpl.createTestScene(),
   otherObjects: [], // 例如光源点
 
   // ========== 阶段 3B 新增 ==========
@@ -787,7 +470,7 @@ async function init() {
   updateLight();
 
   // 2. 创建世界格网 (半径 = 2 倍显示器宽度)
-  SystemState.worldGrid = createWorldGrid(10, displayWidth * 2);
+  SystemState.worldGrid = ObjectFactoryImpl.createWorldGrid(10, displayWidth * 2);
 
   // 3. 初始化移动限制 (保存初始位置)
   SystemState.movementConstraints = {
@@ -866,7 +549,7 @@ function updateLight() {
   SystemState.otherObjects.length = 0;
   // 光源小球放在实际光源位置
   SystemState.otherObjects.push(
-    createSphere(lightX, lightY, lightZ, 0.5, 20),
+    ObjectFactoryImpl.createSphere(lightX, lightY, lightZ, 0.5, 20),
   );
 }
 
@@ -1778,7 +1461,7 @@ function setupEventListeners() {
           const cooldownMs = 300; // 300ms 冷却时间
           if (!SystemState._lastRotationTime || (now - SystemState._lastRotationTime) > cooldownMs) {
             SystemState._lastRotationTime = now;
-            OrientationUtils.transition(key, obj);
+            OrientationImpl.transition(key, obj, SystemState.mainWindow?.direction, animateRotation);
           }
         }
       }
@@ -1826,8 +1509,8 @@ function setupEventListeners() {
 
         // 使用配置值，根据当前姿态类型确定最大深度和层间距
         const orientationType = obj._currentOrientationState?.type || 'FACE';
-        const maxDepth = LocalGridConfig.getMaxDepthForOrientation(orientationType);
-        const stepSize = LocalGridConfig.getLayerSpacingForOrientation(orientationType);
+        const maxDepth = ObjectFactoryImpl.LocalGridConfig.getMaxDepthForOrientation(orientationType);
+        const stepSize = ObjectFactoryImpl.LocalGridConfig.getLayerSpacingForOrientation(orientationType);
 
         console.log(`[Wheel] Type: ${orientationType}, Step: ${stepSize.toFixed(3)}cm`);
 
@@ -2111,7 +1794,7 @@ function createObjectFromCommand(command) {
   console.log("收到创建对象指令:", command);
   switch (command.type) {
     case "sphere":
-      return createSphere(
+      return ObjectFactoryImpl.createSphere(
         command.params.x,
         command.params.y,
         command.params.z,
@@ -2119,7 +1802,7 @@ function createObjectFromCommand(command) {
         command.params.points,
       );
     case "cube":
-      return createCube(
+      return ObjectFactoryImpl.createCube(
         command.params.size,
         command.params.pointsPerFace,
         command.params.x,
@@ -2430,7 +2113,7 @@ function enterFocusState(obj) {
 
         if (rotationAmount > 0.0001) {
           // 使用 rotateObjectAroundAxis 替代 rotateObjectTowardsFront
-          rotateObjectAroundAxis(targetObj, rotationAxis, rotationAmount);
+          OrientationImpl.rotateObjectAroundAxis(targetObj, rotationAxis, rotationAmount);
         }
         targetObj._lastRotProgress = value.progress;
       }
@@ -2468,138 +2151,7 @@ function enterFocusState(obj) {
 /**
  * 旋转物体使其正面逐渐朝向目标方向
  */
-function rotateObjectTowardsFront(obj, targetFront, amount) {
-  const current = obj.frontDirection;
-
-  // 计算当前朝向与目标朝向的夹角
-  const dot = current.x * targetFront.x + current.y * targetFront.y + current.z * targetFront.z;
-  // 移除阈值判断，允许微小角度旋转以实现精确对齐
-  // if (dot > 0.99) return;
-
-  // 计算旋转轴（叉积）
-  const axis = {
-    x: current.y * targetFront.z - current.z * targetFront.y,
-    y: current.z * targetFront.x - current.x * targetFront.z,
-    z: current.x * targetFront.y - current.y * targetFront.x
-  };
-  const axisLen = Math.sqrt(axis.x ** 2 + axis.y ** 2 + axis.z ** 2);
-  if (axisLen < 0.001) return;
-
-  // 归一化旋转轴
-  axis.x /= axisLen;
-  axis.y /= axisLen;
-  axis.z /= axisLen;
-
-  // 旋转所有点
-  const center = obj.center;
-  const points = obj.displayPoints.length > 0 ? obj.displayPoints : obj.constructionPoints;
-
-  const cos = Math.cos(amount);
-  const sin = Math.sin(amount);
-
-  for (const p of points) {
-    const rx = p.x - center.x;
-    const ry = p.y - center.y;
-    const rz = p.z - center.z;
-
-    const dotAxis = axis.x * rx + axis.y * ry + axis.z * rz;
-    const crossX = axis.y * rz - axis.z * ry;
-    const crossY = axis.z * rx - axis.x * rz;
-    const crossZ = axis.x * ry - axis.y * rx;
-
-    p.x = center.x + rx * cos + crossX * sin + axis.x * dotAxis * (1 - cos);
-    p.y = center.y + ry * cos + crossY * sin + axis.y * dotAxis * (1 - cos);
-    p.z = center.z + rz * cos + crossZ * sin + axis.z * dotAxis * (1 - cos);
-  }
-
-  // 同步旋转 frontDirection（保持与几何体的一致性）
-  if (obj.frontDirection) {
-    // frontDirection 是向量，相当于绕原点旋转
-    const p = obj.frontDirection;
-    // 旋转中心为原点 (0,0,0)
-    const px = p.x;
-    const py = p.y;
-    const pz = p.z;
-
-    const dotAxis = axis.x * px + axis.y * py + axis.z * pz;
-    const crossX = axis.y * pz - axis.z * py;
-    const crossY = axis.z * px - axis.x * pz;
-    const crossZ = axis.x * py - axis.y * px;
-
-    p.x = px * cos + crossX * sin + axis.x * dotAxis * (1 - cos);
-    p.y = py * cos + crossY * sin + axis.y * dotAxis * (1 - cos);
-    p.z = pz * cos + crossZ * sin + axis.z * dotAxis * (1 - cos);
-
-    // 归一化
-    const len = Math.sqrt(p.x * p.x + p.y * p.y + p.z * p.z);
-    if (len > 0) {
-      p.x /= len;
-      p.y /= len;
-      p.z /= len;
-    }
-  }
-}
-
-/**
- * 绕指定轴旋转物体（helper）
- */
-function rotateObjectAroundAxis(obj, axis, amount) {
-  const cos = Math.cos(amount);
-  const sin = Math.sin(amount);
-  const center = obj.center;
-  const points = obj.displayPoints.length > 0 ? obj.displayPoints : obj.constructionPoints;
-
-  for (const p of points) {
-    const rx = p.x - center.x;
-    const ry = p.y - center.y;
-    const rz = p.z - center.z;
-
-    const dotAxis = axis.x * rx + axis.y * ry + axis.z * rz;
-    const crossX = axis.y * rz - axis.z * ry;
-    const crossY = axis.z * rx - axis.x * rz;
-    const crossZ = axis.x * ry - axis.y * rx;
-
-    p.x = center.x + rx * cos + crossX * sin + axis.x * dotAxis * (1 - cos);
-    p.y = center.y + ry * cos + crossY * sin + axis.y * dotAxis * (1 - cos);
-    p.z = center.z + rz * cos + crossZ * sin + axis.z * dotAxis * (1 - cos);
-  }
-
-  // 同步旋转 frontDirection
-  if (obj.frontDirection) {
-    const p = obj.frontDirection;
-    // 旋转中心为原点 (0,0,0)
-    const px = p.x, py = p.y, pz = p.z;
-    const dotAxis = axis.x * px + axis.y * py + axis.z * pz;
-    const crossX = axis.y * pz - axis.z * py;
-    const crossY = axis.z * px - axis.x * pz;
-    const crossZ = axis.x * py - axis.y * px;
-
-    p.x = px * cos + crossX * sin + axis.x * dotAxis * (1 - cos);
-    p.y = py * cos + crossY * sin + axis.y * dotAxis * (1 - cos);
-    p.z = pz * cos + crossZ * sin + axis.z * dotAxis * (1 - cos);
-
-    // 归一化
-    const len = Math.sqrt(p.x * p.x + p.y * p.y + p.z * p.z);
-    if (len > 0) { p.x /= len; p.y /= len; p.z /= len; }
-  }
-
-  // 同步旋转 upDirection
-  if (obj.upDirection) {
-    const p = obj.upDirection;
-    const px = p.x, py = p.y, pz = p.z;
-    const dotAxis = axis.x * px + axis.y * py + axis.z * pz;
-    const crossX = axis.y * pz - axis.z * py;
-    const crossY = axis.z * px - axis.x * pz;
-    const crossZ = axis.x * py - axis.y * px;
-
-    p.x = px * cos + crossX * sin + axis.x * dotAxis * (1 - cos);
-    p.y = py * cos + crossY * sin + axis.y * dotAxis * (1 - cos);
-    p.z = pz * cos + crossZ * sin + axis.z * dotAxis * (1 - cos);
-
-    const len = Math.sqrt(p.x * p.x + p.y * p.y + p.z * p.z);
-    if (len > 0) { p.x /= len; p.y /= len; p.z /= len; }
-  }
-}
+// 旋转辅助函数已迁移至 OrientationImpl.js
 
 /**
  * 将物体的 Quaternion 变换应用到所有点坐标上，并将 Quaternion 重置为 Identity
@@ -2874,7 +2426,7 @@ function exitFocusState() {
 
         if (rotationAmount > 0.0001) {
           // 使用 rotateObjectAroundAxis 替代 rotateObjectTowardsFront
-          rotateObjectAroundAxis(targetObj, rotationAxis, rotationAmount);
+          OrientationImpl.rotateObjectAroundAxis(targetObj, rotationAxis, rotationAmount);
         }
         targetObj._lastRotProgress = value.progress;
       }
@@ -3344,165 +2896,7 @@ function findClickedObjectCenter(screenX, screenY) {
  * 进入 EDIT 态（阶段15完善）
  * EDIT 态：编辑模式，可操作控制点
  */
-// ========================
-// 阶段16新增：局部格网系统
-// ========================
-
-/**
- * 局部格网配置 (集中管理，方便调整)
- * 当前为开发测试值，正式版本应根据屏幕尺寸动态计算
- * 
- * 正式版尺寸逻辑：
- * - size = Round(Min(screenWidth, screenHeight) / 10) * 10  (整十cm)
- * - spacing = 1.0  (默认整cm间隔)
- */
-const LocalGridConfig = {
-  // 格网尺寸 (临时固定 8cm，正式版应为 Round(Min(ScreenW, ScreenH)/10)*10)
-  size: 8,           // cm (临时测试值)
-  spacing: 2.0,      // cm (临时测试值，正式版为 1.0)
-
-  // 计算属性
-  get halfSize() { return this.size / 2; },
-  get layerCount() { return Math.floor(this.halfSize / this.spacing); },
-
-  /**
-   * 根据姿态类型获取层间距
-   * - 面向 (FACE)：层间距 = spacing (沿面法向切)
-   * - 棱向 (EDGE)：层间距 = spacing × cos(45°) = spacing / √2 (沿棱切)
-   *
-   * 棱向面时，格网被旋转45°，沿视线方向的层间距变为原来的 1/√2
-   */
-  getLayerSpacingForOrientation(orientationType) {
-    if (!orientationType) return this.spacing;
-    if (orientationType.includes('EDGE')) {
-      return this.spacing / Math.SQRT2; // ≈ 1.41cm for 2cm spacing
-    }
-    return this.spacing;
-  },
-
-  /**
-   * 根据姿态类型获取最大切片深度
-   * - 面向：halfSize (切到面边缘)
-   * - 棱向：halfSize × √2 (切到棱边缘，对角线更长)
-   */
-  getMaxDepthForOrientation(orientationType) {
-    if (!orientationType) return this.halfSize;
-    if (orientationType.includes('EDGE')) {
-      return this.halfSize * Math.SQRT2; // 对角线 ≈ 5.66cm for 8cm
-    }
-    return this.halfSize; // 面向使用标准 halfSize
-  }
-};
-
-/**
- * 创建局部格网对象
- * 配置来自 LocalGridConfig
- */
-function createLocalGridObject(targetObj) {
-  // 使用集中配置
-  const finalSize = LocalGridConfig.size;
-  const halfSize = LocalGridConfig.halfSize;
-  const spacing = LocalGridConfig.spacing;
-
-  console.log(`创建局部格网: 尺寸 ${finalSize}cm, 间距 ${spacing}cm`);
-
-  const points = [];
-
-  // 生成立方体点阵 (保证中心对称, 必须包含 0 点)
-  const count = LocalGridConfig.layerCount;
-
-  // 虚线配置：每两个格点之间插入 N 个虚线点
-  const dashPointsPerEdge = 3; // 每条边上3个虚线点 (0.5cm 间隔)
-  const dashSpacing = spacing / (dashPointsPerEdge + 1); // 0.5cm
-
-  for (let ix = -count; ix <= count; ix++) {
-    for (let iy = -count; iy <= count; iy++) {
-      for (let iz = -count; iz <= count; iz++) {
-        const x = ix * spacing;
-        const y = iy * spacing;
-        const z = iz * spacing;
-
-        // 创建格点（可吸附）
-        const p = new Point(x, y, z);
-        p._localX = x;
-        p._localY = y;
-        p._localZ = z;
-        p.isAttractable = true;
-        p.tag = 'LOCAL_GRID';
-        points.push(p);
-      }
-    }
-  }
-
-  // 生成虚线点（连接相邻格点，不可吸附）
-  // 遍历所有格点，向 +X, +Y, +Z 三个方向生成虚线
-  for (let ix = -count; ix <= count; ix++) {
-    for (let iy = -count; iy <= count; iy++) {
-      for (let iz = -count; iz <= count; iz++) {
-        const x0 = ix * spacing;
-        const y0 = iy * spacing;
-        const z0 = iz * spacing;
-
-        // +X 方向 (如果不是边界)
-        if (ix < count) {
-          for (let d = 1; d <= dashPointsPerEdge; d++) {
-            const dp = new Point(x0 + d * dashSpacing, y0, z0);
-            dp._localX = dp.x;
-            dp._localY = dp.y;
-            dp._localZ = dp.z;
-            dp.isAttractable = false; // 虚线点不可吸附
-            dp.tag = 'LOCAL_GRID_DASH';
-            points.push(dp);
-          }
-        }
-
-        // +Y 方向
-        if (iy < count) {
-          for (let d = 1; d <= dashPointsPerEdge; d++) {
-            const dp = new Point(x0, y0 + d * dashSpacing, z0);
-            dp._localX = dp.x;
-            dp._localY = dp.y;
-            dp._localZ = dp.z;
-            dp.isAttractable = false;
-            dp.tag = 'LOCAL_GRID_DASH';
-            points.push(dp);
-          }
-        }
-
-        // +Z 方向
-        if (iz < count) {
-          for (let d = 1; d <= dashPointsPerEdge; d++) {
-            const dp = new Point(x0, y0, z0 + d * dashSpacing);
-            dp._localX = dp.x;
-            dp._localY = dp.y;
-            dp._localZ = dp.z;
-            dp.isAttractable = false;
-            dp.tag = 'LOCAL_GRID_DASH';
-            points.push(dp);
-          }
-        }
-      }
-    }
-  }
-
-  console.log(`局部格网生成: 格点 ${Math.pow(2 * count + 1, 3)}个, 虚线点 ${points.length - Math.pow(2 * count + 1, 3)}个`);
-
-  const gridObj = new Object();
-  gridObj.displayPoints = points;
-  gridObj.center = { x: targetObj.center.x, y: targetObj.center.y, z: targetObj.center.z };
-  // 复制四元数旋转
-  if (targetObj.quaternion) {
-    gridObj.quaternion = { ...targetObj.quaternion };
-  } else {
-    gridObj.quaternion = { w: 1, x: 0, y: 0, z: 0 };
-  }
-
-  // 标记为局部格网
-  gridObj.isLocalGrid = true;
-  gridObj.owner = targetObj; // 记录它跟随谁
-
-  return gridObj;
-}
+// 局部格网系统已迁移至 ObjectFactoryImpl.js
 
 /**
  * 更新局部格网（每一帧调用）
@@ -3525,13 +2919,8 @@ function updateLocalGrid() {
   // 由于物体可能处于物理旋转模式 (Quaternion=Identity, 但 Vectors 已旋转)
   // 我们必须从 Vectors 推导 Grid 的四元数，以确保 Grid 跟随物体旋转
   if (target.frontDirection && target.upDirection) {
-    // 使用 OrientationUtils (假设已加载)
-    if (typeof OrientationUtils !== 'undefined' && OrientationUtils.getQuaternionFromVectors) {
-      grid.quaternion = OrientationUtils.getQuaternionFromVectors(target.frontDirection, target.upDirection);
-    } else {
-      // Fallback
-      grid.quaternion = { ...target.quaternion };
-    }
+    // 使用 OrientationImpl
+    grid.quaternion = OrientationImpl.getQuaternionFromVectors(target.frontDirection, target.upDirection);
   } else if (target.quaternion) {
     grid.quaternion = { ...target.quaternion };
   }
@@ -3543,7 +2932,7 @@ function updateLocalGrid() {
   for (const p of grid.displayPoints) {
     if (p._localX === undefined) continue;
 
-    const rotated = applyQuaternion({ x: p._localX, y: p._localY, z: p._localZ }, grid.quaternion);
+    const rotated = OrientationImpl.applyQuaternion({ x: p._localX, y: p._localY, z: p._localZ }, grid.quaternion);
 
     p.x = grid.center.x + rotated.x;
     p.y = grid.center.y + rotated.y;
@@ -3558,7 +2947,7 @@ function updateLocalGrid() {
     // 动态阈值：使用当前姿态的层间距的一半
     // 这确保每个层只包含该层的格点，不会与相邻层混淆
     const orientationType = target._currentOrientationState?.type || 'FACE';
-    const layerSpacing = LocalGridConfig.getLayerSpacingForOrientation(orientationType);
+    const layerSpacing = ObjectFactoryImpl.LocalGridConfig.getLayerSpacingForOrientation(orientationType);
     const SLICE_THRESHOLD = layerSpacing * 0.6; // 略大于一半，留余量
 
     // 只有 LOCAL_GRID 格点才可吸附，虚线点永远不可吸附
@@ -3572,23 +2961,7 @@ function updateLocalGrid() {
   }
 }
 
-/**
- * 四元数旋转辅助函数
- * q: {w, x, y, z}
- * v: {x, y, z}
- */
-function applyQuaternion(v, q) {
-  const ix = q.w * v.x + q.y * v.z - q.z * v.y;
-  const iy = q.w * v.y + q.z * v.x - q.x * v.z;
-  const iz = q.w * v.z + q.x * v.y - q.y * v.x;
-  const iw = -q.x * v.x - q.y * v.y - q.z * v.z;
-
-  return {
-    x: ix * q.w + iw * -q.x + iy * -q.z - iz * -q.y,
-    y: iy * q.w + iw * -q.y + iz * -q.x - ix * -q.z,
-    z: iz * q.w + iw * -q.z + ix * -q.y - iy * -q.x
-  };
-}
+// applyQuaternion 已迁移至 OrientationImpl.js
 
 // ========================
 // 阶段16b新增：动画辅助函数
@@ -3660,7 +3033,7 @@ function animateRotation(obj, axis, totalAngle, duration = 200) {
     // 关键修正：直接物理旋转点坐标 (x,y,z) 和 向量 (front/up)
     // 不再使用 quaternion 动画，确保 EDIT 态与 FOCUS/VIEW 态的坐标系一致性
     if (Math.abs(angleDelta) > 0.00001) {
-      rotateObjectAroundAxis(obj, axis, angleDelta);
+      OrientationImpl.rotateObjectAroundAxis(obj, axis, angleDelta);
     }
 
     lastProgress = eased;
@@ -3705,8 +3078,8 @@ function snapToNearestLayer(obj) {
   const orientationType = obj._currentOrientationState?.type || 'FACE';
 
   // 获取该姿态下的有效层间距和最大深度
-  const layerSpacing = LocalGridConfig.getLayerSpacingForOrientation(orientationType);
-  const maxDepth = LocalGridConfig.getMaxDepthForOrientation(orientationType);
+  const layerSpacing = ObjectFactoryImpl.LocalGridConfig.getLayerSpacingForOrientation(orientationType);
+  const maxDepth = ObjectFactoryImpl.LocalGridConfig.getMaxDepthForOrientation(orientationType);
 
   console.log(`[SnapLayer] Type: ${orientationType}, Spacing: ${layerSpacing.toFixed(3)}cm`);
 
@@ -3745,941 +3118,7 @@ function snapToNearestLayer(obj) {
 // 阶段16c：综合离散姿态系统 (96+ 态，视窗相对)
 // ========================
 
-const OrientationUtils = {
-  // 当前视窗方向下的标准姿态列表
-  STATES: [],
-  _lastViewDir: null, // 缓存上次视窗方向避免重复计算
-
-  /**
-   * 根据当前视窗方向计算所有标准姿态
-   * 姿态是相对于视窗坐标系的：
-   * - 视窗 Z 轴 = 视线方向 (direction)
-   * - 视窗 Y 轴 = 世界上方 (0,0,1) 去除视线分量
-   * - 视窗 X 轴 = Y × Z
-   */
-  computeStatesForView() {
-    const win = SystemState.mainWindow;
-    if (!win || !win.direction) {
-      // 默认视窗：朝 +Y 看
-      this._computeStatesWithViewBasis(
-        { x: 1, y: 0, z: 0 },  // viewX
-        { x: 0, y: 0, z: 1 },  // viewY (up)
-        { x: 0, y: 1, z: 0 }   // viewZ (forward)
-      );
-      return;
-    }
-
-    const dir = win.direction;
-    // 检查是否需要重新计算
-    if (this._lastViewDir &&
-      Math.abs(this._lastViewDir.x - dir.x) < 0.001 &&
-      Math.abs(this._lastViewDir.y - dir.y) < 0.001 &&
-      Math.abs(this._lastViewDir.z - dir.z) < 0.001) {
-      return; // 视窗方向未变，使用缓存
-    }
-
-    // 视窗 Z 轴 = 视线方向 (归一化)
-    const len = Math.sqrt(dir.x ** 2 + dir.y ** 2 + dir.z ** 2);
-    const viewZ = { x: dir.x / len, y: dir.y / len, z: dir.z / len };
-
-    // 视窗 Y 轴 = 世界上方 (0,0,1) 去除视线分量
-    const worldUp = { x: 0, y: 0, z: 1 };
-    const dotUp = worldUp.x * viewZ.x + worldUp.y * viewZ.y + worldUp.z * viewZ.z;
-    let viewY = {
-      x: worldUp.x - dotUp * viewZ.x,
-      y: worldUp.y - dotUp * viewZ.y,
-      z: worldUp.z - dotUp * viewZ.z
-    };
-    const lenY = Math.sqrt(viewY.x ** 2 + viewY.y ** 2 + viewY.z ** 2);
-    if (lenY < 0.001) {
-      // 视线垂直向上或向下，使用世界 Y 作为备选
-      viewY = { x: 0, y: 1, z: 0 };
-    } else {
-      viewY = { x: viewY.x / lenY, y: viewY.y / lenY, z: viewY.z / lenY };
-    }
-
-    // 视窗 X 轴 = Y × Z
-    const viewX = {
-      x: viewY.y * viewZ.z - viewY.z * viewZ.y,
-      y: viewY.z * viewZ.x - viewY.x * viewZ.z,
-      z: viewY.x * viewZ.y - viewY.y * viewZ.x
-    };
-
-    this._computeStatesWithViewBasis(viewX, viewY, viewZ);
-    this._lastViewDir = { x: dir.x, y: dir.y, z: dir.z };
-  },
-
-  /**
-   * 使用给定的视窗坐标系基向量计算 96 个标准姿态
-   */
-  _computeStatesWithViewBasis(viewX, viewY, viewZ) {
-    this.STATES = [];
-
-    // 从视窗坐标系构建旋转矩阵 -> 四元数
-    // 视窗坐标系相对于世界坐标系的旋转
-    const viewQ = this._matrixToQuaternion(viewX, viewY, viewZ);
-
-    // 基础 6 面姿态 (相对视窗坐标系的欧拉角)
-    const faceOrientations = [
-      { axis: 'Front', pitch: 0, yaw: 0 },
-      { axis: 'Back', pitch: 0, yaw: 180 },
-      { axis: 'Left', pitch: 0, yaw: 90 },
-      { axis: 'Right', pitch: 0, yaw: -90 },
-      { axis: 'Top', pitch: 90, yaw: 0 },
-      { axis: 'Bottom', pitch: -90, yaw: 0 }
-    ];
-
-    // 12 条物理棱 (统一类型 EDGE，添加 baseVisual 属性)
-    // baseVisual: 'H' = roll=0° 时看起来横向, 'V' = roll=0° 时看起来竖向
-    const edgeOrientations = [
-      // Top face 4 edges
-      { axis: 'Top-Front', pitch: 45, yaw: 0, baseVisual: 'H' },
-      { axis: 'Top-Back', pitch: 45, yaw: 180, baseVisual: 'H' },
-      { axis: 'Top-Left', pitch: 45, yaw: 90, baseVisual: 'H' },
-      { axis: 'Top-Right', pitch: 45, yaw: -90, baseVisual: 'H' },
-      // Bottom face 4 edges
-      { axis: 'Bottom-Front', pitch: -45, yaw: 0, baseVisual: 'H' },
-      { axis: 'Bottom-Back', pitch: -45, yaw: 180, baseVisual: 'H' },
-      { axis: 'Bottom-Left', pitch: -45, yaw: 90, baseVisual: 'H' },
-      { axis: 'Bottom-Right', pitch: -45, yaw: -90, baseVisual: 'H' },
-      // Vertical 4 edges (connecting top to bottom)
-      { axis: 'Front-Left', pitch: 0, yaw: 45, baseVisual: 'V' },
-      { axis: 'Front-Right', pitch: 0, yaw: -45, baseVisual: 'V' },
-      { axis: 'Back-Left', pitch: 0, yaw: 135, baseVisual: 'V' },
-      { axis: 'Back-Right', pitch: 0, yaw: -135, baseVisual: 'V' }
-    ];
-
-    // 生成 48 个面态 (6 面 × 8 滚转 positions: 0°, 45°, 90°, ... 315°)
-    for (const face of faceOrientations) {
-      // 基础姿态 (Pitch/Yaw relative to View)
-      // 注意：这里 roll 设为 0
-      const baseLocalQ = this.eulerToQuaternion(face.pitch, face.yaw, 0);
-
-      for (let rollIdx = 0; rollIdx < 8; rollIdx++) {
-        const roll = rollIdx * 45;
-        // 滚转四元数 (绕 View Z 轴旋转)
-        // 必须后乘 (Post-multiply) 以在 View 坐标系中应用滚转
-        // 或者说：先应用基础姿态，再绕当前的 Z 轴 (即 View Z) 滚转？
-        // 如果是 q_new = q_roll * q_base，则是绕世界/视窗 Z 轴 (取决于参考系)。
-        // 这里的 quaternion 是相对于 View 坐标系的。
-        // View Q 是 Identitiy (在 View Space 中)。
-        // 所以 q_roll * q_base 是绕 View Z 轴旋转。
-
-        const rollQ = this.eulerToQuaternion(0, 0, roll);
-
-        // localQ = rollQ * baseLocalQ (注意乘法顺序可能从左到右或右到左，这里假设 standard: A*B means B then A? 
-        // 还是 A*B means A applied to B?
-        // _multiplyQuaternion 实现是: w = a.w*b.w - ...
-        // 通常 q2 * q1 代表：先旋转 q1，再旋转 q2 (如果 q v q*)
-        // 我们希望先摆正 Face (baseQ)，再 Roll (rollQ)。
-        // 所以应该 rollQ * baseQ。
-
-        const localQ = this._multiplyQuaternion(rollQ, baseLocalQ);
-
-        // 变换到世界坐标系: worldQ = viewQ * localQ
-        const worldQ = this._multiplyQuaternion(viewQ, localQ);
-
-        this.STATES.push({
-          type: 'FACE',
-          axis: face.axis,
-          roll: roll,
-          euler: [face.pitch, face.yaw, roll],
-          q: worldQ
-        });
-      }
-    }
-
-    // 生成 48 个棱态 (12 棱 × 4 滚转 positions: 0°, 90°, 180°, 270°)
-    for (const edge of edgeOrientations) {
-      // 基础姿态
-      const baseLocalQ = this.eulerToQuaternion(edge.pitch, edge.yaw, 0);
-
-      for (let rollIdx = 0; rollIdx < 4; rollIdx++) {
-        const roll = rollIdx * 90;
-
-        // 计算视觉朝向: roll=0°/180° 保持原样, roll=90°/270° 翻转
-        // H + roll 0/180 = H, H + roll 90/270 = V
-        // V + roll 0/180 = V, V + roll 90/270 = H
-        const isFlipped = (roll === 90 || roll === 270);
-        const visualOrientation = isFlipped
-          ? (edge.baseVisual === 'H' ? 'V' : 'H')
-          : edge.baseVisual;
-
-        // 同样应用 Roll * Base
-        const rollQ = this.eulerToQuaternion(0, 0, roll);
-        const localQ = this._multiplyQuaternion(rollQ, baseLocalQ);
-        const worldQ = this._multiplyQuaternion(viewQ, localQ);
-
-        this.STATES.push({
-          type: 'EDGE',  // 统一类型
-          axis: edge.axis,
-          roll: roll,
-          baseVisual: edge.baseVisual,
-          visualOrientation: visualOrientation, // 'H' 或 'V'
-          euler: [edge.pitch, edge.yaw, roll],
-          q: worldQ
-        });
-      }
-    }
-
-    console.log(`OrientationUtils: 计算了 ${this.STATES.length} 个标准姿态 (视窗相对)`);
-  },
-
-  /**
-   * 从正交基向量构建四元数
-   */
-  _matrixToQuaternion(xAxis, yAxis, zAxis) {
-    // 旋转矩阵的列是新坐标系的基向量
-    // M = [xAxis | yAxis | zAxis]
-    const m00 = xAxis.x, m01 = yAxis.x, m02 = zAxis.x;
-    const m10 = xAxis.y, m11 = yAxis.y, m12 = zAxis.y;
-    const m20 = xAxis.z, m21 = yAxis.z, m22 = zAxis.z;
-
-    const trace = m00 + m11 + m22;
-    let w, x, y, z;
-
-    if (trace > 0) {
-      const s = 0.5 / Math.sqrt(trace + 1.0);
-      w = 0.25 / s;
-      x = (m21 - m12) * s;
-      y = (m02 - m20) * s;
-      z = (m10 - m01) * s;
-    } else if (m00 > m11 && m00 > m22) {
-      const s = 2.0 * Math.sqrt(1.0 + m00 - m11 - m22);
-      w = (m21 - m12) / s;
-      x = 0.25 * s;
-      y = (m01 + m10) / s;
-      z = (m02 + m20) / s;
-    } else if (m11 > m22) {
-      const s = 2.0 * Math.sqrt(1.0 + m11 - m00 - m22);
-      w = (m02 - m20) / s;
-      x = (m01 + m10) / s;
-      y = 0.25 * s;
-      z = (m12 + m21) / s;
-    } else {
-      const s = 2.0 * Math.sqrt(1.0 + m22 - m00 - m11);
-      w = (m10 - m01) / s;
-      x = (m02 + m20) / s;
-      y = (m12 + m21) / s;
-      z = 0.25 * s;
-    }
-
-    return this.normalize({ w, x, y, z });
-  },
-
-  /**
-   * 四元数乘法 a * b
-   */
-  _multiplyQuaternion(a, b) {
-    return {
-      w: a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
-      x: a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
-      y: a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
-      z: a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w
-    };
-  },
-
-  // 欧拉角转四元数 (Degree) -> {w, x, y, z}
-  // Order: YXZ (Pitch-X, Yaw-Y, Roll-Z)
-  eulerToQuaternion(pitch, yaw, roll) {
-    const c1 = Math.cos(pitch * Math.PI / 360);
-    const s1 = Math.sin(pitch * Math.PI / 360);
-    const c2 = Math.cos(yaw * Math.PI / 360);
-    const s2 = Math.sin(yaw * Math.PI / 360);
-    const c3 = Math.cos(roll * Math.PI / 360);
-    const s3 = Math.sin(roll * Math.PI / 360);
-
-    return {
-      w: c1 * c2 * c3 - s1 * s2 * s3,
-      x: s1 * c2 * c3 + c1 * s2 * s3,
-      y: c1 * s2 * c3 - s1 * c2 * s3,
-      z: c1 * c2 * s3 + s1 * s2 * c3
-    };
-  },
-
-  // 找到最近的姿态 (视窗相对)
-  // allowedTypes: 可选，字符串数组，指定允许匹配的类型 (e.g. ['FACE', 'EDGE'])
-  // requireRolled: FACE 滚转过滤 (true=旋转态, false=端正态, null=不限)
-  // requireVisual: EDGE 视觉朝向过滤 ('H'=横向, 'V'=竖向, null=不限)
-  getNearestState(currentQ, allowedTypes = null, requireRolled = null, requireVisual = null) {
-    // 每次调用都重新计算视窗相对姿态
-    this.computeStatesForView();
-
-    let bestState = null;
-    let maxDot = -1;
-
-    // Debug: 记录前3个候选
-    const candidates = [];
-
-    for (const state of this.STATES) {
-      // 如果指定了允许类型，跳过不匹配的
-      if (allowedTypes && !allowedTypes.includes(state.type)) {
-        continue;
-      }
-
-      // 如果指定了 requireRolled，过滤 FACE 的 roll 状态
-      if (requireRolled !== null && state.type === 'FACE') {
-        const isRolled = (state.roll % 90 !== 0);
-        if (requireRolled && !isRolled) continue; // 要求旋转态，但这个是端正态
-        if (!requireRolled && isRolled) continue; // 要求端正态，但这个是旋转态
-      }
-
-      // 如果指定了 requireVisual，过滤 EDGE 的 visualOrientation
-      if (requireVisual !== null && state.type === 'EDGE') {
-        if (state.visualOrientation !== requireVisual) continue;
-      }
-
-      // 四元数点积衡量相似度
-      const dot = Math.abs(
-        currentQ.w * state.q.w +
-        currentQ.x * state.q.x +
-        currentQ.y * state.q.y +
-        currentQ.z * state.q.z
-      );
-
-      if (dot > maxDot) {
-        maxDot = dot;
-        bestState = state;
-      }
-
-      candidates.push({ state: state, dot: dot });
-    }
-
-    // 排序并打印前3个候选
-    candidates.sort((a, b) => b.dot - a.dot);
-    const top3 = candidates.slice(0, 3);
-    const filterMsg = allowedTypes ? ` [Type:${allowedTypes}]` : '';
-    const rollMsg = requireRolled !== null ? ` [Roll:${requireRolled ? 'R' : 'Std'}]` : '';
-    console.log(`[NearestState] Top matches${filterMsg}${rollMsg}:`);
-    top3.forEach((c, i) => {
-      const rollStr = (c.state.roll % 90 !== 0) ? `(R ${c.state.roll}°)` : '';
-      console.log(`  ${i + 1}. ${c.state.type} ${c.state.axis} ${rollStr} (dot=${c.dot.toFixed(5)})`);
-    });
-
-    return bestState;
-  },
-
-  // 插值动画 (Slerp)
-  slerp(qa, qb, t) {
-    // 简化版 Slerp
-    let dot = qa.w * qb.w + qa.x * qb.x + qa.y * qb.y + qa.z * qb.z;
-
-    // 反转 qb 如果点积为负 (走短路径)
-    let sign = 1;
-    if (dot < 0) {
-      dot = -dot;
-      sign = -1;
-    }
-
-    if (dot > 0.9995) {
-      // 线性插值
-      const result = {
-        w: qa.w + t * (sign * qb.w - qa.w),
-        x: qa.x + t * (sign * qb.x - qa.x),
-        y: qa.y + t * (sign * qb.y - qa.y),
-        z: qa.z + t * (sign * qb.z - qa.z)
-      };
-      return this.normalize(result);
-    }
-
-    const theta_0 = Math.acos(dot);
-    const theta = theta_0 * t;
-    const sin_theta = Math.sin(theta);
-    const sin_theta_0 = Math.sin(theta_0);
-
-    const s0 = Math.cos(theta) - dot * sin_theta / sin_theta_0;
-    const s1 = sin_theta / sin_theta_0;
-
-    return {
-      w: s0 * qa.w + s1 * sign * qb.w,
-      x: s0 * qa.x + s1 * sign * qb.x,
-      y: s0 * qa.y + s1 * sign * qb.y,
-      z: s0 * qa.z + s1 * sign * qb.z
-    };
-  },
-
-  normalize(q) {
-    const len = Math.sqrt(q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z);
-    if (len === 0) return { w: 1, x: 0, y: 0, z: 0 };
-    return { w: q.w / len, x: q.x / len, y: q.y / len, z: q.z / len };
-  },
-
-  // 状态流转逻辑 (阶段16核心)
-  transition(key, obj) {
-    // 物理旋转模式下，obj.quaternion 始终为 Identity。
-    // 我们需要从当前向量推导"虚拟四元数"来追踪状态。
-    const currentQ = this.getQuaternionFromVectors(obj.frontDirection, obj.upDirection);
-
-    // 1. 获取当前状态 (如果没有则重新吸附)
-    let currentState = obj._currentOrientationState;
-    if (!currentState) {
-      currentState = this.getNearestState(currentQ);
-      if (!currentState) return;
-      obj._currentOrientationState = currentState;
-    }
-
-    const type = currentState.type;
-    let axis = null; // {x, y, z} in WORLD space
-    let angle = 0;   // degree
-
-    // 2. 计算视窗坐标系的基向量 (相对于当前视窗方向)
-    // viewZ = 视线方向 (屏幕垂直轴，指向屏幕内)
-    // viewY = 屏幕竖轴 (屏幕正上)
-    // viewX = 屏幕横轴 (屏幕正右)
-    const win = SystemState.mainWindow;
-    let viewZ, viewY, viewX;
-
-    if (win && win.direction) {
-      const dir = win.direction;
-      // viewZ = 视线方向 (归一化)
-      const len = Math.sqrt(dir.x ** 2 + dir.y ** 2 + dir.z ** 2);
-      viewZ = { x: dir.x / len, y: dir.y / len, z: dir.z / len };
-
-      // viewY = 世界上方 (0,0,1) 去除视线分量后归一化
-      const worldUp = { x: 0, y: 0, z: 1 };
-      const dotUp = worldUp.x * viewZ.x + worldUp.y * viewZ.y + worldUp.z * viewZ.z;
-      viewY = {
-        x: worldUp.x - dotUp * viewZ.x,
-        y: worldUp.y - dotUp * viewZ.y,
-        z: worldUp.z - dotUp * viewZ.z
-      };
-      const lenY = Math.sqrt(viewY.x ** 2 + viewY.y ** 2 + viewY.z ** 2);
-      if (lenY < 0.001) {
-        // 视线垂直向上或向下，使用世界 Y 作为备选
-        viewY = { x: 0, y: 1, z: 0 };
-      } else {
-        viewY = { x: viewY.x / lenY, y: viewY.y / lenY, z: viewY.z / lenY };
-      }
-
-      // viewX = viewY × viewZ (屏幕右方向)
-      viewX = {
-        x: viewY.y * viewZ.z - viewY.z * viewZ.y,
-        y: viewY.z * viewZ.x - viewY.x * viewZ.z,
-        z: viewY.x * viewZ.y - viewY.y * viewZ.x
-      };
-    } else {
-      // 默认视窗：朝 +Y 看
-      viewX = { x: 1, y: 0, z: 0 };
-      viewY = { x: 0, y: 0, z: 1 };
-      viewZ = { x: 0, y: 1, z: 0 };
-    }
-
-    // 3. 根据按键选择旋转轴 (使用视窗坐标系)
-    // WS: 绕屏幕横轴 (viewX) 旋转 - Pitch
-    // AD: 绕屏幕竖轴 (viewY) 旋转 - Yaw
-    // QE: 绕屏幕垂直轴 (viewZ) 旋转 - Roll
-
-    // 判断是否是旋转后的面态 (roll 为 45°, 135°, 225°, 315° 时)
-    const isRolledFace = type === 'FACE' && currentState.roll !== undefined &&
-      (currentState.roll % 90 !== 0);
-    const isStandardFace = type === 'FACE' && !isRolledFace;
-
-    // 判断 EDGE 的视觉朝向
-    const isEdgeH = type === 'EDGE' && currentState.visualOrientation === 'H';
-    const isEdgeV = type === 'EDGE' && currentState.visualOrientation === 'V';
-
-    // allowedTypes: 过滤允许的状态类型
-    // requireRolled: FACE 滚转过滤 (true=旋转态, false=端正态, null=不限)
-    // requireVisual: EDGE 视觉朝向过滤 ('H'=横向, 'V'=竖向, null=不限)
-    let allowedTypes = null;
-    let requireRolled = null;
-    let requireVisual = null;
-
-    // ============================================
-    // 规则表 (统一使用 EDGE 类型 + visualOrientation)
-    // ============================================
-    // FACE(端正) + W/S → 45° → EDGE(视觉=H)
-    // FACE(端正) + A/D → 45° → EDGE(视觉=V)
-    // FACE(端正) + Q/E → 45° → FACE(旋转)
-    // FACE(旋转) + W/S → 90° → EDGE(视觉=V)
-    // FACE(旋转) + A/D → 90° → EDGE(视觉=H)
-    // FACE(旋转) + Q/E → 45° → FACE(继续旋转)
-    // EDGE(视觉=H) + W/S → 45° → FACE(端正)
-    // EDGE(视觉=H) + A/D → 90° → FACE(旋转)
-    // EDGE(视觉=H) + Q/E → 90° → EDGE(视觉=V)
-    // EDGE(视觉=V) + W/S → 90° → FACE(旋转)
-    // EDGE(视觉=V) + A/D → 45° → FACE(端正)
-    // EDGE(视觉=V) + Q/E → 90° → EDGE(视觉=H)
-    // ============================================
-
-    if (key === 'w') { // Pitch Up
-      axis = viewX;
-      if (isStandardFace) {
-        angle = 45;
-        allowedTypes = ['EDGE'];
-        requireVisual = 'H';
-      } else if (isRolledFace) {
-        angle = 90;
-        allowedTypes = ['EDGE'];
-        requireVisual = 'V';
-      } else if (isEdgeH) {
-        angle = 45;
-        allowedTypes = ['FACE'];
-        requireRolled = false; // FACE(端正)
-      } else if (isEdgeV) {
-        angle = 90;
-        allowedTypes = ['FACE'];
-        requireRolled = true; // FACE(旋转)
-      }
-
-    } else if (key === 's') { // Pitch Down
-      axis = viewX;
-      if (isStandardFace) {
-        angle = -45;
-        allowedTypes = ['EDGE'];
-        requireVisual = 'H';
-      } else if (isRolledFace) {
-        angle = -90;
-        allowedTypes = ['EDGE'];
-        requireVisual = 'V';
-      } else if (isEdgeH) {
-        angle = -45;
-        allowedTypes = ['FACE'];
-        requireRolled = false;
-      } else if (isEdgeV) {
-        angle = -90;
-        allowedTypes = ['FACE'];
-        requireRolled = true;
-      }
-
-    } else if (key === 'a') { // Yaw Left
-      axis = viewY;
-      if (isStandardFace) {
-        angle = 45;
-        allowedTypes = ['EDGE'];
-        requireVisual = 'V';
-      } else if (isRolledFace) {
-        angle = 90;
-        allowedTypes = ['EDGE'];
-        requireVisual = 'H';
-      } else if (isEdgeH) {
-        angle = 90;
-        allowedTypes = ['FACE'];
-        requireRolled = true; // FACE(旋转)
-      } else if (isEdgeV) {
-        angle = 45;
-        allowedTypes = ['FACE'];
-        requireRolled = false; // FACE(端正)
-      }
-
-    } else if (key === 'd') { // Yaw Right
-      axis = viewY;
-      if (isStandardFace) {
-        angle = -45;
-        allowedTypes = ['EDGE'];
-        requireVisual = 'V';
-      } else if (isRolledFace) {
-        angle = -90;
-        allowedTypes = ['EDGE'];
-        requireVisual = 'H';
-      } else if (isEdgeH) {
-        angle = -90;
-        allowedTypes = ['FACE'];
-        requireRolled = true;
-      } else if (isEdgeV) {
-        angle = -45;
-        allowedTypes = ['FACE'];
-        requireRolled = false;
-      }
-
-    } else if (key === 'q') { // Roll Left
-      axis = viewZ;
-      if (type === 'FACE') {
-        angle = 45;
-        allowedTypes = ['FACE']; // 继续旋转
-      } else if (isEdgeH) {
-        angle = 90;
-        allowedTypes = ['EDGE'];
-        requireVisual = 'V';
-      } else if (isEdgeV) {
-        angle = 90;
-        allowedTypes = ['EDGE'];
-        requireVisual = 'H';
-      }
-
-    } else if (key === 'e') { // Roll Right
-      axis = viewZ;
-      if (type === 'FACE') {
-        angle = -45;
-        allowedTypes = ['FACE'];
-      } else if (isEdgeH) {
-        angle = -90;
-        allowedTypes = ['EDGE'];
-        requireVisual = 'V';
-      } else if (isEdgeV) {
-        angle = -90;
-        allowedTypes = ['EDGE'];
-        requireVisual = 'H';
-      }
-    }
-
-
-    if (!axis) return;
-
-    // 3. 执行旋转 (使用轴角转四元数，因为轴是任意世界坐标向量)
-    const angleRad = angle * Math.PI / 180;
-    const halfAngle = angleRad / 2;
-    const sinHalf = Math.sin(halfAngle);
-    const rotQ = {
-      w: Math.cos(halfAngle),
-      x: axis.x * sinHalf,
-      y: axis.y * sinHalf,
-      z: axis.z * sinHalf
-    };
-
-    // Quaternion multiplication: RotQ * CurrentQ (注意乘法顺序，局部旋转 vs 世界旋转?)
-    // 这里的 axis 是根据 View 计算的世界轴。
-    // 所以是 World Rotation: NewQ = RotQ * CurrentQ
-
-    const qa = rotQ;
-    const qb = currentQ; // 使用虚拟四元数
-
-    const newQ = {
-      w: qa.w * qb.w - qa.x * qb.x - qa.y * qb.y - qa.z * qb.z,
-      x: qa.w * qb.x + qa.x * qb.w + qa.y * qb.z - qa.z * qb.y,
-      y: qa.w * qb.y - qa.x * qb.z + qa.y * qb.w + qa.z * qb.x,
-      z: qa.w * qb.z + qa.x * qb.y - qa.y * qb.x + qa.z * qb.w
-    };
-
-    // 4. 吸附到最近的标准态 (根据预测的 NewQ 查找)
-    const nextState = this.getNearestState(newQ, allowedTypes, requireRolled, requireVisual);
-    if (nextState) {
-      // 输出简洁日志
-      const fromInfo = isRolledFace ? '(R)' : (isStandardFace ? '' : '');
-      const toRollInfo = (nextState.roll % 90 !== 0) ? '(R)' : '';
-
-      let targetInfo = '';
-      if (allowedTypes) {
-        targetInfo = ` → Expect:${allowedTypes[0]}`;
-        if (requireRolled !== null) targetInfo += requireRolled ? '(R)' : '(Std)';
-        if (requireVisual !== null) targetInfo += `(${requireVisual})`;
-      }
-
-      console.log(`[ROTATE] ${type}${fromInfo} + ${key.toUpperCase()} ${angle}° → ${nextState.type}${toRollInfo} (${nextState.axis}) [Vis:${nextState.visualOrientation || '-'}]${targetInfo}`);
-
-      // Phase 16b: 使用物理动画过渡到目标姿态
-      obj._currentOrientationState = nextState;
-
-      // 传递轴和弧度给物理动画函数
-      // 注意：轴必须归一化
-      let animAxis = { ...axis };
-      const axisLen = Math.sqrt(axis.x ** 2 + axis.y ** 2 + axis.z ** 2);
-      if (axisLen > 0.001) {
-        animAxis.x /= axisLen; animAxis.y /= axisLen; animAxis.z /= axisLen;
-      }
-
-      animateRotation(obj, animAxis, angleRad, 200);
-    }
-  },
-
-  /**
-   * 更新物体的所有姿态属性 (Quaternion + Vectors)
-   * 确保 frontDirection 和 upDirection 与 quaternion 保持一致
-   */
-  updateObjectOrientation(obj, q) {
-    if (!obj || !q) return;
-
-    // 1. 更新四元数
-    obj.quaternion = { ...q };
-
-    // 2. 从四元数推导前向和上向向量
-    // Q * (0,1,0) -> front
-    // Q * (0,0,1) -> up
-    // 假设初始状态: Front=(0,1,0), Up=(0,0,1)
-
-    // 旋转向量 v = q * v0 * q_conj
-    // 简化计算：
-    // x' = x(1 - 2yy - 2zz) + y(2xy - 2wz) + z(2xz + 2wy)
-    // y' = x(2xy + 2wz) + y(1 - 2xx - 2zz) + z(2yz - 2wx)
-    // z' = x(2xz - 2wy) + y(2yz + 2wx) + z(1 - 2xx - 2yy)
-
-    const { w, x, y, z } = q;
-
-    // Front (0, -1, 0)  <-- 修正：基础朝向是 -Y
-    // 旋转向量 (0, 1, 0) 是: [2(xy-wz), 1-2(xx+zz), 2(yz+wx)]
-    // 所以 (0, -1, 0) 取反:
-    obj.frontDirection = {
-      x: -2 * (x * y - w * z),
-      y: -(1 - 2 * (x * x + z * z)),
-      z: -2 * (y * z + w * x)
-    };
-
-    // Up (0, 0, 1) <-- 保持不变
-    obj.upDirection = {
-      x: 2 * (x * z + w * y),
-      y: 2 * (y * z - w * x),
-      z: 1 - 2 * (x * x + y * y)
-    };
-
-    // 归一化以防万一
-    const norm = (v) => {
-      const len = Math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
-      if (len > 0) { v.x /= len; v.y /= len; v.z /= len; }
-    };
-    norm(obj.frontDirection);
-    norm(obj.upDirection);
-  },
-
-  /**
-   * 从 frontDirection + upDirection 计算完整四元数
-   * 用于在物理旋转模式下计算"虚拟四元数"以进行状态匹配
-   */
-  getQuaternionFromVectors(frontDir, upDir) {
-    const defaultFront = { x: 0, y: 1, z: 0 };
-    const defaultUp = { x: 0, y: 0, z: 1 };
-
-    let front = frontDir ? { ...frontDir } : { ...defaultFront };
-    let up = upDir ? { ...upDir } : { ...defaultUp };
-
-    // 归一化
-    let lenF = Math.sqrt(front.x ** 2 + front.y ** 2 + front.z ** 2);
-    if (lenF < 0.001) front = { ...defaultFront };
-    else { front.x /= lenF; front.y /= lenF; front.z /= lenF; }
-
-    let lenU = Math.sqrt(up.x ** 2 + up.y ** 2 + up.z ** 2);
-    if (lenU < 0.001) up = { ...defaultUp };
-    else { up.x /= lenU; up.y /= lenU; up.z /= lenU; }
-
-    // 正交化 Right = Front x Up
-    // 注意：这里 Front 是 vector。
-    // 如果 Base Front 是 (0, -1, 0)，那么 transform matrix 应该是从 Base 旋转到 Current。
-    // 旋转矩阵列向量：
-    // Col 1 (Right): ?
-    // Col 2 (Front): ?
-    // Col 3 (Up): ?
-
-    // 我们的 updateObjectOrientation 假定 Base Front 是 (0, -1, 0)
-    // 所以 R * (0, -1, 0) = CurrentFront
-    // => - (R * Y_axis) = CurrentFront
-    // => R * Y_axis = -CurrentFront
-    // 所以矩阵的第2列 (Y) 应该是 -CurrentFront
-
-    // Up 是 (0, 0, 1)。 R * Z_axis = CurrentUp。
-    // 所以矩阵第3列 (Z) 应该是 CurrentUp
-
-    // Right (X) = Y x Z.
-    // X = (-CurrentFront) x CurrentUp
-    //   = - (Front x Up) = Up x Front
-
-    let negFront = { x: -front.x, y: -front.y, z: -front.z };
-    let colY = negFront;
-    let colZ = up;
-
-    let colX = {
-      x: colY.y * colZ.z - colY.z * colZ.y,
-      y: colY.z * colZ.x - colY.x * colZ.z,
-      z: colY.x * colZ.y - colY.y * colZ.x
-    };
-
-    // 归一化 X
-    let lenX = Math.sqrt(colX.x ** 2 + colX.y ** 2 + colX.z ** 2);
-    if (lenX < 0.001) colX = { x: 1, y: 0, z: 0 };
-    else { colX.x /= lenX; colX.y /= lenX; colX.z /= lenX; }
-
-    // 重新计算 Y 确保正交 (Y = Z x X)
-    colY = {
-      x: colZ.y * colX.z - colZ.z * colX.y,
-      y: colZ.z * colX.x - colZ.x * colX.z,
-      z: colZ.x * colX.y - colZ.y * colX.x
-    };
-
-    // 矩阵转四元数
-    // M = [colX, colY, colZ]
-    const m00 = colX.x, m01 = colY.x, m02 = colZ.x;
-    const m10 = colX.y, m11 = colY.y, m12 = colZ.y;
-    const m20 = colX.z, m21 = colY.z, m22 = colZ.z;
-
-    const trace = m00 + m11 + m22;
-    let q = { w: 1, x: 0, y: 0, z: 0 };
-
-    if (trace > 0) {
-      const s = 0.5 / Math.sqrt(trace + 1.0);
-      q.w = 0.25 / s;
-      q.x = (m21 - m12) * s;
-      q.y = (m02 - m20) * s;
-      q.z = (m10 - m01) * s;
-    } else {
-      if (m00 > m11 && m00 > m22) {
-        const s = 2.0 * Math.sqrt(1.0 + m00 - m11 - m22);
-        q.w = (m21 - m12) / s;
-        q.x = 0.25 * s;
-        q.y = (m01 + m10) / s;
-        q.z = (m02 + m20) / s;
-      } else if (m11 > m22) {
-        const s = 2.0 * Math.sqrt(1.0 + m11 - m00 - m22);
-        q.w = (m02 - m20) / s;
-        q.x = (m01 + m10) / s;
-        q.y = 0.25 * s;
-        q.z = (m12 + m21) / s;
-      } else {
-        const s = 2.0 * Math.sqrt(1.0 + m22 - m00 - m11);
-        q.w = (m10 - m01) / s;
-        q.x = (m02 + m20) / s;
-        q.y = (m12 + m21) / s;
-        q.z = 0.25 * s;
-      }
-    }
-    return q;
-  }
-};
-
-/**
- * 自动吸附到最近的规范化姿态（96态之一）
- * 从物体的 frontDirection + upDirection 计算完整四元数
- * Phase 16c: 使用双向量匹配
- */
-function snapToNearestOrientation(obj) {
-  // 1. 从 frontDirection + upDirection 计算完整四元数
-  // 使用正交化构建旋转矩阵
-  const defaultFront = { x: 0, y: 1, z: 0 };
-  const defaultUp = { x: 0, y: 0, z: 1 };
-
-  let front = obj.frontDirection || { ...defaultFront };
-  let up = obj.upDirection || { ...defaultUp };
-
-  // 归一化 front
-  let lenF = Math.sqrt(front.x ** 2 + front.y ** 2 + front.z ** 2);
-  if (lenF < 0.001) front = { ...defaultFront };
-  else front = { x: front.x / lenF, y: front.y / lenF, z: front.z / lenF };
-
-  // 归一化 up
-  let lenU = Math.sqrt(up.x ** 2 + up.y ** 2 + up.z ** 2);
-  if (lenU < 0.001) up = { ...defaultUp };
-  else up = { x: up.x / lenU, y: up.y / lenU, z: up.z / lenU };
-
-  // 使用 Gram-Schmidt 正交化确保正交
-  // right = front × up
-  let right = {
-    x: front.y * up.z - front.z * up.y,
-    y: front.z * up.x - front.x * up.z,
-    z: front.x * up.y - front.y * up.x
-  };
-  let lenR = Math.sqrt(right.x ** 2 + right.y ** 2 + right.z ** 2);
-  if (lenR < 0.001) {
-    // front 和 up 平行，使用备选
-    right = { x: 1, y: 0, z: 0 };
-  } else {
-    right = { x: right.x / lenR, y: right.y / lenR, z: right.z / lenR };
-  }
-
-  // 重新计算 up = right × front (确保正交)
-  up = {
-    x: right.y * front.z - right.z * front.y,
-    y: right.z * front.x - right.x * front.z,
-    z: right.x * front.y - right.y * front.x
-  };
-
-  // 构建旋转矩阵并转换为四元数
-  // 列向量: [right, up, front]
-  // 这里假设物体坐标系: X=right, Y=front, Z=up
-  // 旋转矩阵 M 的列是物体坐标系基向量在世界坐标系中的表示
-  const m00 = right.x, m01 = front.x, m02 = up.x;
-  const m10 = right.y, m11 = front.y, m12 = up.y;
-  const m20 = right.z, m21 = front.z, m22 = up.z;
-
-  const trace = m00 + m11 + m22;
-  let w, x, y, z;
-
-  if (trace > 0) {
-    const s = 0.5 / Math.sqrt(trace + 1.0);
-    w = 0.25 / s;
-    x = (m21 - m12) * s;
-    y = (m02 - m20) * s;
-    z = (m10 - m01) * s;
-  } else if (m00 > m11 && m00 > m22) {
-    const s = 2.0 * Math.sqrt(1.0 + m00 - m11 - m22);
-    w = (m21 - m12) / s;
-    x = 0.25 * s;
-    y = (m01 + m10) / s;
-    z = (m02 + m20) / s;
-  } else if (m11 > m22) {
-    const s = 2.0 * Math.sqrt(1.0 + m11 - m00 - m22);
-    w = (m02 - m20) / s;
-    x = (m01 + m10) / s;
-    y = 0.25 * s;
-    z = (m12 + m21) / s;
-  } else {
-    const s = 2.0 * Math.sqrt(1.0 + m22 - m00 - m11);
-    w = (m10 - m01) / s;
-    x = (m02 + m20) / s;
-    y = (m12 + m21) / s;
-    z = 0.25 * s;
-  }
-
-  // 归一化
-  const qLen = Math.sqrt(w * w + x * x + y * y + z * z);
-  obj.quaternion = { w: w / qLen, x: x / qLen, y: y / qLen, z: z / qLen };
-
-  console.log('从 front+up 计算的四元数:', obj.quaternion);
-
-  // 2. 找到最近的标准姿态
-  const bestState = OrientationUtils.getNearestState(obj.quaternion);
-  if (bestState) {
-    console.log(`自动吸附到姿态: ${bestState.type} (${bestState.axis})`);
-
-    // 3. 计算从当前姿态到目标姿态需要的旋转
-    // deltaQ = targetQ * inverse(currentQ)
-    // 然后从 deltaQ 提取轴角
-    const currentQ = obj.quaternion;
-    const targetQ = bestState.q;
-
-    // 计算 currentQ 的逆
-    const invCurrentQ = {
-      w: currentQ.w,
-      x: -currentQ.x,
-      y: -currentQ.y,
-      z: -currentQ.z
-    };
-
-    // deltaQ = targetQ * invCurrentQ
-    const deltaQ = {
-      w: targetQ.w * invCurrentQ.w - targetQ.x * invCurrentQ.x - targetQ.y * invCurrentQ.y - targetQ.z * invCurrentQ.z,
-      x: targetQ.w * invCurrentQ.x + targetQ.x * invCurrentQ.w + targetQ.y * invCurrentQ.z - targetQ.z * invCurrentQ.y,
-      y: targetQ.w * invCurrentQ.y - targetQ.x * invCurrentQ.z + targetQ.y * invCurrentQ.w + targetQ.z * invCurrentQ.x,
-      z: targetQ.w * invCurrentQ.z + targetQ.x * invCurrentQ.y - targetQ.y * invCurrentQ.x + targetQ.z * invCurrentQ.w
-    };
-
-    // 从 deltaQ 提取轴角
-    // angle = 2 * acos(w)
-    // axis = (x, y, z) / sin(angle/2)
-    const angle = 2 * Math.acos(Math.max(-1, Math.min(1, deltaQ.w)));
-
-    if (Math.abs(angle) > 0.001) { // 需要旋转
-      const sinHalf = Math.sin(angle / 2);
-      let axis;
-      if (Math.abs(sinHalf) > 0.001) {
-        axis = {
-          x: deltaQ.x / sinHalf,
-          y: deltaQ.y / sinHalf,
-          z: deltaQ.z / sinHalf
-        };
-      } else {
-        // 角度接近0或360，任意轴
-        axis = { x: 0, y: 0, z: 1 };
-      }
-
-      console.log(`旋转轴: (${axis.x.toFixed(2)}, ${axis.y.toFixed(2)}, ${axis.z.toFixed(2)}), 角度: ${(angle * 180 / Math.PI).toFixed(1)}°`);
-
-      // 4. 使用 rotateObjectAroundAxis 实际旋转物体点
-      rotateObjectAroundAxis(obj, axis, angle);
-    }
-
-    // 5. 更新状态
-    obj._currentOrientationState = bestState;
-    obj.quaternion = { ...bestState.q };
-
-    // 更新 frontDirection (rotateObjectAroundAxis 已经更新，这里确保与目标一致)
-    const defaultFrontVec = { x: 0, y: 1, z: 0 };
-    const rotatedFront = applyQuaternion(defaultFrontVec, bestState.q);
-    obj.frontDirection = {
-      x: rotatedFront.x,
-      y: rotatedFront.y,
-      z: rotatedFront.z
-    };
-
-    console.log('更新后的 frontDirection:', obj.frontDirection);
-  }
-}
+// OrientationUtils 和 snapToNearestOrientation 已迁移至 OrientationImpl.js
 
 /**
  * 进入 EDIT 态（阶段15/16完善）
@@ -4704,7 +3143,7 @@ function enterEditState() {
   SystemState.objects = SystemState.objects.filter(o => o !== SystemState.worldGrid);
 
   // 1.5 自动吸附到最近的标准姿态（阶段16新增）
-  snapToNearestOrientation(obj);
+  OrientationImpl.snapToNearestOrientation(obj, SystemState.mainWindow?.direction);
 
   // 1.6 (Phase 16b) 将物体中心移动到屏幕平面上
   // 这确保格网的中心层与屏幕平面严格对齐（零视差）
@@ -4731,7 +3170,7 @@ function enterEditState() {
   }
 
   // 2. 创建并显示局部格网（阶段16新增）
-  const localGrid = createLocalGridObject(obj);
+  const localGrid = ObjectFactoryImpl.createLocalGridObject(obj);
   SystemState.localGrid = localGrid;
   SystemState.objects.push(localGrid); // 加入渲染列表
 
