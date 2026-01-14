@@ -2311,6 +2311,10 @@ function enterFocusState(obj) {
   const originalFront = { ...obj.frontDirection };
   obj._savedFrontDirection = originalFront;  // 保存到物体属性，退出时恢复
 
+  // 关键修复：同时保存 Up 方向，否则 Roll 会丢失
+  const originalUp = obj.upDirection ? { ...obj.upDirection } : { x: 0, y: 0, z: 1 };
+  obj._savedUpDirection = originalUp;
+
   // 2. 计算居中目标位置
   const targetPos = calculateCenterPosition();
   const fromPos = { x: obj.center.x, y: obj.center.y, z: obj.center.z };
@@ -2598,6 +2602,48 @@ function rotateObjectAroundAxis(obj, axis, amount) {
 }
 
 /**
+ * 将物体的 Quaternion 变换应用到所有点坐标上，并将 Quaternion 重置为 Identity
+ * 用于在从 EDIT 态（使用 Quaternion）切换回其他态（使用 Points）时同步数据
+ */
+function applyQuaternionToPoints(obj) {
+  if (!obj || !obj.quaternion) return;
+  const q = obj.quaternion;
+
+  // 如果接近 Identity，无需处理
+  if (Math.abs(q.w - 1) < 0.0001 && Math.abs(q.x) < 0.0001 && Math.abs(q.y) < 0.0001 && Math.abs(q.z) < 0.0001) return;
+
+  const center = obj.center;
+  const points = obj.displayPoints.length > 0 ? obj.displayPoints : obj.constructionPoints;
+  const { w, x, y, z } = q;
+
+  // 预计算旋转矩阵参数
+  const x2 = x + x, y2 = y + y, z2 = z + z;
+  const xx = x * x2, xy = x * y2, xz = x * z2;
+  const yy = y * y2, yz = y * z2, zz = z * z2;
+  const wx = w * x2, wy = w * y2, wz = w * z2;
+
+  for (const p of points) {
+    const rx = p.x - center.x;
+    const ry = p.y - center.y;
+    const rz = p.z - center.z;
+
+    // 应用四元数旋转 p' = center + R * p_local
+    p.x = center.x + (1 - (yy + zz)) * rx + (xy - wz) * ry + (xz + wy) * rz;
+    p.y = center.y + (xy + wz) * rx + (1 - (xx + zz)) * ry + (yz - wx) * rz;
+    p.z = center.z + (xz - wy) * rx + (yz + wx) * ry + (1 - (xx + yy)) * rz;
+  }
+
+  // 重置四元数
+  obj.quaternion = { w: 1, x: 0, y: 0, z: 0 };
+
+  // 局部格网同理
+  if (SystemState.localGrid) {
+    SystemState.localGrid.quaternion = { w: 1, x: 0, y: 0, z: 0 };
+    updateLocalGrid();
+  }
+}
+
+/**
  * 计算屏幕中心对应的世界坐标
  * 使用 direction.start 作为目标位置（这是屏幕平面上的参考点，代表视窗中心）
  */
@@ -2768,8 +2814,10 @@ function exitFocusState() {
   const cuLen = Math.sqrt(currentUp.x ** 2 + currentUp.y ** 2 + currentUp.z ** 2);
   if (cuLen > 0) { currentUp.x /= cuLen; currentUp.y /= cuLen; currentUp.z /= cuLen; }
 
-  // 目标 Up 设为 Z 轴 (0, 0, 1)
-  let targetUp = { x: 0, y: 0, z: 1 };
+  // 目标 Up 设为保存的 Up (如果有)，否则默认为 Z 轴
+  let targetUp = obj._savedUpDirection ? { ...obj._savedUpDirection } : { x: 0, y: 0, z: 1 };
+  const tuLen = Math.sqrt(targetUp.x ** 2 + targetUp.y ** 2 + targetUp.z ** 2);
+  if (tuLen > 0) { targetUp.x /= tuLen; targetUp.y /= tuLen; targetUp.z /= tuLen; }
 
   // 计算 Frame-to-Frame 旋转（同时对齐 Front 和 Up）
   const { axis: rotationAxis, angle: totalAngle } = calculateRotationFromTwoFrames(currentFront, currentUp, savedFront, targetUp);
@@ -3474,7 +3522,17 @@ function updateLocalGrid() {
   grid.center.z = target.center.z;
 
   // 2. 同步四元数
-  if (target.quaternion) {
+  // 由于物体可能处于物理旋转模式 (Quaternion=Identity, 但 Vectors 已旋转)
+  // 我们必须从 Vectors 推导 Grid 的四元数，以确保 Grid 跟随物体旋转
+  if (target.frontDirection && target.upDirection) {
+    // 使用 OrientationUtils (假设已加载)
+    if (typeof OrientationUtils !== 'undefined' && OrientationUtils.getQuaternionFromVectors) {
+      grid.quaternion = OrientationUtils.getQuaternionFromVectors(target.frontDirection, target.upDirection);
+    } else {
+      // Fallback
+      grid.quaternion = { ...target.quaternion };
+    }
+  } else if (target.quaternion) {
     grid.quaternion = { ...target.quaternion };
   }
 
@@ -3584,9 +3642,9 @@ function animateSliceTransition(obj, targetX, targetY, targetZ, duration = 150) 
  * @param {Object} targetQ - 目标四元数 {w, x, y, z}
  * @param {number} duration - 动画时长（毫秒）
  */
-function animateRotation(obj, targetQ, duration = 200) {
-  const startQ = obj.quaternion ? { ...obj.quaternion } : { w: 1, x: 0, y: 0, z: 0 };
+function animateRotation(obj, axis, totalAngle, duration = 200) {
   const startTime = performance.now();
+  let lastProgress = 0;
 
   function animate(currentTime) {
     const elapsed = currentTime - startTime;
@@ -3595,23 +3653,29 @@ function animateRotation(obj, targetQ, duration = 200) {
     // 使用 easeOutCubic 缓动
     const eased = 1 - Math.pow(1 - t, 3);
 
-    // 使用 Slerp 插值四元数
-    const newQ = OrientationUtils.slerp(startQ, targetQ, eased);
+    // 计算本帧增量
+    const progressDelta = eased - lastProgress;
+    const angleDelta = totalAngle * progressDelta;
 
-    obj.quaternion = newQ;
-
-    // 同步局部格网四元数
-    if (SystemState.localGrid) {
-      SystemState.localGrid.quaternion = { ...newQ };
+    // 关键修正：直接物理旋转点坐标 (x,y,z) 和 向量 (front/up)
+    // 不再使用 quaternion 动画，确保 EDIT 态与 FOCUS/VIEW 态的坐标系一致性
+    if (Math.abs(angleDelta) > 0.00001) {
+      rotateObjectAroundAxis(obj, axis, angleDelta);
     }
 
-    // 更新局部格网点位置
+    lastProgress = eased;
+
+    // 同步局部格网 (如果需要)
+    // 由于 rotateObjectAroundAxis 更新了 vectors, updateLocalGrid 应该能正确生成
     updateLocalGrid();
     SystemState.ifControl = true;
 
     if (t < 1) {
       requestAnimationFrame(animate);
     } else {
+      // 动画结束
+      // 如果使用虚拟四元数追踪状态，这里不需要回写 obj.quaternion
+
       // Phase 16c: 旋转结束后，重新对齐到最近的层（确保与屏幕平面对齐）
       snapToNearestLayer(obj);
     }
@@ -4042,15 +4106,14 @@ const OrientationUtils = {
 
   // 状态流转逻辑 (阶段16核心)
   transition(key, obj) {
-    // 确保 quaternion 存在
-    if (!obj.quaternion) {
-      obj.quaternion = { w: 1, x: 0, y: 0, z: 0 };
-    }
+    // 物理旋转模式下，obj.quaternion 始终为 Identity。
+    // 我们需要从当前向量推导"虚拟四元数"来追踪状态。
+    const currentQ = this.getQuaternionFromVectors(obj.frontDirection, obj.upDirection);
 
     // 1. 获取当前状态 (如果没有则重新吸附)
     let currentState = obj._currentOrientationState;
     if (!currentState) {
-      currentState = this.getNearestState(obj.quaternion);
+      currentState = this.getNearestState(currentQ);
       if (!currentState) return;
       obj._currentOrientationState = currentState;
     }
@@ -4254,7 +4317,6 @@ const OrientationUtils = {
     if (!axis) return;
 
     // 3. 执行旋转 (使用轴角转四元数，因为轴是任意世界坐标向量)
-    // q = (cos(θ/2), sin(θ/2) * axis)
     const angleRad = angle * Math.PI / 180;
     const halfAngle = angleRad / 2;
     const sinHalf = Math.sin(halfAngle);
@@ -4265,11 +4327,12 @@ const OrientationUtils = {
       z: axis.z * sinHalf
     };
 
-    // Quaternion multiplication: A * B
-    // w = a.w*b.w - dot(a.v, b.v)
-    // v = a.w*b.v + b.w*a.v + cross(a.v, b.v)
+    // Quaternion multiplication: RotQ * CurrentQ (注意乘法顺序，局部旋转 vs 世界旋转?)
+    // 这里的 axis 是根据 View 计算的世界轴。
+    // 所以是 World Rotation: NewQ = RotQ * CurrentQ
+
     const qa = rotQ;
-    const qb = obj.quaternion;
+    const qb = currentQ; // 使用虚拟四元数
 
     const newQ = {
       w: qa.w * qb.w - qa.x * qb.x - qa.y * qb.y - qa.z * qb.z,
@@ -4278,11 +4341,10 @@ const OrientationUtils = {
       z: qa.w * qb.z + qa.x * qb.y - qa.y * qb.x + qa.z * qb.w
     };
 
-    // 4. 吸附到最近的标准态 (消除误差)
-    // 如果 allowedTypes/requireRolled/requireVisual 存在，则按规则过滤
+    // 4. 吸附到最近的标准态 (根据预测的 NewQ 查找)
     const nextState = this.getNearestState(newQ, allowedTypes, requireRolled, requireVisual);
     if (nextState) {
-      // 输出简洁日志：起始态 -> 结果态
+      // 输出简洁日志
       const fromInfo = isRolledFace ? '(R)' : (isStandardFace ? '' : '');
       const toRollInfo = (nextState.roll % 90 !== 0) ? '(R)' : '';
 
@@ -4295,10 +4357,169 @@ const OrientationUtils = {
 
       console.log(`[ROTATE] ${type}${fromInfo} + ${key.toUpperCase()} ${angle}° → ${nextState.type}${toRollInfo} (${nextState.axis}) [Vis:${nextState.visualOrientation || '-'}]${targetInfo}`);
 
-      // Phase 16b: 使用动画过渡到目标姿态
+      // Phase 16b: 使用物理动画过渡到目标姿态
       obj._currentOrientationState = nextState;
-      animateRotation(obj, nextState.q, 200);
+
+      // 传递轴和弧度给物理动画函数
+      // 注意：轴必须归一化
+      let animAxis = { ...axis };
+      const axisLen = Math.sqrt(axis.x ** 2 + axis.y ** 2 + axis.z ** 2);
+      if (axisLen > 0.001) {
+        animAxis.x /= axisLen; animAxis.y /= axisLen; animAxis.z /= axisLen;
+      }
+
+      animateRotation(obj, animAxis, angleRad, 200);
     }
+  },
+
+  /**
+   * 更新物体的所有姿态属性 (Quaternion + Vectors)
+   * 确保 frontDirection 和 upDirection 与 quaternion 保持一致
+   */
+  updateObjectOrientation(obj, q) {
+    if (!obj || !q) return;
+
+    // 1. 更新四元数
+    obj.quaternion = { ...q };
+
+    // 2. 从四元数推导前向和上向向量
+    // Q * (0,1,0) -> front
+    // Q * (0,0,1) -> up
+    // 假设初始状态: Front=(0,1,0), Up=(0,0,1)
+
+    // 旋转向量 v = q * v0 * q_conj
+    // 简化计算：
+    // x' = x(1 - 2yy - 2zz) + y(2xy - 2wz) + z(2xz + 2wy)
+    // y' = x(2xy + 2wz) + y(1 - 2xx - 2zz) + z(2yz - 2wx)
+    // z' = x(2xz - 2wy) + y(2yz + 2wx) + z(1 - 2xx - 2yy)
+
+    const { w, x, y, z } = q;
+
+    // Front (0, -1, 0)  <-- 修正：基础朝向是 -Y
+    // 旋转向量 (0, 1, 0) 是: [2(xy-wz), 1-2(xx+zz), 2(yz+wx)]
+    // 所以 (0, -1, 0) 取反:
+    obj.frontDirection = {
+      x: -2 * (x * y - w * z),
+      y: -(1 - 2 * (x * x + z * z)),
+      z: -2 * (y * z + w * x)
+    };
+
+    // Up (0, 0, 1) <-- 保持不变
+    obj.upDirection = {
+      x: 2 * (x * z + w * y),
+      y: 2 * (y * z - w * x),
+      z: 1 - 2 * (x * x + y * y)
+    };
+
+    // 归一化以防万一
+    const norm = (v) => {
+      const len = Math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+      if (len > 0) { v.x /= len; v.y /= len; v.z /= len; }
+    };
+    norm(obj.frontDirection);
+    norm(obj.upDirection);
+  },
+
+  /**
+   * 从 frontDirection + upDirection 计算完整四元数
+   * 用于在物理旋转模式下计算"虚拟四元数"以进行状态匹配
+   */
+  getQuaternionFromVectors(frontDir, upDir) {
+    const defaultFront = { x: 0, y: 1, z: 0 };
+    const defaultUp = { x: 0, y: 0, z: 1 };
+
+    let front = frontDir ? { ...frontDir } : { ...defaultFront };
+    let up = upDir ? { ...upDir } : { ...defaultUp };
+
+    // 归一化
+    let lenF = Math.sqrt(front.x ** 2 + front.y ** 2 + front.z ** 2);
+    if (lenF < 0.001) front = { ...defaultFront };
+    else { front.x /= lenF; front.y /= lenF; front.z /= lenF; }
+
+    let lenU = Math.sqrt(up.x ** 2 + up.y ** 2 + up.z ** 2);
+    if (lenU < 0.001) up = { ...defaultUp };
+    else { up.x /= lenU; up.y /= lenU; up.z /= lenU; }
+
+    // 正交化 Right = Front x Up
+    // 注意：这里 Front 是 vector。
+    // 如果 Base Front 是 (0, -1, 0)，那么 transform matrix 应该是从 Base 旋转到 Current。
+    // 旋转矩阵列向量：
+    // Col 1 (Right): ?
+    // Col 2 (Front): ?
+    // Col 3 (Up): ?
+
+    // 我们的 updateObjectOrientation 假定 Base Front 是 (0, -1, 0)
+    // 所以 R * (0, -1, 0) = CurrentFront
+    // => - (R * Y_axis) = CurrentFront
+    // => R * Y_axis = -CurrentFront
+    // 所以矩阵的第2列 (Y) 应该是 -CurrentFront
+
+    // Up 是 (0, 0, 1)。 R * Z_axis = CurrentUp。
+    // 所以矩阵第3列 (Z) 应该是 CurrentUp
+
+    // Right (X) = Y x Z.
+    // X = (-CurrentFront) x CurrentUp
+    //   = - (Front x Up) = Up x Front
+
+    let negFront = { x: -front.x, y: -front.y, z: -front.z };
+    let colY = negFront;
+    let colZ = up;
+
+    let colX = {
+      x: colY.y * colZ.z - colY.z * colZ.y,
+      y: colY.z * colZ.x - colY.x * colZ.z,
+      z: colY.x * colZ.y - colY.y * colZ.x
+    };
+
+    // 归一化 X
+    let lenX = Math.sqrt(colX.x ** 2 + colX.y ** 2 + colX.z ** 2);
+    if (lenX < 0.001) colX = { x: 1, y: 0, z: 0 };
+    else { colX.x /= lenX; colX.y /= lenX; colX.z /= lenX; }
+
+    // 重新计算 Y 确保正交 (Y = Z x X)
+    colY = {
+      x: colZ.y * colX.z - colZ.z * colX.y,
+      y: colZ.z * colX.x - colZ.x * colX.z,
+      z: colZ.x * colX.y - colZ.y * colX.x
+    };
+
+    // 矩阵转四元数
+    // M = [colX, colY, colZ]
+    const m00 = colX.x, m01 = colY.x, m02 = colZ.x;
+    const m10 = colX.y, m11 = colY.y, m12 = colZ.y;
+    const m20 = colX.z, m21 = colY.z, m22 = colZ.z;
+
+    const trace = m00 + m11 + m22;
+    let q = { w: 1, x: 0, y: 0, z: 0 };
+
+    if (trace > 0) {
+      const s = 0.5 / Math.sqrt(trace + 1.0);
+      q.w = 0.25 / s;
+      q.x = (m21 - m12) * s;
+      q.y = (m02 - m20) * s;
+      q.z = (m10 - m01) * s;
+    } else {
+      if (m00 > m11 && m00 > m22) {
+        const s = 2.0 * Math.sqrt(1.0 + m00 - m11 - m22);
+        q.w = (m21 - m12) / s;
+        q.x = 0.25 * s;
+        q.y = (m01 + m10) / s;
+        q.z = (m02 + m20) / s;
+      } else if (m11 > m22) {
+        const s = 2.0 * Math.sqrt(1.0 + m11 - m00 - m22);
+        q.w = (m02 - m20) / s;
+        q.x = (m01 + m10) / s;
+        q.y = 0.25 * s;
+        q.z = (m12 + m21) / s;
+      } else {
+        const s = 2.0 * Math.sqrt(1.0 + m22 - m00 - m11);
+        q.w = (m10 - m01) / s;
+        q.x = (m02 + m20) / s;
+        q.y = (m12 + m21) / s;
+        q.z = 0.25 * s;
+      }
+    }
+    return q;
   }
 };
 
