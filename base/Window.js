@@ -443,7 +443,7 @@ export class Window {
           let e = 1;
           for (let i = e; i < points.length; i++) {
             // 保护 LOCAL_GRID 不被剔除或衰减
-            if (points[i].tag === 'LOCAL_GRID') continue;
+            if (points[i].tag === 'LOCAL_GRID' || points[i].tag === 'LOCAL_GRID_DASH') continue;
 
             points[i].light *= Math.pow(0.075, (i - 0));
             // 计算当前索引与 e 的差值：如果是奇数，说明是需要剔除的间隔元素
@@ -473,7 +473,7 @@ export class Window {
         let e = end + 1;
         for (let i = points.length - 1; i > e; i--) {
           // 保护 LOCAL_GRID
-          if (points[i].tag === 'LOCAL_GRID') continue;
+          if (points[i].tag === 'LOCAL_GRID' || points[i].tag === 'LOCAL_GRID_DASH') continue;
 
           // 计算当前索引与 e 的差值：如果是奇数，说明是需要剔除的间隔元素
           // if ((i - e) % 2 === 1) {
