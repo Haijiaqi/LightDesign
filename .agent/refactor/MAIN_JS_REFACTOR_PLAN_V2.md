@@ -649,3 +649,327 @@ EDIT: {
 - [ ] 无残留的独立 `requestAnimationFrame` 动画
 - [ ] EDIT 态物理行为符合预期（暂停或配置化）
 
+---
+
+## 13. 实施风险补充分析
+
+> 本节基于对 `main.js` 全部 3600+ 行代码的逐行核查，补充 V2 方案可能遗漏或过度设计的部分。
+
+### 13.1 遗漏的逻辑模块
+
+以下模块在 V2 文档中**未被提及或仅一笔带过**，如直接按文档实施会导致功能丢失：
+
+| 模块 | 行数估计 | 当前位置 | 建议归属 |
+|------|----------|----------|----------|
+| **摄像头控制系统** (`initCamera`, `processCamera`, `processQueue`, `updateCameraDisplay`, `drawCameraFeedOnMainCanvas`) | ~150 行 | main.js L221-391, L3503-3575 | 新建 `CameraInputImpl.js` 或作为 `InputHandlerImpl` 子模块 |
+| **虚拟鼠标与吸附系统** (`updateVirtualMouse`, `findNearestAttractableExpanding`, `renderScreenOverlay`) | ~250 行 | main.js L950-1197 | **不宜**直接并入 `Window.js`；建议新建 `CursorImpl.js` |
+| **蓄力冲量系统** (`calculateImpulse`, `applyTouchImpulse`, `applyTouchImpulseSimple`, `findSurfaceHit`) | ~180 行 | main.js L2565-2787 | 新建 `InteractionImpl.js` 或归入物理系统 |
+| **状态机详细逻辑** (`enterViewState`, `enterFocusState`, `exitFocusState`, `enterEditState`, `exitEditState`) | ~400 行 | main.js L1950-2468, L3127-3253 | 状态入口/出口逻辑应保留在 `main.js` 或提取为 `StateMachineImpl.js` |
+| **FOCUS 态旋转动画** (`rotateFocusedObject`, `handleFocusEdgeRotation`) | ~150 行 | main.js L1265-1312, L2471-2563 | 归入 `OrientationImpl.js` 扩展 |
+| **切片过渡动画** (`animateSliceTransition`, `snapToNearestLayer`) | ~100 行 | main.js L2978-3115 | 应纳入 `TaskSystemImpl` 或保留为独立工具函数 |
+
+> **关键风险**：`animateSliceTransition` 和 `animateRotation` 使用**独立 `requestAnimationFrame`** 绕过 TaskQueue，与 V2 第 9.2 节 "统一到 TaskSystemImpl" 目标矛盾。
+
+---
+
+### 13.2 画蛇添足的设计模式
+
+以下设计在 V2 中被引入，但可能增加复杂度而收益有限：
+
+#### (1) 字符串动态引用解析 (`@focused`, `@screenPlane`)
+
+```javascript
+// V2 建议
+config.cursor.planeConstraint = '@localGridPlane';
+InteractionConfigImpl.resolve(config, context);  // 解析 '@xxx'
+```
+
+**问题**：
+- 需要编写并维护字符串解析器
+- 失去 IDE 代码跳转、参数提示和类型检查能力
+- 运行时错误难以调试（拼错字符串不会报错）
+
+**建议**：直接在代码中判断状态，例如：
+```javascript
+// 更直接的方式
+const target = (state === 'FOCUS') ? focusedObject : null;
+```
+
+#### (2) 字符串动作分发 (`TaskSystemImpl.dispatch('actionName')`)
+
+```javascript
+// V2 建议
+TaskSystemImpl.dispatch('cameraZoom', { delta });
+```
+
+**问题**：
+- 需要预注册所有动作处理器
+- 调用时失去函数签名提示
+- 重构时无法自动重命名
+
+**建议**：使用直接函数调用：
+```javascript
+// 更直接的方式
+CameraActions.zoom(delta);
+```
+
+#### (3) 过度配置化的交互预设
+
+V2 附录中的 `InteractionPresets` 配置对象达 130+ 行，试图将所有行为参数化。但当前 `main.js` 中大部分逻辑是**过程性**的（涉及复杂的条件判断和中间状态），无法简单用配置表达。
+
+**建议**：
+- 配置仅用于**真正可变的参数**（如灵敏度、阈值）
+- **行为逻辑**保持代码形式，便于调试和扩展
+
+---
+
+### 13.3 SystemState 循环依赖风险
+
+**现状**：`SystemState` 定义在 `main.js` 中，包含：
+- `objects`, `focusedObject` — 场景数据
+- `mainWindow`, `taskQueues` — 系统实例
+- `interactionState`, `virtualMouse` — 交互状态
+
+**问题**：如果新模块（`InputHandlerImpl`, `RenderPipelineImpl` 等）需要访问这些状态，必须 import `main.js`，导致**循环依赖**：
+
+```
+main.js → InputHandlerImpl.js → main.js (循环!)
+```
+
+**解决方案**：
+
+1. **立即抽离 SystemState**：在任何 Impl 模块创建之前，先将 `SystemState` 提取为独立模块：
+   ```
+   manage/SystemState.js  // 纯数据容器
+   ```
+
+2. **依赖注入模式**：Impl 模块不直接 import SystemState，而是通过函数参数接收：
+   ```javascript
+   // InputHandlerImpl.js
+   static handleKeyDown(key, config, systemState) { ... }
+   ```
+
+3. **单例访问器**：如果注入过于繁琐，可提供全局访问器：
+   ```javascript
+   // manage/SystemState.js
+   let _instance = null;
+   export function getState() { return _instance; }
+   export function initState(state) { _instance = state; }
+   ```
+
+---
+
+### 13.4 建议的实施顺序修正
+
+基于上述分析，建议将 V2 第 6 节的阶段顺序调整为：
+
+| 顺序 | 任务 | 说明 |
+|------|------|------|
+| **0** | 抽离 `SystemState.js` | 打破循环依赖，后续模块可安全 import |
+| A | 配置系统基础 | 按 V2 原计划 |
+| **A'** | 迁移独立 rAF 动画到 TaskSystem | 处理 `animateSliceTransition`, `animateRotation` |
+| B | 输入处理重构 | 按 V2 原计划，但**简化动作分发**为直接调用 |
+| **B'** | 抽离摄像头系统 | 新建 `CameraInputImpl.js` |
+| C | Window 扩展 | 按 V2 原计划 |
+| **C'** | 抽离虚拟鼠标系统 | 新建 `CursorImpl.js`，不并入 Window |
+| D | 样式系统扩展 | 按 V2 原计划 |
+| E | 渲染管线提取 | 按 V2 原计划 |
+
+---
+
+### 13.5 完整遗漏函数清单
+
+以下函数在 V2 中**未规划去向**，需在实施前明确：
+
+```
+main.js 中未被 V2 覆盖的函数：
+├── 摄像头系统
+│   ├── initCamera()
+│   ├── processCamera()
+│   ├── processQueue()
+│   ├── initCameraDisplay()
+│   ├── updateCameraDisplay()
+│   └── drawCameraFeedOnMainCanvas()
+├── 虚拟鼠标系统
+│   ├── updateVirtualMouse()
+│   ├── findNearestAttractableExpanding()
+│   ├── renderScreenOverlay()
+│   └── renderScreenPixel()
+├── 状态机与动画
+│   ├── enterViewState()
+│   ├── enterFocusState()  // ~200 行，含复杂动画逻辑
+│   ├── exitFocusState()   // ~150 行，含复杂动画逻辑
+│   ├── enterEditState()
+│   ├── exitEditState()
+│   ├── rotateFocusedObject()
+│   ├── handleFocusEdgeRotation()
+│   ├── animateSliceTransition()  // 独立 rAF
+│   ├── animateRotation()         // 独立 rAF
+│   └── snapToNearestLayer()
+├── 蓄力/冲量系统
+│   ├── findSurfaceHit()
+│   ├── calculateImpulse()
+│   ├── applyTouchImpulse()
+│   └── applyTouchImpulseSimple()
+├── 控制点系统
+│   ├── showControlPoints()
+│   ├── hideControlPoints()
+│   ├── findControlPointAt()
+│   ├── moveControlPoint()
+│   ├── deleteControlPoint()
+│   └── addControlPointAt()
+├── 局部格网系统
+│   └── updateLocalGrid()
+├── 双击检测
+│   ├── onMouseClick()
+│   └── findClickedObjectCenter()
+├── 物体操作
+│   ├── moveObjectTo()
+│   ├── applyQuaternionToPoints()
+│   └── calculateCenterPosition()
+└── 辅助函数
+    ├── userRotate()
+    ├── updateLogVelocity()
+    ├── applyVelocities()
+    ├── updateVisibleReflection()
+    ├── resizeCanvas()
+    ├── createObjectFromCommand()
+    └── updateFromCamera()
+```
+
+---
+
+*补充日期: 2026-01-15*
+*核查范围: main.js 全部 3608 行*
+
+---
+
+## 14. 功能需求清单
+
+> 本节以**需求形式**列明重构必须满足的约束，确保功能完整、不过度设计、不引入新问题。
+
+---
+
+### 14.1 强制保留的功能 (MUST KEEP)
+
+以下功能在重构后**必须完整保留**，不得丢失或简化：
+
+| 需求 ID | 功能名称 | 当前位置 | 验收标准 |
+|---------|----------|----------|----------|
+| **FK-01** | 三态状态机 | main.js L163, L1950-2468, L3127-3253 | VIEW/FOCUS/EDIT 三态切换正常，中间态 `FOCUS_ENTERING` 动画正确 |
+| **FK-02** | 双击检测 | main.js L2792-2840 | VIEW 双击物心进入 FOCUS；FOCUS 双击进入 EDIT；EDIT 双击空白新增控制点 |
+| **FK-03** | 虚拟鼠标吸附 | main.js L950-1144 | 虚拟鼠标吸附到世界格网点（VIEW）、局部格网点（EDIT）、透视圈渲染正确 |
+| **FK-04** | 边缘触发旋转 | main.js L1265-1312 | FOCUS 态鼠标移到屏幕边缘触发对数加速旋转 |
+| **FK-05** | 96 态离散旋转 | OrientationImpl.js 全部 | EDIT 态 WASD/QE 离散旋转，正确在 FACE/EDGE 态间切换 |
+| **FK-06** | 切片深度切换 | main.js L1477-1544, L2978-3115 | EDIT 态滚轮切换切片层，带动画过渡，对齐到精确层位 |
+| **FK-07** | 局部格网系统 | main.js L2906-2962, ObjectFactoryImpl L352-500 | EDIT 态显示局部格网，随物体旋转同步，仅屏幕平面附近格点可吸附 |
+| **FK-08** | 蓄力冲量系统 | main.js L2565-2787 | FOCUS 态长按表面后释放施加冲量，影响物理粒子速度 |
+| **FK-09** | 摄像头头追踪 | main.js L221-391, L3503-3575 | 摄像头实时追踪用户头部位置，调整视窗 Capital |
+| **FK-10** | 对数速度系统 | main.js L1379-1424, L188-192 | VIEW 态 WASD 键控速度对数加减速，平滑启停 |
+| **FK-11** | 物体拖拽放置 | main.js L1572-1628, L1656-1663 | VIEW 态拖拽物心，物体跟随虚拟鼠标，吸附到格点放置 |
+| **FK-12** | 控制点 CRUD | main.js L3188-3411 | EDIT 态可新增、移动、删除控制点 |
+| **FK-13** | 物心 centerPoint | Object.js L195-211, main.js renderPoints | 物心作为可吸附点正确投影和渲染 |
+| **FK-14** | 窗口 resize 响应 | main.js L1749-1777 | 窗口大小变化后画布和视窗正确重建 |
+| **FK-15** | TaskQueue 动画系统 | main.js L122-155, L1840-1853, AnimationImpl 全部 | 动画任务通过队列调度，支持链式 then、取消、锁定 |
+
+---
+
+### 14.2 禁止的操作 (MUST NOT)
+
+以下操作在重构过程中**严格禁止**：
+
+| 需求 ID | 禁止事项 | 原因 |
+|---------|----------|------|
+| **MN-01** | 禁止删除 `animationLock` 机制 | 动画锁用于隔离动画与物理更新，删除会导致状态冲突 |
+| **MN-02** | 禁止在 Impl 模块中直接 import main.js | 会造成循环依赖，必须先抽离 SystemState |
+| **MN-03** | 禁止将虚拟鼠标逻辑并入 Window.js | Window.js 已 823 行，再增 250 行会过度膨胀 |
+| **MN-04** | 禁止将 `CONFIG` 与 `SystemState` 合并 | CONFIG 是静态配置，SystemState 是运行时状态，混淆会影响可读性 |
+| **MN-05** | 禁止使用字符串反射解析配置（如 `@focused`） | 增加复杂度，IDE 支持差，运行时拼写错误难以发现 |
+| **MN-06** | 禁止将所有输入处理转为字符串 dispatch | 直接函数调用更安全，重构时可自动追踪引用 |
+| **MN-07** | 禁止修改 `gameLoop` 的执行顺序 | input → task → physics → render 顺序固定，改变可能导致帧延迟或物理错误 |
+| **MN-08** | 禁止删除 `processCamera` 的节流逻辑 | 必须保持摄像头处理频率限制，否则性能下降 |
+| **MN-09** | 禁止将独立 rAF 动画直接删除 | 必须先迁移到 TaskQueue，否则功能丢失 |
+| **MN-10** | 禁止在渲染循环中分配大量临时对象 | 当前 render() 约 300 行无大量 new，保持精简避免 GC 压力 |
+
+---
+
+### 14.3 需要清理的重复代码 (CLEANUP)
+
+以下代码存在重复实现，重构时应**合并为单一来源**：
+
+| 需求 ID | 重复项 | 位置 | 处理建议 |
+|---------|--------|------|----------|
+| **CL-01** | `snapToNearestLayer` | main.js L3070-3115 vs OrientationImpl.js L838-880 | 删除 main.js 版本，统一使用 OrientationImpl |
+| **CL-02** | `rotatePointAroundAxis` | main.js L2499-2519 vs OrientationImpl.rotateObjectAroundAxis | 提取公共工具函数到 OrientationImpl，main.js 调用 |
+| **CL-03** | `calculateRotationFromTwoFrames` | main.js L2248-2346 (闭包) | 提取为 OrientationImpl 静态方法 |
+| **CL-04** | 四元数工具函数 | 散落在 main.js 各处 | 已有 OrientationImpl，确保全部使用 |
+| **CL-05** | 坐标转换 cm↔pixel | Window.js L641-646 (闭包) | 提取为 Window 类方法或工具函数 |
+| **CL-06** | 点归一化逻辑 | 多处手写 `len = sqrt(...)` | 考虑添加 Vector.normalize() |
+
+---
+
+### 14.4 模块归属约束 (MODULE RULES)
+
+| 需求 ID | 规则 |
+|---------|------|
+| **MR-01** | 每个 Impl 文件**行数不超过 500 行** |
+| **MR-02** | `main.js` 重构后**行数不超过 2000 行** |
+| **MR-03** | 新增模块数量**不超过 5 个** |
+| **MR-04** | 所有新模块必须放在 `manage/` 目录 |
+| **MR-05** | `SystemState` 必须在**阶段 0**抽离为独立模块 |
+| **MR-06** | 所有动画必须通过 `TaskQueue` 调度，禁止新增独立 rAF |
+
+---
+
+### 14.5 接口保持约束 (API STABILITY)
+
+以下公开接口在重构后**必须保持兼容**：
+
+| 需求 ID | 接口 | 位置 | 说明 |
+|---------|------|------|------|
+| **AS-01** | `AnimationImpl.createTask()` | AnimationImpl.js L53-71 | 任务配置格式不变 |
+| **AS-02** | `AnimationImpl.Easing.*` | AnimationImpl.js L10-21 | 缓动函数命名不变 |
+| **AS-03** | `OrientationImpl.transition()` | OrientationImpl.js L254-386 | 离散旋转接口不变 |
+| **AS-04** | `OrientationImpl.rotateObjectAroundAxis()` | OrientationImpl.js L595-655 | 旋转工具函数签名不变 |
+| **AS-05** | `ObjectFactoryImpl.create*()` | ObjectFactoryImpl.js | 所有工厂方法签名不变 |
+| **AS-06** | `StyleImpl.getLUT()` | StyleImpl.js L33-38 | 颜色 LUT 获取方式不变 |
+| **AS-07** | `Window.calculate()` | Window.js L100-226 | 投影计算入口不变 |
+| **AS-08** | `Object.savePosition()` / `getSavedPosition()` | Object.js | 位置保存/恢复接口不变 |
+
+---
+
+### 14.6 验证清单 (VERIFICATION)
+
+重构完成后必须通过以下验证：
+
+| 需求 ID | 验证项 | 方法 |
+|---------|--------|------|
+| **VF-01** | VIEW 态世界格网正常显示 | 手动验证：打开应用，确认 10cm 格点渲染正确 |
+| **VF-02** | 双击进入 FOCUS 动画正常 | 手动验证：双击物心，物体居中且正面朝向用户 |
+| **VF-03** | FOCUS 态边缘旋转正常 | 手动验证：鼠标移到边缘，物体开始旋转 |
+| **VF-04** | EDIT 态 WASD 离散旋转正常 | 手动验证：按 W 键，物体旋转 45°/90° |
+| **VF-05** | EDIT 态滚轮切片正常 | 手动验证：滚动三格，物体沿视线方向平移一层 |
+| **VF-06** | 局部格网显示且正确旋转 | 手动验证：EDIT 态旋转后，格网跟随物体 |
+| **VF-07** | ESC 分层退出正常 | 手动验证：EDIT→FOCUS→VIEW 逐层退出 |
+| **VF-08** | 摄像头追踪工作 | 手动验证：开启摄像头后移动头部，视角跟随 |
+| **VF-09** | 无控制台未捕获异常 | 自动验证：打开 DevTools Console，无红色错误 |
+| **VF-10** | 渲染帧率 ≥ 30fps | 性能验证：使用 DevTools Performance，帧间隔 ≤ 33ms |
+
+---
+
+### 14.7 暂缓实施的功能 (DEFER)
+
+以下功能当前实现不完整或预留，重构时**暂不迁移**，保留在 main.js：
+
+| 需求 ID | 功能 | 位置 | 原因 |
+|---------|------|------|------|
+| **DF-01** | `createObjectFromCommand()` | main.js L1793-1818 | 预留接口，未实际使用 |
+| **DF-02** | `updateFromCamera()` | main.js L1823-1828 | 预留接口，未实际使用 |
+| **DF-03** | `rebuildShapeFromControlPoints()` | main.js L3472-3476 (TODO) | 仅为 TODO 注释 |
+| **DF-04** | 物理系统 `physicsStep()` | main.js L1860-1887 | 逻辑简单，暂不迁移 |
+
+---
+
+*需求文档版本: 1.0*
+*创建日期: 2026-01-15*
+*覆盖范围: main.js (3608行) + manage/*.js + base/*.js*
