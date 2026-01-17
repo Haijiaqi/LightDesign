@@ -8,6 +8,14 @@ import { AnimationImpl } from "./manage/AnimationImpl.js";
 import { ObjectFactoryImpl } from "./manage/ObjectFactoryImpl.js";
 import { OrientationImpl } from "./manage/OrientationImpl.js";
 
+// =====================================================
+// [A] Global Runtime State (纯数据)
+// =====================================================
+// 说明: 本区块只包含配置参数和系统状态变量
+// 禁止: 在此区块进行计算或状态判断
+// =====================================================
+
+
 // ========================
 // 1. 配置参数（预留接口）
 // ========================
@@ -215,6 +223,45 @@ const SystemState = {
 };
 const C = new Classifier();
 
+// =====================================================
+// 逻辑区块总览（第一阶段：概念分区）
+// =====================================================
+// 本文件按8个逻辑区块组织，当前阶段各区块函数仍分散，
+// 通过注释标记边界，为第二阶段拆分做准备。
+//
+// [A] Global Runtime State (纯数据)
+//     位置: 文件顶部（已完成集中）
+//     内容: CONFIG配置 + SystemState系统状态
+//     
+// [B] World / Interaction State Management
+//     位置: 分散（见enterFocusState等函数）
+//     内容: VIEW/FOCUS/EDIT状态切换函数
+//     
+// [C] Policies / Profiles (纯配置)
+//     位置: 见[C]标记（当前为预留区域）
+//     内容: 第二阶段将定义InputMaps等策略对象
+//     
+// [D] Interaction Intent Builders
+//     位置: 分散
+//     内容: 旋转/平移/编辑意图构建
+//     
+// [E] Geometry & Edit Operations
+//     位置: 分散
+//     内容: 几何算法、控制点操作等
+//     
+// [F] Animation / Task Queue
+//     位置: 分散（见processTaskQueue等）
+//     内容: 动画系统、任务队列
+//     
+// [G] Window / Screen Glue
+//     位置: 见[G]标记（updateVirtualMouse等）
+//     内容: 虚拟鼠标、屏幕坐标相关
+//     
+// [H] Init / Resize / Lifecycle
+//     位置: 见[H]标记（init函数等）
+//     内容: 初始化、事件监听、主循环
+// =====================================================
+
 // ========================
 // 4. 摄像头初始化函数
 // ========================
@@ -392,6 +439,11 @@ function processQueue(dataList, num, maxLength = 5, tol = 0.1) {
 // ========================
 // 6. 初始化函数
 // ========================
+
+// =====================================================
+// [H] Init / Resize / Lifecycle
+// =====================================================
+
 async function init() {
   // 改为 async
   // 创建 DOM 元素
@@ -478,7 +530,7 @@ async function init() {
     range: 0.5 * displayWidth                // 限制范围 +/- 0.5 Width
   };
   SystemState.objects.push(SystemState.worldGrid);
-  console.log("世界格网已创建，格点数:", SystemState.worldGrid.displayPoints.length);
+  // console.log("世界格网已创建，格点数:", SystemState.worldGrid.displayPoints.length);
 
   // 添加到DOM
   document.body.appendChild(SystemState.canvas);
@@ -490,12 +542,574 @@ async function init() {
   await initCamera(); // 等待摄像头初始化
   // initCameraDisplay();
   SystemState.debugDiv.textContent = "初始化完成";
-  console.log("初始化完成");
+  // console.log("初始化完成");
 }
 
 // ========================
 // 7. 法向量估算
 // ========================
+
+
+// =====================================================
+// Phase 2: 输入处理辅助函数（包装现有逻辑）
+// =====================================================
+// 说明: 这些函数包装handleInput等的分支逻辑
+//      不改变任何业务逻辑，只是提取分支
+// =====================================================
+
+/**
+ * VIEW态连续输入处理（提取自原handleInput的VIEW分支）
+ */
+function handleViewContinuousInput() {
+  const keys = SystemState.keys;
+  const rotState = SystemState.velocityState.rotation;
+  const moveState = SystemState.velocityState.moveForward;
+
+  // 旋转：Z/X/C 左转，B/N/M 右转
+  rotState.target = 0;
+  rotState.factor = 0;
+
+  if (keys["z"]) { rotState.target = CONFIG.rotationSpeed; rotState.factor = 1.0; }
+  else if (keys["x"]) { rotState.target = CONFIG.rotationSpeed; rotState.factor = 0.5; }
+  else if (keys["c"]) { rotState.target = CONFIG.rotationSpeed; rotState.factor = 0.25; }
+  else if (keys["b"]) { rotState.target = -CONFIG.rotationSpeed; rotState.factor = 0.25; }
+  else if (keys["n"]) { rotState.target = -CONFIG.rotationSpeed; rotState.factor = 0.5; }
+  else if (keys["m"]) { rotState.target = -CONFIG.rotationSpeed; rotState.factor = 1.0; }
+
+  // 鼠标边缘持续旋转
+  if (SystemState.mouseEdge === -1) {
+    rotState.target = CONFIG.rotationSpeed;
+    rotState.factor = 0.25;
+  } else if (SystemState.mouseEdge === 1) {
+    rotState.target = -CONFIG.rotationSpeed;
+    rotState.factor = 0.25;
+  }
+
+  // 前后移动：FG 前进，V 后退
+  moveState.target = 0;
+  moveState.factor = 0;
+
+  if (keys["f"] || keys["g"]) { moveState.target = CONFIG.moveSpeed; moveState.factor = 1.0; }
+  else if (keys["v"]) { moveState.target = -CONFIG.moveSpeed; moveState.factor = 1.0; }
+
+  // 方向键控制光源
+  if (keys["arrowleft"]) SystemState.lightAngle -= CONFIG.rotationSpeed;
+  if (keys["arrowright"]) SystemState.lightAngle += CONFIG.rotationSpeed;
+  if (keys["arrowup"])
+    SystemState.lightElevation = Math.min(
+      CONFIG.maxElevation,
+      SystemState.lightElevation + CONFIG.rotationSpeed,
+    );
+  if (keys["arrowdown"])
+    SystemState.lightElevation = Math.max(
+      CONFIG.minElevation,
+      SystemState.lightElevation - CONFIG.rotationSpeed,
+    );
+}
+
+/**
+ * FOCUS_ENTERING态连续输入处理（无操作）
+ */
+function handleFocusEnteringContinuousInput() {
+  // FOCUS_ENTERING态不处理输入
+}
+
+/**
+ * EDIT态连续输入处理（无操作）
+ */
+function handleEditContinuousInput() {
+  // EDIT态不处理VIEW/FOCUS态的连续输入
+}
+
+/**
+ * VIEW态键盘按下处理（提取自原keydown回调的VIEW分支）
+ */
+function handleViewKeyDown(e) {
+  if (e.key === 'Escape') {
+    // 检查是否有动画正在进行（任务队列中有任务）
+    const hasPendingTasks = (SystemState.taskQueues.current?.length > 0) ||
+      (SystemState.taskQueues.next?.length > 0);
+    if (hasPendingTasks) {
+      console.log('[STATE] VIEW ESC: 有动画进行中，忽略');
+      return;
+    }
+    resetCameraDistance();
+  }
+}
+
+/**
+ * 复位视窗距离（保持视线方向，仅重置距离）
+ * ESC 在 VIEW 态时调用，将用户拉回到初始观察距离
+ * 
+ * 原理：滚轮操作沿视线方向移动capital和dir.start，限制基于capital.y在[initialY-range, initialY+range]
+ * ESC复位就是将capital.y恢复到initialY，同时同步移动dir.start
+ */
+function resetCameraDistance() {
+  const win = SystemState.mainWindow;
+  if (!win || !win.direction || !win.capital) return;
+
+  const dir = win.direction;
+  const dirStart = dir.start;
+
+  // 获取初始 Y 值（人眼初始位置）
+  const initialY = SystemState.movementConstraints?.initialY ?? CONFIG.userDistanceFromOrigin;
+  const currentY = win.capital.y;
+
+  // 计算 capital.y 与 initialY 的差值
+  const deltaY = currentY - initialY;
+
+  // 如果已经在初始位置附近，无需移动
+  if (Math.abs(deltaY) < 0.001) {
+    console.log('[STATE] VIEW ESC: 已在初始位置');
+    return;
+  }
+
+  // 计算沿视线方向需要移动的量
+  // 滚轮移动时：capital += dir * speed，且 dir.y 通常为 1（视线指向 +Y）
+  // 要使 capital.y 减少 deltaY，需要沿 -dir 方向移动 deltaY / dir.y 的距离
+  // 但简化处理：直接沿 dir 方向移动，使 capital.y 回到 initialY
+
+  // 方法：计算需要沿 dir 方向移动多少使 capital.y 变为 initialY
+  // capital.y + dir.y * t = initialY  =>  t = (initialY - capital.y) / dir.y = -deltaY / dir.y
+  const moveAmount = -deltaY / (Math.abs(dir.y) > 0.001 ? dir.y : 1);
+
+  // 沿视线方向移动 capital 和 dir.start
+  const moveX = dir.x * moveAmount;
+  const moveY = dir.y * moveAmount;
+  const moveZ = dir.z * moveAmount;
+
+  win.capital.x += moveX;
+  win.capital.y += moveY;
+  win.capital.z += moveZ;
+  dirStart.x += moveX;
+  dirStart.y += moveY;
+  dirStart.z += moveZ;
+
+  // 触发重新渲染
+  SystemState.ifControl = true;
+  console.log(`[STATE] VIEW ESC: capital.y ${currentY.toFixed(1)}cm → ${win.capital.y.toFixed(1)}cm`);
+}
+
+/**
+ * FOCUS态键盘按下处理（提取自原keydown回调的FOCUS分支）
+ */
+function handleFocusKeyDown(e) {
+  if (e.key === 'Escape') {
+    // 检查聚焦物体是否有动画锁（防止重复触发）
+    const obj = SystemState.focusedObject;
+    if (obj && obj.animationLock) {
+      console.log('[STATE] FOCUS ESC: 物体动画进行中，忽略');
+      return;
+    }
+    // 检查是否有任务队列中的动画
+    const hasPendingTasks = (SystemState.taskQueues.current?.length > 0) ||
+      (SystemState.taskQueues.next?.length > 0);
+    if (hasPendingTasks) {
+      console.log('[STATE] FOCUS ESC: 有动画进行中，忽略');
+      return;
+    }
+    exitFocusState();
+  }
+}
+
+/**
+ * EDIT态键盘按下处理（提取自原keydown回调的EDIT分支）
+ */
+function handleEditKeyDown(e) {
+  if (e.key === 'Escape') {
+    exitEditState();
+    return;
+  }
+
+  const obj = SystemState.focusedObject;
+  if (obj) {
+    const key = e.key.toLowerCase();
+    if (['w', 's', 'a', 'd', 'q', 'e'].includes(key)) {
+      const now = performance.now();
+      const cooldownMs = 300;
+      if (!SystemState._lastRotationTime || (now - SystemState._lastRotationTime) > cooldownMs) {
+        SystemState._lastRotationTime = now;
+        OrientationImpl.transition(key, obj, SystemState.mainWindow?.direction, animateRotation);
+      }
+    }
+  }
+}
+
+/**
+ * VIEW态鼠标按下处理
+ */
+function handleViewMouseDown(e) {
+  if (e.button === 0) {
+    const snapped = SystemState.virtualMouse.snappedTo;
+    if (snapped && snapped.isObjectCenter && snapped.ownerObject) {
+      SystemState.draggingObject = snapped.ownerObject;
+      SystemState.dragStartCenter = {
+        x: snapped.ownerObject.center.x,
+        y: snapped.ownerObject.center.y,
+        z: snapped.ownerObject.center.z
+      };
+      console.log('开始拖拽物体');
+    }
+    SystemState.isDragging = true;
+    SystemState.lastMouseX = e.clientX;
+    SystemState.lastMouseY = e.clientY;
+  }
+}
+
+/**
+ * FOCUS态鼠标按下处理
+ */
+function handleFocusMouseDown(e) {
+  if (e.button === 0) {
+    SystemState.isDragging = true;
+    SystemState.lastMouseX = e.clientX;
+    SystemState.lastMouseY = e.clientY;
+  }
+}
+
+/**
+ * EDIT态鼠标按下处理
+ */
+function handleEditMouseDown(e) {
+  if (e.button === 0) {
+    const cp = findControlPointAt(e.clientX, e.clientY);
+
+    if (cp) {
+      SystemState.draggedControlPoint = cp;
+      SystemState.lastMouseX = e.clientX;
+      SystemState.lastMouseY = e.clientY;
+
+      SystemState.longPressTarget = cp;
+      SystemState.longPressTimer = setTimeout(() => {
+        deleteControlPoint(cp);
+        SystemState.longPressTarget = null;
+        SystemState.draggedControlPoint = null;
+      }, 1000);
+    }
+  }
+}
+
+/**
+ * VIEW态鼠标移动处理
+ */
+function handleViewMouseMove(e) {
+  if (SystemState.draggingObject) {
+    const snapped = SystemState.virtualMouse.snappedTo;
+    if (snapped && snapped.isGridPoint) {
+      moveObjectTo(SystemState.draggingObject, snapped.x, snapped.y, snapped.z);
+    }
+  }
+}
+
+/**
+ * EDIT态鼠标移动处理
+ */
+function handleEditMouseMove(e) {
+  if (SystemState.draggedControlPoint) {
+    const dx = e.clientX - SystemState.lastMouseX;
+    const dy = e.clientY - SystemState.lastMouseY;
+
+    if (dx !== 0 || dy !== 0) {
+      if (SystemState.longPressTimer) {
+        clearTimeout(SystemState.longPressTimer);
+        SystemState.longPressTimer = null;
+      }
+
+      moveControlPoint(SystemState.draggedControlPoint, dx, dy);
+
+      SystemState.lastMouseX = e.clientX;
+      SystemState.lastMouseY = e.clientY;
+      SystemState.ifControl = true;
+    }
+  }
+}
+
+/**
+ * VIEW态滚轮处理
+ */
+function handleViewWheel(e) {
+  e.preventDefault();
+  const dir = SystemState.mainWindow.direction;
+  const speed = CONFIG.moveSpeed * 2;
+
+  const currentY = SystemState.mainWindow.capital.y;
+  const initialY = SystemState.movementConstraints?.initialY ?? CONFIG.userDistanceFromOrigin;
+  const range = SystemState.movementConstraints?.range ?? (CONFIG.screenXLengthCm * 0.5);
+  const minY = initialY - range;
+  const maxY = initialY + range;
+
+  let dx = 0, dy = 0, dz = 0;
+  if (e.deltaY < 0) {
+    dx = dir.x * speed; dy = dir.y * speed; dz = dir.z * speed;
+  } else {
+    dx = -dir.x * speed; dy = -dir.y * speed; dz = -dir.z * speed;
+  }
+
+  const nextY = currentY + dy;
+  if (nextY >= minY && nextY <= maxY) {
+    SystemState.mainWindow.capital.x += dx;
+    SystemState.mainWindow.capital.y += dy;
+    SystemState.mainWindow.capital.z += dz;
+    dir.start.x += dx;
+    dir.start.y += dy;
+    dir.start.z += dz;
+  } else {
+    console.log("已达到移动限制");
+  }
+  SystemState.ifControl = true;
+}
+
+/**
+ * FOCUS态滚轮处理
+ */
+function handleFocusWheel(e) {
+  e.preventDefault();
+  const delta = e.deltaY > 0 ? 0.5 : -0.5;
+  SystemState.focusSliceDepth += delta;
+  SystemState.focusVirtualMouseDepth += delta;
+  updateSliceContour();
+  SystemState.ifControl = true;
+}
+
+/**
+ * EDIT态滚轮处理（深度层切换）
+ */
+function handleEditWheel(e) {
+  e.preventDefault();
+  const delta = e.deltaY > 0 ? -1 : 1;
+  SystemState.editDepthLayer += delta;
+  // console.log('切换深度层:', SystemState.editDepthLayer);
+  updateControlPointsDisplay();
+  SystemState.ifControl = true;
+}
+
+/**
+ * EDIT态滚轮处理（切片深度调节）
+ */
+function handleEditWheelSliceDepth(e) {
+  e.preventDefault();
+  const obj = SystemState.focusedObject;
+  if (!obj) return;
+
+  if (typeof SystemState._scrollAccumulator === 'undefined') {
+    SystemState._scrollAccumulator = 0;
+  }
+
+  SystemState._scrollAccumulator += e.deltaY;
+  const TICK_THRESHOLD = 300;
+
+  if (Math.abs(SystemState._scrollAccumulator) >= TICK_THRESHOLD) {
+    const sign = Math.sign(SystemState._scrollAccumulator);
+    const steps = Math.floor(Math.abs(SystemState._scrollAccumulator) / TICK_THRESHOLD);
+
+    const win = SystemState.mainWindow;
+    const dir = win.direction;
+    const planePt = dir.start;
+    const currentDepth = (obj.center.x - planePt.x) * dir.x +
+      (obj.center.y - planePt.y) * dir.y +
+      (obj.center.z - planePt.z) * dir.z;
+
+    const orientationType = obj._currentOrientationState?.type || 'FACE';
+    const maxDepth = ObjectFactoryImpl.LocalGridConfig.getMaxDepthForOrientation(orientationType);
+    const stepSize = ObjectFactoryImpl.LocalGridConfig.getLayerSpacingForOrientation(orientationType);
+
+    console.log(`[Wheel] Type: ${orientationType}, Step: ${stepSize.toFixed(3)}cm`);
+
+    const currentLayer = Math.round(currentDepth / stepSize);
+    const targetLayer = currentLayer + steps * sign;
+    const targetDepth = targetLayer * stepSize;
+
+    if (targetDepth > maxDepth || targetDepth < -maxDepth) {
+      console.log(`Depth limit reached: current=${currentDepth.toFixed(1)}, target=${targetDepth.toFixed(1)}, limit=±${maxDepth.toFixed(1)}`);
+      SystemState._scrollAccumulator = 0;
+      return;
+    }
+
+    SystemState._scrollAccumulator -= sign * steps * TICK_THRESHOLD;
+
+    const delta = targetDepth - currentDepth;
+    const targetX = obj.center.x + dir.x * delta;
+    const targetY = obj.center.y + dir.y * delta;
+    const targetZ = obj.center.z + dir.z * delta;
+
+    animateSliceTransition(obj, targetX, targetY, targetZ, 150);
+
+    console.log(`Slice Scroll: Layer ${currentLayer} -> ${targetLayer}, Depth: ${targetDepth.toFixed(1)}cm`);
+  }
+}
+
+/**
+ * VIEW态点击处理
+ */
+function handleViewClick(event) {
+  const now = Date.now();
+  const snapped = SystemState.virtualMouse.snappedTo;
+  const target = (snapped && snapped.isObjectCenter && snapped.ownerObject)
+    ? snapped.ownerObject
+    : null;
+
+  if (target && target === lastClickTarget && now - lastClickTime < DOUBLE_CLICK_THRESHOLD) {
+    enterFocusState(target);
+  }
+
+  lastClickTime = now;
+  lastClickTarget = target;
+}
+
+/**
+ * FOCUS态点击处理
+ */
+function handleFocusClick(event) {
+  const now = Date.now();
+  if (lastClickTarget === 'focus_click' && now - lastClickTime < DOUBLE_CLICK_THRESHOLD) {
+    enterEditState();
+  }
+  lastClickTime = now;
+  lastClickTarget = 'focus_click';
+}
+
+/**
+ * EDIT态点击处理
+ */
+function handleEditClick(event) {
+  const now = Date.now();
+  if (lastClickTarget === 'edit_empty' && now - lastClickTime < DOUBLE_CLICK_THRESHOLD) {
+    addControlPointAt(event.clientX, event.clientY);
+  }
+
+  const cp = findControlPointAt(event.clientX, event.clientY);
+  lastClickTime = now;
+  lastClickTarget = cp ? 'edit_control' : 'edit_empty';
+}
+
+
+// =====================================================
+// [C] Policies / Profiles (纯配置,不做计算)
+// =====================================================
+// Phase 2: InputMap 系统
+// 职责: "输入→调用"的映射表，不包含任何业务逻辑
+// 原则: 只允许显式函数名调用，禁止数学运算符(工程级护栏)
+// =====================================================
+
+/**
+ * InputMaps - 输入映射系统(Phase 2)
+ * 
+ * 规则:
+ * 1. 方法内禁止状态判断
+ * 2. 只允许调用既有函数
+ * 3. 不允许数学运算符（工程级护栏）
+ * 4. 不允许合并相似函数（即使名字相同）
+ */
+const InputMaps = {
+  VIEW: {
+    onContinuousInput() {
+      handleViewContinuousInput();
+    },
+
+    onKeyDown(e) {
+      handleViewKeyDown(e);
+    },
+
+    onMouseDown(e) {
+      handleViewMouseDown(e);
+    },
+
+    onMouseMove(e) {
+      handleViewMouseMove(e);
+    },
+
+    onWheel(e) {
+      handleViewWheel(e);
+    },
+
+    onClick(e) {
+      handleViewClick(e);
+    }
+  },
+
+  FOCUS: {
+    onContinuousInput() {
+      handleFocusEdgeRotation();
+    },
+
+    onKeyDown(e) {
+      handleFocusKeyDown(e);
+    },
+
+    onMouseDown(e) {
+      handleFocusMouseDown(e);
+    },
+
+    onMouseMove(e) {
+      // FOCUS态不需要mousemove处理
+    },
+
+    onWheel(e) {
+      handleFocusWheel(e);
+    },
+
+    onClick(e) {
+      handleFocusClick(e);
+    }
+  },
+
+  FOCUS_ENTERING: {
+    onContinuousInput() {
+      handleFocusEnteringContinuousInput();
+    },
+
+    onKeyDown(e) { },
+    onMouseDown(e) { },
+    onMouseMove(e) { },
+    onWheel(e) { },
+    onClick(e) { }
+  },
+
+  EDIT: {
+    onContinuousInput() {
+      handleEditContinuousInput();
+    },
+
+    onKeyDown(e) {
+      handleEditKeyDown(e);
+    },
+
+    onMouseDown(e) {
+      handleEditMouseDown(e);
+    },
+
+    onMouseMove(e) {
+      handleEditMouseMove(e);
+    },
+
+    onWheel(e) {
+      handleEditWheel(e);
+    },
+
+    onClick(e) {
+      handleEditClick(e);
+    },
+
+    onWheelSliceDepth(e) {
+      handleEditWheelSliceDepth(e);
+    }
+  }
+};
+
+// =====================================================
+// [D] Interaction Intent Builders
+// [E] Geometry & Edit Operations
+// [F] Animation / Task Queue
+// =====================================================
+// [注意: D/E/F区块函数分散在文件中,待后续整理]
+
+// =====================================================
+// [D] Interaction Intent Builders
+// [E] Geometry & Edit Operations
+// [F] Animation / Task Queue
+// =====================================================
+// [注意: D/E/F区块函数分散在文件中,待后续整理]
+
 function estimateNormals() {
   console.log("开始估算法向量...");
   const radius = CONFIG.normalEstimationRadius;
@@ -952,6 +1566,14 @@ function renderScreenPoints(pixelData, width, height) {
  * @param {number} mouseX - 鼠标屏幕 X 坐标
  * @param {number} mouseY - 鼠标屏幕 Y 坐标
  */
+
+// =====================================================
+// [G] Window / Screen Glue
+// =====================================================
+// 说明: 只调用window,不自己算screen坐标
+// 要求: 所有虚拟鼠标使用统一走window.virtualCursor
+// =====================================================
+
 function updateVirtualMouse(mouseX, mouseY) {
   const vm = SystemState.virtualMouse;
   if (!vm.enabled) return;
@@ -966,6 +1588,9 @@ function updateVirtualMouse(mouseX, mouseY) {
 
   // 从鼠标位置向外扩展搜索整个grid
   const snapped = findNearestAttractableExpanding(mouseX, mouseY);
+
+  // 阶段1新增: 更新Window的virtualCursor缓存(统一出口)
+  SystemState.mainWindow.virtualCursor.setSnappedPoint(snapped);
 
   let centerX = mouseX;
   let centerY = mouseY;
@@ -1065,6 +1690,40 @@ function updateVirtualMouse(mouseX, mouseY) {
 }
 
 /**
+ * 检查世界格网点是否被其他物体占用
+ * @param {number} gx - grid X 索引
+ * @param {number} gy - grid Y 索引
+ * @param {Object} gridPoint - 世界格网点
+ * @param {Object} draggingObject - 正在拖动的物体（可为null）
+ * @returns {boolean} true表示已被占用
+ */
+function isGridPointOccupied(gx, gy, gridPoint, draggingObject) {
+  const grid = SystemState.mainWindow.grid;
+  const cell = grid[gx][gy];
+
+  // 遍历该cell中的所有点，检查是否有其他物体的中心点
+  for (const p of cell) {
+    // 检查是否是其他物体的中心点
+    if (p.isObjectCenter &&
+      p.ownerObject &&
+      p.ownerObject !== draggingObject) {
+
+      // 检查该物心是否与格点坐标重合（容差范围内）
+      const dx = Math.abs(p.x - gridPoint.x);
+      const dy = Math.abs(p.y - gridPoint.y);
+      const dz = Math.abs(p.z - gridPoint.z);
+      const TOLERANCE = 0.1; // 容差：0.1cm（世界坐标）
+
+      if (dx < TOLERANCE && dy < TOLERANCE && dz < TOLERANCE) {
+        return true;  // 格点被占用
+      }
+    }
+  }
+
+  return false;  // 格点空闲
+}
+
+/**
  * 从鼠标位置向外扩展搜索最近的可吸附点
  * 逐层扩展搜索grid，一旦在某层找到可吸附点就返回最近的
  */
@@ -1118,6 +1777,14 @@ function findNearestAttractableExpanding(mouseX, mouseY) {
             if (p.tag !== 'LOCAL_GRID') continue;
 
             // 2. 距离检测已移至 updateLocalGrid 控制 p.isAttractable
+          }
+
+          // Phase 2新增：VIEW态拖动时，跳过已被其他物体占用的格点
+          // 这样可以防止拖动时"脱手"（虚拟鼠标吸附到物心导致无法移动）
+          if (SystemState.draggingObject && p.isGridPoint) {
+            if (isGridPointOccupied(gx, gy, p, SystemState.draggingObject)) {
+              continue;  // 跳过已被占用的格点，寻找下一个空闲格点
+            }
           }
 
           const dx = p.xM - mouseX;
@@ -1311,69 +1978,19 @@ function handleFocusEdgeRotation() {
   }
 }
 
+// =====================================================
+// Phase 2: 输入分发器
+// =====================================================
+
+/**
+ * 连续输入处理分发器(Phase 2:纯转发)
+ * 禁止任何状态判断或业务逻辑
+ */
 function handleInput() {
-  // ========== FOCUS 态边缘旋转处理 ==========
-  if (SystemState.interactionState === 'FOCUS') {
-    handleFocusEdgeRotation();
-    return;
+  const map = InputMaps[SystemState.interactionState];
+  if (map && map.onContinuousInput) {
+    map.onContinuousInput();
   }
-
-  // ========== FOCUS_ENTERING 态不处理输入 ==========
-  if (SystemState.interactionState === 'FOCUS_ENTERING') return;
-
-  // ========== EDIT 态不处理 VIEW/FOCUS 态的连续输入 (使用独立事件处理) ==========
-  if (SystemState.interactionState === 'EDIT') return;
-  // =========================================
-
-  const keys = SystemState.keys;
-  const rotState = SystemState.velocityState.rotation;
-  const moveState = SystemState.velocityState.moveForward;
-
-  // ========== 整饬修改：对数速度 - 设置目标和倍率 ==========
-  // 旋转：Z/X/C 左转（速度递减），B/N/M 右转（速度递增）
-  rotState.target = 0;
-  rotState.factor = 0;
-
-  if (keys["z"]) { rotState.target = CONFIG.rotationSpeed; rotState.factor = 1.0; }
-  else if (keys["x"]) { rotState.target = CONFIG.rotationSpeed; rotState.factor = 0.5; }
-  else if (keys["c"]) { rotState.target = CONFIG.rotationSpeed; rotState.factor = 0.25; }
-  else if (keys["b"]) { rotState.target = -CONFIG.rotationSpeed; rotState.factor = 0.25; }
-  else if (keys["n"]) { rotState.target = -CONFIG.rotationSpeed; rotState.factor = 0.5; }
-  else if (keys["m"]) { rotState.target = -CONFIG.rotationSpeed; rotState.factor = 1.0; }
-
-  // 鼠标边缘持续旋转
-  if (SystemState.mouseEdge === -1) {
-    rotState.target = CONFIG.rotationSpeed;
-    rotState.factor = 0.25;
-  } else if (SystemState.mouseEdge === 1) {
-    rotState.target = -CONFIG.rotationSpeed;
-    rotState.factor = 0.25;
-  }
-
-  // 前后移动：FG 前进，V 后退
-  moveState.target = 0;
-  moveState.factor = 0;
-
-  if (keys["f"] || keys["g"]) { moveState.target = CONFIG.moveSpeed; moveState.factor = 1.0; }
-  else if (keys["v"]) { moveState.target = -CONFIG.moveSpeed; moveState.factor = 1.0; }
-  // ===========================================================
-
-  // 方向键控制光源
-  if (keys["arrowleft"]) SystemState.lightAngle -= CONFIG.rotationSpeed;
-  if (keys["arrowright"]) SystemState.lightAngle += CONFIG.rotationSpeed;
-  if (keys["arrowup"])
-    SystemState.lightElevation = Math.min(
-      CONFIG.maxElevation,
-      SystemState.lightElevation + CONFIG.rotationSpeed,
-    );
-  if (keys["arrowdown"])
-    SystemState.lightElevation = Math.max(
-      CONFIG.minElevation,
-      SystemState.lightElevation - CONFIG.rotationSpeed,
-    );
-
-  // 摄像头控制逻辑（如果启用）
-  // 摄像头的更新在 processCamera 中进行
 }
 
 /**
@@ -1424,171 +2041,67 @@ function applyVelocities(dt) {
 }
 
 // ========================
-// 12. 事件监听器设置
+// 12. 事件监听器设置(Phase 2:纯转发)
 // ========================
 function setupEventListeners() {
+  // =====================================================
+  // Phase 2: 事件回调纯转发
+  // 规则: 禁止任何状态判断，只做转发
+  // 禁止: VIEW / FOCUS / EDIT 出现在此函数中
+  // =====================================================
+
   // 键盘事件
   window.addEventListener("keydown", (e) => {
     SystemState.keys[e.key.toLowerCase()] = true;
-    // 示例：按 'c' 键切换摄像头控制
+
+    // 摄像头控制切换(全局功能，不分状态)
     if (e.key.toLowerCase() === "p") {
       CONFIG.cameraControl.enabled = !CONFIG.cameraControl.enabled;
       if (CONFIG.cameraControl.enabled) {
-        initCamera(); // 尝试重新初始化
+        initCamera();
       }
       SystemState.debugDiv.textContent = `摄像头控制: ${CONFIG.cameraControl.enabled ? "开启" : "关闭"}`;
-      console.log(
-        `摄像头控制: ${CONFIG.cameraControl.enabled ? "开启" : "关闭"}`,
-      );
-    }
-    // 阶段15修改：ESC 键分层退出
-    if (e.key === 'Escape') {
-      if (SystemState.interactionState === 'EDIT') {
-        exitEditState();  // EDIT -> FOCUS
-      } else if (SystemState.interactionState === 'FOCUS') {
-        exitFocusState();  // FOCUS -> VIEW
-      }
+      console.log(`摄像头控制: ${CONFIG.cameraControl.enabled ? "开启" : "关闭"}`);
     }
 
-    // 阶段16新增：EDIT 态 WASD/QE 离散旋转
-    if (SystemState.interactionState === 'EDIT') {
-      const obj = SystemState.focusedObject;
-      if (obj) {
-        const key = e.key.toLowerCase();
-        if (['w', 's', 'a', 'd', 'q', 'e'].includes(key)) {
-          // 添加旋转冷却，防止按住时连续快速旋转
-          const now = performance.now();
-          const cooldownMs = 300; // 300ms 冷却时间
-          if (!SystemState._lastRotationTime || (now - SystemState._lastRotationTime) > cooldownMs) {
-            SystemState._lastRotationTime = now;
-            OrientationImpl.transition(key, obj, SystemState.mainWindow?.direction, animateRotation);
-          }
-        }
-      }
+    // 转发到InputMap
+    const map = InputMaps[SystemState.interactionState];
+    if (map && map.onKeyDown) {
+      map.onKeyDown(e);
     }
   });
+
   window.addEventListener("keyup", (e) => {
     SystemState.keys[e.key.toLowerCase()] = false;
   });
 
-  // 阶段10新增：click 事件用于双击检测
-  SystemState.canvas.addEventListener("click", onMouseClick);
+  // click事件
+  SystemState.canvas.addEventListener("click", (e) => {
+    const map = InputMaps[SystemState.interactionState];
+    if (map && map.onClick) {
+      map.onClick(e);
+    }
+  });
 
-  // 阶段16新增：EDIT 态滚轮切片深度调节
+  // wheel事件 - EDIT态有两个wheel监听器，第一个处理切片深度
   SystemState.canvas.addEventListener("wheel", (e) => {
-    if (SystemState.interactionState === 'EDIT') {
-      e.preventDefault();
-      const obj = SystemState.focusedObject;
-      if (!obj) return;
-
-      // 初始化滚动累加器
-      if (typeof SystemState._scrollAccumulator === 'undefined') {
-        SystemState._scrollAccumulator = 0;
-      }
-
-      // 累加 deltaY
-      SystemState._scrollAccumulator += e.deltaY;
-
-      // 设定阈值：通常一格滚轮 deltaY 为 100 或 125
-      // "滚三格滚轮" -> 约 300
-      const TICK_THRESHOLD = 300;
-
-      if (Math.abs(SystemState._scrollAccumulator) >= TICK_THRESHOLD) {
-        // 触发切片移动
-        const sign = Math.sign(SystemState._scrollAccumulator);
-        const steps = Math.floor(Math.abs(SystemState._scrollAccumulator) / TICK_THRESHOLD);
-
-        // Phase 16b: 深度限制检查
-        // 计算当前物体中心到屏幕平面的距离
-        const win = SystemState.mainWindow;
-        const dir = win.direction;
-        const planePt = dir.start;
-        const currentDepth = (obj.center.x - planePt.x) * dir.x +
-          (obj.center.y - planePt.y) * dir.y +
-          (obj.center.z - planePt.z) * dir.z;
-
-        // 使用配置值，根据当前姿态类型确定最大深度和层间距
-        const orientationType = obj._currentOrientationState?.type || 'FACE';
-        const maxDepth = ObjectFactoryImpl.LocalGridConfig.getMaxDepthForOrientation(orientationType);
-        const stepSize = ObjectFactoryImpl.LocalGridConfig.getLayerSpacingForOrientation(orientationType);
-
-        console.log(`[Wheel] Type: ${orientationType}, Step: ${stepSize.toFixed(3)}cm`);
-
-        // 计算目标深度 (严格对齐到层，避免误差积累)
-        // 先计算当前最近层，再加上步进
-        const currentLayer = Math.round(currentDepth / stepSize);
-        const targetLayer = currentLayer + steps * sign;
-        const targetDepth = targetLayer * stepSize;
-
-        // 限制深度在 [-maxDepth, +maxDepth] 范围内
-        if (targetDepth > maxDepth || targetDepth < -maxDepth) {
-          console.log(`Depth limit reached: current=${currentDepth.toFixed(1)}, target=${targetDepth.toFixed(1)}, limit=±${maxDepth.toFixed(1)}`);
-          SystemState._scrollAccumulator = 0;
-          return;
-        }
-
-        // 消耗累加器
-        SystemState._scrollAccumulator -= sign * steps * TICK_THRESHOLD;
-
-        // Phase 16b: 使用动画移动到严格对齐的目标位置
-        const delta = targetDepth - currentDepth;
-        const targetX = obj.center.x + dir.x * delta;
-        const targetY = obj.center.y + dir.y * delta;
-        const targetZ = obj.center.z + dir.z * delta;
-
-        animateSliceTransition(obj, targetX, targetY, targetZ, 150); // 150ms 动画
-
-        console.log(`Slice Scroll: Layer ${currentLayer} -> ${targetLayer}, Depth: ${targetDepth.toFixed(1)}cm`);
-      }
+    const map = InputMaps[SystemState.interactionState];
+    if (map && map.onWheelSliceDepth) {
+      map.onWheelSliceDepth(e);
     }
   }, { passive: false });
 
-  // 鼠标事件
+  // mousedown事件
   SystemState.canvas.addEventListener("mousedown", (e) => {
-    // 阶段16新增：EDIT 态控制点交互
-    if (SystemState.interactionState === 'EDIT' && e.button === 0) {
-      const cp = findControlPointAt(e.clientX, e.clientY);
-
-      if (cp) {
-        // 开始拖动
-        SystemState.draggedControlPoint = cp;
-        SystemState.lastMouseX = e.clientX;
-        SystemState.lastMouseY = e.clientY;
-
-        // 启动长按计时器
-        SystemState.longPressTarget = cp;
-        SystemState.longPressTimer = setTimeout(() => {
-          deleteControlPoint(cp);
-          SystemState.longPressTarget = null;
-          SystemState.draggedControlPoint = null;
-        }, 1000);  // 1秒长按
-      }
-    }
-    // FOCUS 态：任意左键按下开始拖动旋转
-    else if (SystemState.interactionState === 'FOCUS' && e.button === 0) {
-      SystemState.isDragging = true;
-      SystemState.lastMouseX = e.clientX;
-      SystemState.lastMouseY = e.clientY;
-    } else if (SystemState.interactionState === 'VIEW' && e.button === 0) {
-      // VIEW 态：检测虚拟鼠标是否吸附在物心
-      const snapped = SystemState.virtualMouse.snappedTo;
-      if (snapped && snapped.isObjectCenter && snapped.ownerObject) {
-        // 开始拖拽物体
-        SystemState.draggingObject = snapped.ownerObject;
-        SystemState.dragStartCenter = {
-          x: snapped.ownerObject.center.x,
-          y: snapped.ownerObject.center.y,
-          z: snapped.ownerObject.center.z
-        };
-        console.log('开始拖拽物体');
-      }
-      SystemState.isDragging = true;
-      SystemState.lastMouseX = e.clientX;
-      SystemState.lastMouseY = e.clientY;
+    const map = InputMaps[SystemState.interactionState];
+    if (map && map.onMouseDown) {
+      map.onMouseDown(e);
     }
   });
+
+  // mouseup事件
   window.addEventListener("mouseup", () => {
-    // 阶段16新增：EDIT 态控制点释放
+    // EDIT态控制点释放（无状态判断）
     if (SystemState.draggedControlPoint) {
       SystemState.draggedControlPoint = null;
       updateControlPointsDisplay();
@@ -1600,7 +2113,7 @@ function setupEventListeners() {
     }
     SystemState.longPressTarget = null;
 
-    // 阶段13：处理蓄力释放
+    // 蓄力释放（无状态判断）
     if (SystemState.isCharging) {
       const chargeDuration = Date.now() - SystemState.chargeStartTime;
       const impulse = calculateImpulse(chargeDuration);
@@ -1615,11 +2128,10 @@ function setupEventListeners() {
       SystemState.chargeHitPoint = null;
     }
 
-    // VIEW 态：释放拖拽物体
+    // VIEW态拖拽物体释放（无状态判断）
     if (SystemState.draggingObject) {
       const snapped = SystemState.virtualMouse.snappedTo;
       if (snapped && snapped.isGridPoint) {
-        // 吸附到格点
         moveObjectTo(SystemState.draggingObject, snapped.x, snapped.y, snapped.z);
         console.log('物体放置到格点:', snapped.x, snapped.y, snapped.z);
       }
@@ -1630,120 +2142,42 @@ function setupEventListeners() {
     SystemState.isDragging = false;
   });
 
-  // 阶段10新增：双击检测
-  SystemState.canvas.addEventListener('click', onMouseClick);
+  // mousemove事件
   SystemState.canvas.addEventListener("mousemove", (e) => {
-    // 阶段16新增：EDIT 态控制点拖动
-    if (SystemState.interactionState === 'EDIT' && SystemState.draggedControlPoint) {
-      const dx = e.clientX - SystemState.lastMouseX;
-      const dy = e.clientY - SystemState.lastMouseY;
-
-      if (dx !== 0 || dy !== 0) {
-        // 取消长按
-        if (SystemState.longPressTimer) {
-          clearTimeout(SystemState.longPressTimer);
-          SystemState.longPressTimer = null;
-        }
-
-        // 移动控制点
-        moveControlPoint(SystemState.draggedControlPoint, dx, dy);
-
-        SystemState.lastMouseX = e.clientX;
-        SystemState.lastMouseY = e.clientY;
-        SystemState.ifControl = true;
-      }
+    // 转发到InputMap
+    const map = InputMaps[SystemState.interactionState];
+    if (map && map.onMouseMove) {
+      map.onMouseMove(e);
     }
-    // VIEW 态：物体跟随虚拟鼠标拖拽
-    if (SystemState.interactionState === 'VIEW' && SystemState.draggingObject) {
-      const snapped = SystemState.virtualMouse.snappedTo;
-      if (snapped && snapped.isGridPoint) {
-        // 物体跟随到格点
-        moveObjectTo(SystemState.draggingObject, snapped.x, snapped.y, snapped.z);
-      }
-    }
-    // FOCUS 态：不再使用拖动旋转，改为边缘控制（在 handleInput 中处理）
 
-    // 阶段1新增：鼠标边缘状态更新
+    // 鼠标边缘状态更新（无状态判断）
     const screenWidth = window.innerWidth;
 
     if (e.clientX <= 0) {
-      // 鼠标在最左边缘（0像素）
       SystemState.mouseEdge = -1;
     } else if (e.clientX >= screenWidth - 1) {
-      // 鼠标在最右边缘
       SystemState.mouseEdge = 1;
     } else {
-      // 鼠标不在边缘
       SystemState.mouseEdge = 0;
     }
 
-    // 更新虚拟鼠标（始终吸附最近可吸附点）
+    // 更新虚拟鼠标（无状态判断）
     if (SystemState.virtualMouse.enabled) {
       updateVirtualMouse(e.clientX, e.clientY);
       SystemState.ifControl = true;
     }
 
-    // 始终更新鼠标位置，用于渲染时的虚拟鼠标更新
+    // 始终更新鼠标位置
     SystemState.lastMouseX = e.clientX;
     SystemState.lastMouseY = e.clientY;
   });
 
-  // 滚轮事件：前进/后退 或 FOCUS/EDIT 态调整截面深度
+  // 第二个wheel事件(FOCUS和VIEW态)
   SystemState.canvas.addEventListener("wheel", (e) => {
-    e.preventDefault();
-
-    // 阶段16修改：EDIT 态深度层切换
-    if (SystemState.interactionState === 'EDIT') {
-      const delta = e.deltaY > 0 ? -1 : 1;
-      SystemState.editDepthLayer += delta;
-      console.log('切换深度层:', SystemState.editDepthLayer);
-      updateControlPointsDisplay();
-      SystemState.ifControl = true;
-      return;
+    const map = InputMaps[SystemState.interactionState];
+    if (map && map.onWheel) {
+      map.onWheel(e);
     }
-    // FOCUS 态：滚轮同时更新截面深度和虚拟鼠标深度
-    else if (SystemState.interactionState === 'FOCUS') {
-      const delta = e.deltaY > 0 ? 0.5 : -0.5;
-      SystemState.focusSliceDepth += delta;
-      SystemState.focusVirtualMouseDepth += delta;  // 同步更新虚拟鼠标深度
-      updateSliceContour();
-      SystemState.ifControl = true;
-      return;  // 不执行 VIEW 态的移动逻辑
-    }
-
-    const dir = SystemState.mainWindow.direction;
-    const speed = CONFIG.moveSpeed * 2;  // 滚轮速度稍快
-
-    // 移动限制逻辑
-    const currentY = SystemState.mainWindow.capital.y;
-    const initialY = SystemState.movementConstraints?.initialY ?? CONFIG.userDistanceFromOrigin;
-    const range = SystemState.movementConstraints?.range ?? (CONFIG.screenXLengthCm * 0.5);
-    const minY = initialY - range;
-    const maxY = initialY + range;
-
-    // 预计算移动增量
-    let dx = 0, dy = 0, dz = 0;
-    if (e.deltaY < 0) {
-      // 前进
-      dx = dir.x * speed; dy = dir.y * speed; dz = dir.z * speed;
-    } else {
-      // 后退
-      dx = -dir.x * speed; dy = -dir.y * speed; dz = -dir.z * speed;
-    }
-
-    // 检查 Y 轴限制 (假设主要沿 Y 轴移动)
-    const nextY = currentY + dy;
-    if (nextY >= minY && nextY <= maxY) {
-      SystemState.mainWindow.capital.x += dx;
-      SystemState.mainWindow.capital.y += dy;
-      SystemState.mainWindow.capital.z += dz;
-      dir.start.x += dx;
-      dir.start.y += dy;
-      dir.start.z += dz;
-    } else {
-      console.log("已达到移动限制");
-    }
-    SystemState.ifControl = true;
   });
 
   // 窗口大小变化事件
@@ -1775,6 +2209,7 @@ function setupEventListeners() {
     // estimateNormals();
   });
 }
+
 
 // ========================
 // 13. 调整画布大小
@@ -1948,13 +2383,54 @@ function updateVisibleReflection() {
 // ========================
 
 /**
+ * [DEBUG] 测量物体半径（用于调试尺寸变化问题）
+ * 返回 displayPoints[0] 到 center 的距离作为代表性尺寸
+ * @param {Object} obj - 物体对象
+ * @returns {number} 代表性半径（厘米）
+ */
+function measureObjectRadius(obj) {
+  if (!obj || !obj.center) return 0;
+  const points = obj.displayPoints?.length > 0 ? obj.displayPoints : obj.constructionPoints;
+  if (!points || points.length === 0) return 0;
+
+  // 取第一个点到中心的距离作为代表性尺寸
+  const p = points[0];
+  const dx = p.x - obj.center.x;
+  const dy = p.y - obj.center.y;
+  const dz = p.z - obj.center.z;
+  return Math.sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+/**
+ * [DEBUG] 追踪物体第一个点的坐标变化（用于调试问题2）
+ * 输出：points[0]的绝对坐标、center坐标、相对距离（半径）
+ * @param {Object} obj - 物体对象
+ * @param {string} label - 标签（标识调用点）
+ */
+function tracePoint(obj, label) {
+  if (!obj || !obj.center) return;
+  const points = obj.displayPoints?.length > 0 ? obj.displayPoints : obj.constructionPoints;
+  if (!points || points.length === 0) return;
+
+  const p = points[0];
+  const c = obj.center;
+  const dx = p.x - c.x;
+  const dy = p.y - c.y;
+  const dz = p.z - c.z;
+  const r = Math.sqrt(dx * dx + dy * dy + dz * dz);
+
+  console.log(`[TRACE ${label}] P0=(${p.x.toFixed(2)}, ${p.y.toFixed(2)}, ${p.z.toFixed(2)}) ` +
+    `C=(${c.x.toFixed(2)}, ${c.y.toFixed(2)}, ${c.z.toFixed(2)}) R=${r.toFixed(3)}cm`);
+}
+
+/**
  * 进入 VIEW 态
  * VIEW 态：观察模式，可旋转视角和移动位置
  */
 function enterViewState() {
   SystemState.interactionState = 'VIEW';
   SystemState.focusedObject = null;
-  console.log('进入 VIEW 态');
+
 
   // 恢复所有物体可见度
   for (const obj of SystemState.objects) {
@@ -1980,7 +2456,10 @@ function enterFocusState(obj) {
   // 使用中间状态，动画完成后才正式进入 FOCUS
   SystemState.interactionState = 'FOCUS_ENTERING';
   SystemState.focusedObject = obj;
-  console.log('开始进入 FOCUS 态，聚焦物体:', obj.metadata?.name || 'Untitled');
+  // [DEBUG] 记录进入FOCUS前的物体尺寸
+  const radiusBefore = measureObjectRadius(obj);
+  console.log(`[STATE] VIEW→FOCUS: 物体=${obj.metadata?.name || 'Obj'}, 半径=${radiusBefore.toFixed(3)}cm, center.y=${obj.center.y.toFixed(2)}`);
+  tracePoint(obj, 'VIEW→FOCUS');
 
   // 0. 清除截面轮廓（避免显示残留的大圈）
   SystemState.screenPoints = SystemState.screenPoints.filter(
@@ -2128,7 +2607,10 @@ function enterFocusState(obj) {
     obj._lastRotProgress = null;  // 清理旋转进度
     // 动画完成后正式进入 FOCUS 态
     SystemState.interactionState = 'FOCUS';
-    console.log('FOCUS 态动画完成，正式进入 FOCUS');
+    // [DEBUG] 记录进入FOCUS后的物体尺寸
+    const radiusAfter = measureObjectRadius(obj);
+    console.log(`[STATE] FOCUS entered: 半径=${radiusAfter.toFixed(3)}cm, center.y=${obj.center.y.toFixed(2)}`);
+    tracePoint(obj, 'FOCUS-entered');
   };
 
   SystemState.taskQueues.submit(moveRotateTask);
@@ -2333,13 +2815,46 @@ function exitFocusState() {
     const angle = Math.acos(Math.max(-1, Math.min(1, (tr - 1) / 2)));
 
     let axis = { x: 0, y: 0, z: 1 };
-    if (Math.abs(angle) > 0.001) {
+
+    // 如果角度接近 180度 (trace 接近 -1)，使用鲁棒算法提取轴
+    if (Math.abs(angle - Math.PI) < 0.1) {
+      // 180度情况：R 是对称的，且对角线项与轴分量平方有关
+      // R_ii = 2 * axis_i^2 - 1  =>  axis_i = sqrt((R_ii + 1) / 2)
+      // 需要确定符号。
+      // 为简化，找到最大的对角元素以确保精度
+      if (R[0][0] > R[1][1] && R[0][0] > R[2][2]) {
+        const S = Math.sqrt(1.0 + R[0][0] - R[1][1] - R[2][2]) * 2;
+        axis.x = 0.25 * S;
+        axis.y = (R[0][1] + R[1][0]) / S;
+        axis.z = (R[0][2] + R[2][0]) / S;
+      } else if (R[1][1] > R[2][2]) {
+        const S = Math.sqrt(1.0 + R[1][1] - R[0][0] - R[2][2]) * 2;
+        axis.x = (R[0][1] + R[1][0]) / S;
+        axis.y = 0.25 * S;
+        axis.z = (R[1][2] + R[2][1]) / S;
+      } else {
+        const S = Math.sqrt(1.0 + R[2][2] - R[0][0] - R[1][1]) * 2;
+        axis.x = (R[0][2] + R[2][0]) / S;
+        axis.y = (R[1][2] + R[2][1]) / S;
+        axis.z = 0.25 * S;
+      }
+      // 归一化（虽然理论上已经是归一化的）
+      const len = Math.sqrt(axis.x ** 2 + axis.y ** 2 + axis.z ** 2);
+      if (len > 0.001) {
+        axis.x /= len; axis.y /= len; axis.z /= len;
+      }
+    } else if (Math.abs(angle) > 0.001) {
+      // 常规情况：使用偏对称部分
       axis.x = R[2][1] - R[1][2];
       axis.y = R[0][2] - R[2][0];
       axis.z = R[1][0] - R[0][1];
       const len = Math.sqrt(axis.x ** 2 + axis.y ** 2 + axis.z ** 2);
       if (len > 0.001) {
         axis.x /= len; axis.y /= len; axis.z /= len;
+      } else {
+        // [修复] 如果 calculated axis 长度过小但 angle 此时既不为0也不接近180
+        // 这通常不应发生，但作为防守：回退到默认轴
+        axis = { x: 0, y: 0, z: 1 };
       }
     }
     return { axis, angle };
@@ -2390,17 +2905,23 @@ function exitFocusState() {
       };
     },
     apply: (targetObj, value) => {
+      // [DEBUG] 动画帧追踪 - 开始
+      const frameStart = value.progress < 0.1 || value.progress > 0.9;
+      if (frameStart) tracePoint(targetObj, `anim-${(value.progress * 100).toFixed(0)}%-start`);
+
       // 更新位置
       if (targetObj.center) {
         const dx = value.position.x - (targetObj._lastAnimPos?.x ?? fromPos.x);
         const dy = value.position.y - (targetObj._lastAnimPos?.y ?? fromPos.y);
         const dz = value.position.z - (targetObj._lastAnimPos?.z ?? fromPos.z);
 
-        const allPoints = [
+        // 修复：使用 Set 去重，避免同一 Point 对象被移动多次
+        // （constructionPoints 可能与 displayPoints 共享相同的 Point 引用）
+        const pointSet = new Set([
           ...(targetObj.displayPoints || []),
           ...(targetObj.constructionPoints || [])
-        ];
-        for (const p of allPoints) {
+        ]);
+        for (const p of pointSet) {
           p.x += dx;
           p.y += dy;
           p.z += dz;
@@ -2431,6 +2952,9 @@ function exitFocusState() {
         targetObj._lastRotProgress = value.progress;
       }
 
+      // [DEBUG] 动画帧追踪 - 结束
+      if (frameStart) tracePoint(targetObj, `anim-${(value.progress * 100).toFixed(0)}%-end`);
+
       targetObj._lastAnimPos = { ...value.position };
     }
   });
@@ -2458,7 +2982,10 @@ function exitFocusState() {
     // 5. 切换到 VIEW 态
     SystemState.interactionState = 'VIEW';
     SystemState.focusedObject = null;
-    console.log('返回 VIEW 态');
+    // [DEBUG] 记录返回VIEW后的物体尺寸
+    const radiusFinal = measureObjectRadius(obj);
+    console.log(`[STATE] →VIEW: 半径=${radiusFinal.toFixed(3)}cm, center.y=${obj.center.y.toFixed(2)}`);
+    tracePoint(obj, '→VIEW');
 
     // 触发渲染
     SystemState.ifControl = true;
@@ -2794,48 +3321,13 @@ let lastClickTarget = null;
 const DOUBLE_CLICK_THRESHOLD = 300; // 毫秒
 
 /**
- * 处理鼠标点击事件（阶段15完善）
- * VIEW 态：双击物心进入 FOCUS 态
- * FOCUS 态：双击物体表面进入 EDIT 态
+ * 双击检测处理(Phase 2:纯转发)
+ * 禁止任何状态判断
  */
 function onMouseClick(event) {
-  const now = Date.now();
-
-  // VIEW 态：双击物心检测（仅当虚拟鼠标吸附到物心时触发）
-  if (SystemState.interactionState === 'VIEW') {
-    // 检查虚拟鼠标当前吸附的点是否为物心
-    const snapped = SystemState.virtualMouse.snappedTo;
-    const target = (snapped && snapped.isObjectCenter && snapped.ownerObject)
-      ? snapped.ownerObject
-      : null;
-
-    if (target && target === lastClickTarget && now - lastClickTime < DOUBLE_CLICK_THRESHOLD) {
-      enterFocusState(target);
-    }
-
-    lastClickTime = now;
-    lastClickTarget = target;
-  }
-  // FOCUS 态：双击任意位置进入 EDIT 态（阶段15精简）
-  else if (SystemState.interactionState === 'FOCUS') {
-    // 整饬修改：不再需要点击物体表面，双击任意位置即可
-    if (lastClickTarget === 'focus_click' && now - lastClickTime < DOUBLE_CLICK_THRESHOLD) {
-      enterEditState();
-    }
-
-    lastClickTime = now;
-    lastClickTarget = 'focus_click';
-  }
-  // EDIT 态：双击空白处新增控制点（阶段16新增）
-  else if (SystemState.interactionState === 'EDIT') {
-    // 双击空白处新增控制点
-    if (lastClickTarget === 'edit_empty' && now - lastClickTime < DOUBLE_CLICK_THRESHOLD) {
-      addControlPointAt(event.clientX, event.clientY);
-    }
-
-    const cp = findControlPointAt(event.clientX, event.clientY);
-    lastClickTime = now;
-    lastClickTarget = cp ? 'edit_control' : 'edit_empty';
+  const map = InputMaps[SystemState.interactionState];
+  if (map && map.onClick) {
+    map.onClick(event);
   }
 }
 
@@ -3121,8 +3613,9 @@ function snapToNearestLayer(obj) {
 // OrientationUtils 和 snapToNearestOrientation 已迁移至 OrientationImpl.js
 
 /**
- * 进入 EDIT 态（阶段15/16完善）
+ * 进入 EDIT 态（阶段15/16完善，动画版）
  * EDIT 态：编辑模式，可操作控制点
+ * 优化：姿态吸附使用动画过渡，格网在动画完成后创建
  */
 function enterEditState() {
   if (SystemState.interactionState !== 'FOCUS') {
@@ -3136,28 +3629,190 @@ function enterEditState() {
     return;
   }
 
-  SystemState.interactionState = 'EDIT';
-  console.log('进入 EDIT 态');
+  // 使用中间状态表示正在进入EDIT
+  SystemState.interactionState = 'EDIT_ENTERING';
+
+  // [DEBUG] 记录进入EDIT时的物体尺寸
+  const radiusEdit = measureObjectRadius(obj);
+  console.log(`[STATE] FOCUS→EDIT: 半径=${radiusEdit.toFixed(3)}cm, center.y=${obj.center.y.toFixed(2)}`);
+  tracePoint(obj, 'FOCUS→EDIT');
 
   // 1. 临时移除世界格网（隐藏且不可吸附）
   SystemState.objects = SystemState.objects.filter(o => o !== SystemState.worldGrid);
 
-  // 1.5 自动吸附到最近的标准姿态（阶段16新增）
-  OrientationImpl.snapToNearestOrientation(obj, SystemState.mainWindow?.direction);
+  // 2. 计算目标姿态（使用与 snapToNearestOrientation 完全一致的四元数构建）
+  const win = SystemState.mainWindow;
+  OrientationImpl.computeStatesForView(win?.direction);
 
-  // 1.6 (Phase 16b) 将物体中心移动到屏幕平面上
-  // 这确保格网的中心层与屏幕平面严格对齐（零视差）
+  // === 以下代码与 OrientationImpl.snapToNearestOrientation 完全一致 ===
+  const defaultFront = { x: 0, y: 1, z: 0 };
+  const defaultUp = { x: 0, y: 0, z: 1 };
+
+  let front = obj.frontDirection ? { ...obj.frontDirection } : { ...defaultFront };
+  let up = obj.upDirection ? { ...obj.upDirection } : { ...defaultUp };
+
+  // 归一化
+  let lenF = Math.sqrt(front.x ** 2 + front.y ** 2 + front.z ** 2);
+  if (lenF < 0.001) front = { ...defaultFront };
+  else front = { x: front.x / lenF, y: front.y / lenF, z: front.z / lenF };
+
+  let lenU = Math.sqrt(up.x ** 2 + up.y ** 2 + up.z ** 2);
+  if (lenU < 0.001) up = { ...defaultUp };
+  else up = { x: up.x / lenU, y: up.y / lenU, z: up.z / lenU };
+
+  // 正交化
+  let right = {
+    x: front.y * up.z - front.z * up.y,
+    y: front.z * up.x - front.x * up.z,
+    z: front.x * up.y - front.y * up.x
+  };
+  let lenR = Math.sqrt(right.x ** 2 + right.y ** 2 + right.z ** 2);
+  if (lenR < 0.001) {
+    right = { x: 1, y: 0, z: 0 };
+  } else {
+    right = { x: right.x / lenR, y: right.y / lenR, z: right.z / lenR };
+  }
+
+  up = {
+    x: right.y * front.z - right.z * front.y,
+    y: right.z * front.x - right.x * front.z,
+    z: right.x * front.y - right.y * front.x
+  };
+
+  // 构建四元数（与 snapToNearestOrientation 使用相同的矩阵列顺序）
+  const m00 = right.x, m01 = front.x, m02 = up.x;
+  const m10 = right.y, m11 = front.y, m12 = up.y;
+  const m20 = right.z, m21 = front.z, m22 = up.z;
+
+  const trace = m00 + m11 + m22;
+  let w, x, y, z;
+
+  if (trace > 0) {
+    const s = 0.5 / Math.sqrt(trace + 1.0);
+    w = 0.25 / s;
+    x = (m21 - m12) * s;
+    y = (m02 - m20) * s;
+    z = (m10 - m01) * s;
+  } else if (m00 > m11 && m00 > m22) {
+    const s = 2.0 * Math.sqrt(1.0 + m00 - m11 - m22);
+    w = (m21 - m12) / s;
+    x = 0.25 * s;
+    y = (m01 + m10) / s;
+    z = (m02 + m20) / s;
+  } else if (m11 > m22) {
+    const s = 2.0 * Math.sqrt(1.0 + m11 - m00 - m22);
+    w = (m02 - m20) / s;
+    x = (m01 + m10) / s;
+    y = 0.25 * s;
+    z = (m12 + m21) / s;
+  } else {
+    const s = 2.0 * Math.sqrt(1.0 + m22 - m00 - m11);
+    w = (m10 - m01) / s;
+    x = (m02 + m20) / s;
+    y = (m12 + m21) / s;
+    z = 0.25 * s;
+  }
+
+  const qLen = Math.sqrt(w * w + x * x + y * y + z * z);
+  const currentQ = { w: w / qLen, x: x / qLen, y: y / qLen, z: z / qLen };
+  // === 四元数构建结束 ===
+
+  const targetState = OrientationImpl.getNearestState(currentQ);
+
+  if (!targetState) {
+    // 无法计算目标姿态，直接完成
+    finishEnterEditState(obj);
+    return;
+  }
+
+  // 3. 计算旋转差
+  const targetQ = targetState.q;
+  const invCurrentQ = { w: currentQ.w, x: -currentQ.x, y: -currentQ.y, z: -currentQ.z };
+  let deltaQ = OrientationImpl._multiplyQuaternion(targetQ, invCurrentQ);
+
+  // 关键修复：四元数 q 和 -q 代表相同旋转，选择 w > 0 的以获得最短路径
+  if (deltaQ.w < 0) {
+    deltaQ = { w: -deltaQ.w, x: -deltaQ.x, y: -deltaQ.y, z: -deltaQ.z };
+  }
+
+  const rotAngle = 2 * Math.acos(Math.max(-1, Math.min(1, deltaQ.w)));
+  console.log(`[STATE] EDIT snap: 需旋转 ${(rotAngle * 180 / Math.PI).toFixed(1)}°`);
+
+  if (Math.abs(rotAngle) < 0.01) {
+    // 几乎不需要旋转，直接完成
+    obj._currentOrientationState = targetState;
+    obj.quaternion = { ...targetState.q };
+    finishEnterEditState(obj);
+    return;
+  }
+
+  // 4. 提取旋转轴
+  const sinHalf = Math.sin(rotAngle / 2);
+  let rotAxis = { x: 0, y: 0, z: 1 };
+  if (Math.abs(sinHalf) > 0.001) {
+    rotAxis = {
+      x: deltaQ.x / sinHalf,
+      y: deltaQ.y / sinHalf,
+      z: deltaQ.z / sinHalf
+    };
+  }
+
+  // 5. 设置动画锁
+  obj.animationLock = true;
+
+  // 6. 创建旋转动画任务
+  const duration = 250; // 250ms 过渡
+  let lastProgress = 0;
+
+  const rotateTask = AnimationImpl.createTask({
+    id: 'edit_snap_' + Date.now(),
+    target: obj,
+    duration,
+    easing: AnimationImpl.Easing.easeOut,
+    compute: (progress) => ({ progress }),
+    apply: (targetObj, value) => {
+      const progressDelta = value.progress - lastProgress;
+      const rotationAmount = rotAngle * progressDelta;
+
+      if (rotationAmount > 0.0001) {
+        OrientationImpl.rotateObjectAroundAxis(targetObj, rotAxis, rotationAmount);
+      }
+      lastProgress = value.progress;
+    }
+  });
+
+  rotateTask.onComplete = () => {
+    obj.animationLock = false;
+    // 更新物体的姿态状态
+    obj._currentOrientationState = targetState;
+    obj.quaternion = { ...targetState.q };
+
+    // 完成剩余的 EDIT 初始化
+    finishEnterEditState(obj);
+  };
+
+  SystemState.taskQueues.submit(rotateTask);
+  SystemState.ifControl = true;
+}
+
+/**
+ * 完成 EDIT 态进入（动画后调用或无需动画时直接调用）
+ * @param {Object} obj - 物体对象
+ */
+function finishEnterEditState(obj) {
+  // 正式进入 EDIT 态
+  SystemState.interactionState = 'EDIT';
+
+  // 移动物体到屏幕平面
   const win = SystemState.mainWindow;
   if (win && win.direction) {
     const dir = win.direction;
-    const planePt = dir.start; // 屏幕平面上的点
+    const planePt = dir.start;
 
-    // 计算当前物体中心到屏幕平面的距离
     const currentDist = (obj.center.x - planePt.x) * dir.x +
       (obj.center.y - planePt.y) * dir.y +
       (obj.center.z - planePt.z) * dir.z;
 
-    // 将物体沿视线方向移动，使其中心位于屏幕平面上 (dist = 0)
     const moveX = -currentDist * dir.x;
     const moveY = -currentDist * dir.y;
     const moveZ = -currentDist * dir.z;
@@ -3166,19 +3821,20 @@ function enterEditState() {
       moveObjectTo(obj, obj.center.x + moveX, obj.center.y + moveY, obj.center.z + moveZ);
     }
 
-    console.log(`物体中心对齐到屏幕平面: 移动了 ${(-currentDist).toFixed(2)}cm`);
+    console.log(`[STATE] EDIT对齐: 移动=${(-currentDist).toFixed(2)}cm, 新center.y=${obj.center.y.toFixed(2)}`);
   }
 
-  // 2. 创建并显示局部格网（阶段16新增）
+  // 创建并显示局部格网
   const localGrid = ObjectFactoryImpl.createLocalGridObject(obj);
   SystemState.localGrid = localGrid;
-  SystemState.objects.push(localGrid); // 加入渲染列表
+  SystemState.objects.push(localGrid);
 
-  // 3. 显示控制点
+  // 显示控制点
   showControlPoints(obj);
 
-  // 4. 触发渲染
+  // 触发渲染
   SystemState.ifControl = true;
+  console.log('[STATE] EDIT entered');
 }
 
 /**
@@ -3246,7 +3902,13 @@ function exitEditState() {
 
   // 4. 切换到 FOCUS 态
   SystemState.interactionState = 'FOCUS';
-  console.log('返回 FOCUS 态');
+  // [DEBUG] 记录退出EDIT后的物体尺寸
+  const objExit = SystemState.focusedObject;
+  if (objExit) {
+    const radiusExitEdit = measureObjectRadius(objExit);
+    console.log(`[STATE] EDIT→FOCUS: 半径=${radiusExitEdit.toFixed(3)}cm, center.y=${objExit.center.y.toFixed(2)}`);
+    tracePoint(objExit, 'EDIT→FOCUS');
+  }
 
   // 5. 触发渲染
   SystemState.ifControl = true;

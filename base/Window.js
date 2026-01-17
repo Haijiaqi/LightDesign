@@ -819,4 +819,67 @@ export class Window {
 
     return { intersections, centerLinePixels, otherPixels };
   }
+
+  // ==========================================================================
+  // Virtual Cursor 统一出口（阶段1新增：显式化）
+  // ==========================================================================
+  /**
+   * 虚拟鼠标系统的统一访问点
+   * 仅作为"数据转发",不包含任何判断逻辑或编辑语义
+   * 
+   * 职责:
+   * - 暴露吸附点的世界坐标（纯数学）
+   * - 暴露吸附点的法向量（纯数学）
+   * - 不理解EDIT/FOCUS/控制点等概念
+   */
+  get virtualCursor() {
+    const self = this;
+    
+    return {
+      /**
+       * 活动点的世界坐标
+       * @returns {{x, y, z} | null}
+       */
+      get activePoint() {
+        if (self._cachedSnappedPoint && self._cachedSnappedPoint.x !== undefined) {
+          return {
+            x: self._cachedSnappedPoint.x,
+            y: self._cachedSnappedPoint.y,
+            z: self._cachedSnappedPoint.z
+          };
+        }
+        return null;
+      },
+
+      /**
+       * 活动点的法向量
+       * @returns {{x, y, z} | null}
+       */
+      get activeNormal() {
+        if (self._cachedSnappedPoint && self._cachedSnappedPoint.nx !== undefined) {
+          return {
+            x: self._cachedSnappedPoint.nx || 0,
+            y: self._cachedSnappedPoint.ny || 0,
+            z: self._cachedSnappedPoint.nz || 0
+          };
+        }
+        // 默认:视线反方向
+        if (self.direction) {
+          return {
+            x: -self.direction.x,
+            y: -self.direction.y,
+            z: -self.direction.z
+          };
+        }
+        return { x: 0, y: 0, z: 1 };
+      },
+
+      /**
+       * 设置当前吸附点(供main.js调用)
+       */
+      setSnappedPoint(point) {
+        self._cachedSnappedPoint = point;
+      }
+    };
+  }
 }
