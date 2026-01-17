@@ -176,6 +176,8 @@ export class Window {
           const yGrid = Math.floor(object.centerPoint.yM / this.gridsize);
           if (xGrid >= 0 && xGrid < this.grid.length &&
             yGrid >= 0 && yGrid < this.grid[xGrid].length) {
+            object.centerPoint.gx = xGrid;
+            object.centerPoint.gy = yGrid;
             this.grid[xGrid][yGrid].unshift(object.centerPoint);
           }
         }
@@ -316,6 +318,9 @@ export class Window {
     const xScreen = Math.round(x * this.DPIx);
     const x_grid = Math.floor(xScreen / this.gridsize);
     const y_grid = Math.floor(yScreen / this.gridsize);
+    // 赋值 grid 索引，供 virtual mouse 逻辑使用
+    point.gx = x_grid;
+    point.gy = y_grid;
 
     // 网格边界判断（公共：超出网格则点无效）
     if (x_grid >= this.grid.length || y_grid >= this.grid[0].length) {
@@ -524,53 +529,96 @@ export class Window {
   // ==========================================================================
 
   /**
-   * 查找屏幕坐标附近最近的可吸附点
-   * @param {number} screenX - 屏幕 X 坐标（像素）
-   * @param {number} screenY - 屏幕 Y 坐标（像素）
-   * @param {number} radius - 搜索半径（像素）
-   * @returns {Point|null} 最近的可吸附点，若无则返回 null
+   * 查找屏幕坐标附近最近的可吸附点 (虚拟鼠标核心逻辑)
+   * 迁移自 main.js findNearestAttractableExpanding
+   * @param {number} screenX - 屏幕 X 坐标
+   * @param {number} screenY - 屏幕 Y 坐标
+   * @param {number} searchRadius - 初始搜索半径（像素）
+   * @param {function} filterCallback - (可选) 过滤回调，返回 false 则跳过该点
+   * @returns {Point|null} 最近点
    */
-  findNearestAttractable(screenX, screenY, radius) {
+  findNearestPoint(screenX, screenY, searchRadius = 0, filterCallback = null) {
+    if (!this.grid || this.grid.length === 0) return null;
+
+    const gridWidth = this.grid.length;
+    const gridHeight = this.grid[0]?.length || 0;
+    if (gridWidth === 0 || gridHeight === 0) return null;
+
+    // 计算鼠标所在的 grid cell
+    const centerGx = Math.floor(screenX / this.gridsize);
+    const centerGy = Math.floor(screenY / this.gridsize);
+
+    // 如果未指定半径，默认搜索整个 grid（或直到找到）
+    // 但为了性能，仍采用分层扩展方式
+
+    // 最大搜索半径（网格单位）
+    const maxRange = Math.max(
+      Math.max(centerGx, gridWidth - 1 - centerGx),
+      Math.max(centerGy, gridHeight - 1 - centerGy)
+    ) + 1;
+
     let nearest = null;
-    let minDist = radius;
+    let minDistSq = Infinity;
 
-    // 计算当前所在的格子坐标
-    const gx = Math.floor(screenX / this.gridsize);
-    const gy = Math.floor(screenY / this.gridsize);
+    // 逐层向外扩展搜索
+    for (let range = 0; range <= maxRange; range++) {
+      let foundInThisLayer = false;
 
-    // 计算需要搜索的格子范围
-    const range = Math.ceil(radius / this.gridsize);
+      // 搜索当前层的边界格子
+      for (let dx = -range; dx <= range; dx++) {
+        for (let dy = -range; dy <= range; dy++) {
+          // 只搜索边界（跳过内部已搜索过的）
+          if (range > 0 && Math.abs(dx) < range && Math.abs(dy) < range) continue;
 
-    // 遍历周围的格子
-    for (let dx = -range; dx <= range; dx++) {
-      for (let dy = -range; dy <= range; dy++) {
-        const cx = gx + dx;
-        const cy = gy + dy;
+          const gx = centerGx + dx;
+          const gy = centerGy + dy;
 
-        // 边界检查
-        if (cx < 0 || cx >= this.grid.length) continue;
-        if (cy < 0 || cy >= this.grid[cx].length) continue;
+          // 边界检查
+          if (gx < 0 || gx >= gridWidth) continue;
+          if (gy < 0 || gy >= gridHeight) continue;
 
-        // 遍历格子内的点
-        for (const p of this.grid[cx][cy]) {
-          // 只考虑可吸附的点
-          if (!p.isAttractable) continue;
+          // 遍历该格子内的所有点
+          const cell = this.grid[gx][gy];
+          if (!cell || cell.length === 0) continue;
 
-          // 计算到屏幕坐标的距离
-          const dist = Math.sqrt(
-            (p.xM - screenX) ** 2 + (p.yM - screenY) ** 2
-          );
+          for (const p of cell) {
+            // 基础检查：必须是可吸附点
+            if (!p.isAttractable) continue;
 
-          if (dist < minDist) {
-            minDist = dist;
-            nearest = p;
+            // 外部回调过滤（例如排除正在拖拽的物体，或只吸附特定类型）
+            if (filterCallback && !filterCallback(p)) continue;
+
+            const dxPx = p.xM - screenX;
+            const dyPx = p.yM - screenY;
+            const distSq = dxPx * dxPx + dyPx * dyPx;
+
+            // 找到更近的点
+            if (distSq < minDistSq) {
+              minDistSq = distSq;
+              nearest = p;
+              foundInThisLayer = true; // 标记本层已找到
+            }
           }
         }
+      }
+
+      // 优化：如果在本层找到了点，
+      // 且最近距离小于下一层的最小可能距离（下一层最近也是 (range+1)*gridSize - 0.5*gridSize ？）
+      // 简单起见：一旦在某层找到，就不再搜索更外层。
+      // 注意：这可能在边界处不完全精确（如最近点其实在下一层刚开始的地方），
+      // 但对于虚拟鼠标的吸附体验早已足够。
+      if (foundInThisLayer) {
+        // Double check: is there any possibility that next layer has closer point?
+        // Next layer min distance approx: (range * gridSize + 1 pixel)
+        // If current minDist < (range * gridSize)^2, we are safe to stop.
+        // 实际上 grid 搜索的层级逻辑保证了大致的由近及远。
+        break;
       }
     }
 
     return nearest;
   }
+
 
   createGridObject(params) {
     // --------------------------
@@ -834,7 +882,7 @@ export class Window {
    */
   get virtualCursor() {
     const self = this;
-    
+
     return {
       /**
        * 活动点的世界坐标

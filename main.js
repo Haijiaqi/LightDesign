@@ -1191,309 +1191,252 @@ function updateCamera() {
 }
 
 // ========================
-// 10. 渲染函数（基于putImageData批量绘图优化，支持邻接点绘制规则）
+// 10. 渲染系统（阶段2重构：Renderer 对象封装）
 // ========================
-// 阶段 3A：颜色 LUT 从 StyleImpl 获取
-const COLOR_LUT = StyleImpl.getLUT();
+const Renderer = {
+  // 颜色 LUT 缓存
+  LUT: StyleImpl.getLUT(),
 
-// 2. 优化后的渲染函数
-// 优化后的渲染函数（使用抽象子函数）
+  /**
+   * 遍历邻接点并执行回调（零内存分配优化）
+   * 替代原 getNeighbors 返回数组的方式，消除GC压力
+   * @param {number} x - 中心X
+   * @param {number} y - 中心Y
+   * @param {number} light - 亮度
+   * @param {function} callback - (nx, ny, ratio) => void
+   */
+  forEachNeighbor(x, y, light, callback) {
+    // 规则1：light∈(0.6, 1] → 8邻接
+    if (light <= 1 && light > 0.6) {
+      callback(x, y - 1, 0.707);
+      callback(x, y + 1, 0.707);
+      callback(x - 1, y, 0.707);
+      callback(x + 1, y, 0.707);
+      callback(x - 1, y - 1, 0.4);
+      callback(x + 1, y - 1, 0.4);
+      callback(x - 1, y + 1, 0.4);
+      callback(x + 1, y + 1, 0.4);
+    }
+    // 规则2：light∈(0.3, 0.6] → 8邻接（原逻辑中ratio未用light计算，保持一致）
+    else if (light <= 0.6 && light > 0.3) {
+      callback(x, y - 1, 0.707);
+      callback(x, y + 1, 0.707);
+      callback(x - 1, y, 0.707);
+      callback(x + 1, y, 0.707);
+      callback(x - 1, y - 1, 0.4);
+      callback(x + 1, y - 1, 0.4);
+      callback(x - 1, y + 1, 0.4);
+      callback(x + 1, y + 1, 0.4);
+    }
+    // 规则3：light≤0.3 → 无邻接
+  },
+
+  /**
+   * 绘制带颜色的点及其邻接点
+   * 优化：移除 params 对象创建，直接传参
+   */
+  drawColoredPointImpl(ctxData, width, height, x, y, light, colorType, baseLight, maxLutIndex, drawNeighbors) {
+    // 1. 跳过无效坐标
+    if (x <= 0 || y <= 0 || x >= width - 1 || y >= height - 1) return;
+
+    // 2. 绘制主点
+    const mainBrightness = light * baseLight;
+    // 快速索引计算
+    const mainIdx = ((mainBrightness * 10) + 0.5) << 0; // fast round
+    const clampedMainIdx = mainIdx < 0 ? 0 : (mainIdx > maxLutIndex ? maxLutIndex : mainIdx);
+
+    // 获取颜色引用（避免解构开销）
+    const lut = this.LUT[colorType];
+    const color = lut[clampedMainIdx] || lut[0];
+
+    const pixelIdx = (y * width + x) * 4;
+    ctxData[pixelIdx] = color[0];
+    ctxData[pixelIdx + 1] = color[1];
+    ctxData[pixelIdx + 2] = color[2];
+    ctxData[pixelIdx + 3] = 255;
+
+    // 3. 绘制邻接点（仅当 drawNeighbors 为 true）
+    if (drawNeighbors) {
+      this.forEachNeighbor(x, y, light, (nx, ny, ratio) => {
+        if (nx < 0 || nx >= width || ny < 0 || ny >= height) return;
+
+        const nbBrightness = light * baseLight * ratio;
+        const nbIdx = ((nbBrightness * 10) + 0.5) << 0;
+        const clampedNbIdx = nbIdx < 0 ? 0 : (nbIdx > maxLutIndex ? maxLutIndex : nbIdx);
+
+        const nbColor = lut[clampedNbIdx] || lut[0];
+        const nbPixelIdx = (ny * width + nx) * 4;
+
+        // 简单且常用的alpha混合或直接覆盖？原逻辑是直接覆盖。
+        ctxData[nbPixelIdx] = nbColor[0];
+        ctxData[nbPixelIdx + 1] = nbColor[1];
+        ctxData[nbPixelIdx + 2] = nbColor[2];
+        ctxData[nbPixelIdx + 3] = 255;
+      });
+    }
+  },
+
+  /**
+   * 绘制主逻辑
+   */
+  render(ctx, width, height) {
+    // 1. 初始化ImageData
+    const imageData = ctx.createImageData(width, height);
+    const pixelData = imageData.data;
+
+    const win = SystemState.mainWindow;
+
+    // 2. 遍历 windowObjects
+    for (let index = 0; index < win.windowObjects.length; index++) {
+      const element = win.windowObjects[index];
+      const renderPoints = (element.displayPoints && element.displayPoints.length > 0)
+        ? element.displayPoints
+        : element.constructionPoints;
+
+      if (!renderPoints || renderPoints.length === 0) continue;
+
+      for (let i = 0; i < renderPoints.length; i++) {
+        const p = renderPoints[i];
+        if (p.xM !== 0 && p.yM !== 0) {
+          // 绘制紫色点（无视差的2D点），不开启邻接绘制
+          this.drawColoredPointImpl(pixelData, width, height, p.xM, p.yM, p.light, 'purple', 50, 350, false);
+        }
+      }
+    }
+
+    // 3. 遍历 Grid Points
+    const is3D = CONFIG.displayMode !== '2D';
+    const isLR = CONFIG.displayMode === '3D_LR';
+    // 预计算常量
+    const leftColor = isLR ? 'red' : 'blue';
+    const rightColor = isLR ? 'blue' : 'red';
+    const leftBase = isLR ? 35 : 50;
+    const rightBase = isLR ? 50 : 35;
+    const leftMax = isLR ? 350 : 500;
+    const rightMax = isLR ? 500 : 350;
+
+    for (let gridX = 0; gridX < win.grid.length; gridX++) {
+      const gridCol = win.grid[gridX];
+      for (let gridY = 0; gridY < gridCol.length; gridY++) {
+        const pointsInGrid = gridCol[gridY];
+
+        for (const p of pointsInGrid) {
+          // CONTROL 标签特殊渲染
+          if (p.tag === 'CONTROL') {
+            const cx = (p.xM + 0.5) << 0;
+            const cy = (p.yM + 0.5) << 0;
+            for (let dx = -1; dx <= 1; dx++) {
+              for (let dy = -1; dy <= 1; dy++) {
+                const px = cx + dx;
+                const py = cy + dy;
+                if (px < 0 || px >= width || py < 0 || py >= height) continue;
+                const idx = (py * width + px) * 4;
+                pixelData[idx] = 255;
+                pixelData[idx + 1] = 255;
+                pixelData[idx + 2] = 255;
+                pixelData[idx + 3] = 255;
+              }
+            }
+            continue;
+          }
+
+          if (!is3D) {
+            // 2D Mode
+            if (p.xM !== 0 && p.yM !== 0) {
+              this.drawColoredPointImpl(pixelData, width, height, p.xM, p.yM, p.light, 'purple', 50, 500, true);
+            }
+          } else {
+            // 3D Mode
+            if (Math.abs(p.xL - p.xR) > 0) {
+              const first = (p.xL % 2 === 0); // 简单的交错策略? 
+
+              // 根据 first 标志决定绘制顺序（原逻辑保留）
+              // 先绘制左眼
+              if (first && p.xL !== 0 && p.yL !== 0) {
+                this.drawColoredPointImpl(pixelData, width, height, p.xL, p.yL, p.light, leftColor, leftBase, leftMax, true);
+              }
+              // 绘制右眼
+              if (p.xR !== 0 && p.yR !== 0) {
+                this.drawColoredPointImpl(pixelData, width, height, p.xR, p.yR, p.light, rightColor, rightBase, rightMax, true);
+              }
+              // 后绘制左眼
+              if (!first && p.xL !== 0 && p.yL !== 0) {
+                this.drawColoredPointImpl(pixelData, width, height, p.xL, p.yL, p.light, leftColor, leftBase, leftMax, true);
+              }
+            } else {
+              // 紫色点
+              if (p.xM !== 0 && p.yM !== 0) {
+                this.drawColoredPointImpl(pixelData, width, height, p.xM, p.yM, p.light, 'purple', 50, 500, true);
+              }
+            }
+          }
+        }
+      }
+    }
+
+    return imageData;
+  },
+
+  /**
+   * 使用固定亮度渲染单个点
+   */
+  renderPointSimple(p, light, pixelData, width, height) {
+    const x = Math.floor(p.xM);
+    const y = Math.floor(p.yM);
+
+    if (x < 0 || x >= width || y < 0 || y >= height) return;
+
+    // 使用现有 LUT (Renderer.LUT)
+    const baseLight = 50;  // 使用 purple 的 baseLight
+    const lutIndex = Math.min(
+      Math.floor(light * baseLight * 10),
+      this.LUT.purple.length - 1
+    );
+    const color = this.LUT.purple[Math.max(0, lutIndex)];
+
+    const idx = (y * width + x) * 4;
+    pixelData[idx] = color[0];      // R
+    pixelData[idx + 1] = color[1];  // G
+    pixelData[idx + 2] = color[2];  // B
+    pixelData[idx + 3] = 255;       // A
+  },
+
+  /**
+   * 渲染 screenPoints（截面轮廓等）
+   */
+  renderScreenPointsHelper(pixelData, width, height) {
+    for (const p of SystemState.screenPoints) {
+      // 执行投影
+      const inverseRate = SystemState.mainWindow.calculateBasePoint(
+        SystemState.mainWindow.capital,
+        CONFIG.eyeD,
+        SystemState.mainWindow.direction,
+        p
+      );
+      if (inverseRate === null) continue;
+
+      if (p.tag === 'SLICE_CONTOUR') {
+        this.renderPointSimple(p, 0.8, pixelData, width, height);
+      }
+    }
+  }
+};
+
+// 2. 优化后的渲染函数（接口适配）
+// 2. 优化后的渲染函数（接口适配）
 function render() {
   const ctx = SystemState.ctx;
   const { screenWidthPx: width, screenHeightPx: height } = SystemState;
 
-  // 1. 初始化ImageData（批量像素容器）
-  const imageData = ctx.createImageData(width, height);
-  const pixelData = imageData.data; // RGBA数组：[R, G, B, A]，A固定255（不透明）
-
   updateCamera();
 
-  // 2. 邻接点生成工具函数（提取为独立函数，避免子函数嵌套）
-  function getNeighbors(x, y, light) {
-    const neighbors = [];
-    // 规则1：light∈(0.6, 1] → 8邻接
-    if (light <= 1 && light > 0.6) {
-      neighbors.push(
-        { nx: x, ny: y - 1, ratio: 0.707 },
-        { nx: x, ny: y + 1, ratio: 0.707 },
-        { nx: x - 1, ny: y, ratio: 0.707 },
-        { nx: x + 1, ny: y, ratio: 0.707 },
-        { nx: x - 1, ny: y - 1, ratio: 0.4 },
-        { nx: x + 1, ny: y - 1, ratio: 0.4 },
-        { nx: x - 1, ny: y + 1, ratio: 0.4 },
-        { nx: x + 1, ny: y + 1, ratio: 0.4 },
-      );
-    }
-    // 规则2：light∈(0.3, 0.6] → 8邻接（原逻辑中ratio未用light计算，保持一致）
-    else if (light <= 0.6 && light > 0.3) {
-      neighbors.push(
-        { nx: x, ny: y - 1, ratio: 0.707 },
-        { nx: x, ny: y + 1, ratio: 0.707 },
-        { nx: x - 1, ny: y, ratio: 0.707 },
-        { nx: x + 1, ny: y, ratio: 0.707 },
-        { nx: x - 1, ny: y - 1, ratio: 0.4 },
-        { nx: x + 1, ny: y - 1, ratio: 0.4 },
-        { nx: x - 1, ny: y + 1, ratio: 0.4 },
-        { nx: x + 1, ny: y + 1, ratio: 0.4 },
-      );
-    }
-    // 规则3：light≤0.3 → 无邻接
-    return neighbors;
-  }
-  function drawColoredPoints(params) {
-    const {
-      colorType,
-      x,
-      y,
-      light,
-      baseLight,
-      maxLutIndex,
-      pixelData,
-      width,
-      height,
-      getNeighbors,
-    } = params;
-
-    // 1. 跳过无效坐标（x/y为0或超出画布范围）
-    if (x === 0 || y === 0 || x < 0 || x >= width || y < 0 || y >= height) {
-      return;
-    }
-
-    // 2. 计算主点亮度与颜色（复用原逻辑：亮度=light*baseLight，索引限制在[0, maxLutIndex]）
-    const mainBrightnessVal = light * baseLight;
-    const mainLutIndex = Math.max(
-      0,
-      Math.min(maxLutIndex, Math.round(mainBrightnessVal * 10)),
-    );
-    const [rMain, gMain, bMain] = COLOR_LUT[colorType][mainLutIndex] || [
-      0, 0, 0,
-    ];
-
-    // 3. 绘制主点像素
-    const mainPixelIdx = (y * width + x) * 4;
-    pixelData[mainPixelIdx] = rMain; // R通道
-    pixelData[mainPixelIdx + 1] = gMain; // G通道
-    pixelData[mainPixelIdx + 2] = bMain; // B通道
-    pixelData[mainPixelIdx + 3] = 255; // A通道（不透明）
-
-    // 4. 计算并绘制邻接点
-    const neighbors = getNeighbors(x, y, light);
-    for (const nb of neighbors) {
-      const { nx: neighborX, ny: neighborY, ratio } = nb;
-      // 跳过邻接点无效坐标
-      if (
-        neighborX < 0 ||
-        neighborX >= width ||
-        neighborY < 0 ||
-        neighborY >= height
-      ) {
-        continue;
-      }
-      // 计算邻接点亮度与颜色（复用原逻辑：亮度=light*baseLight*ratio）
-      const nbBrightnessVal = light * baseLight * ratio;
-      const nbLutIndex = Math.max(
-        0,
-        Math.min(maxLutIndex, Math.round(nbBrightnessVal * 10)),
-      );
-      const [rNb, gNb, bNb] = COLOR_LUT[colorType][nbLutIndex] || [0, 0, 0];
-
-      // 绘制邻接点像素
-      const nbPixelIdx = (neighborY * width + neighborX) * 4;
-      pixelData[nbPixelIdx] = rNb;
-      pixelData[nbPixelIdx + 1] = gNb;
-      pixelData[nbPixelIdx + 2] = bNb;
-      pixelData[nbPixelIdx + 3] = 255;
-    }
-  }
-  function drawNonAdjacentPoints(params) {
-    const {
-      colorType,
-      x,
-      y,
-      light,
-      baseLight,
-      maxLutIndex,
-      pixelData,
-      width,
-      height,
-      // 保留参数结构，但不使用邻接相关逻辑
-      getNeighbors,
-    } = params;
-
-    // 1. 跳过无效坐标（同原逻辑：过滤边界外坐标）
-    if (x === 0 || y === 0 || x < 0 || x >= width || y < 0 || y >= height) {
-      return;
-    }
-
-    // 2. 计算主点亮度与颜色（复用原逻辑，仅处理主点）
-    const mainBrightnessVal = light * baseLight;
-    const mainLutIndex = Math.max(
-      0,
-      Math.min(maxLutIndex, Math.round(mainBrightnessVal * 10)),
-    );
-    const [rMain, gMain, bMain] = COLOR_LUT[colorType][mainLutIndex] || [0, 0, 0];
-
-    // 3. 仅绘制主点像素（移除所有邻接像素绘制逻辑）
-    const mainPixelIdx = (y * width + x) * 4;
-    pixelData[mainPixelIdx] = rMain; // R通道
-    pixelData[mainPixelIdx + 1] = gMain; // G通道
-    pixelData[mainPixelIdx + 2] = bMain; // B通道
-    pixelData[mainPixelIdx + 3] = 255; // A通道（不透明）
-  }
-
-  for (let index = 0; index < SystemState.mainWindow.windowObjects.length; index++) {
-    const element = SystemState.mainWindow.windowObjects[index];
-    // 阶段1修改：优先使用 displayPoints，回退到 constructionPoints
-    const renderPoints = (element.displayPoints && element.displayPoints.length > 0)
-      ? element.displayPoints
-      : element.constructionPoints;
-    if (!renderPoints || renderPoints.length === 0) continue;
-    for (let i = 0; i < renderPoints.length; i++) {
-      const p = renderPoints[i];
-      const commonParams = {
-        light: p.light,
-        pixelData,
-        width,
-        height,
-        getNeighbors,
-      };
-      if (p.xM !== 0 && p.yM !== 0) {
-        // 合并first为true/false的重复逻辑
-        drawNonAdjacentPoints({
-          ...commonParams,
-          colorType: "purple",
-          x: p.xM,
-          y: p.yM,
-          baseLight: 50,
-          maxLutIndex: 350,
-        });
-      }
-    }
-  }
-  // 3. 遍历所有网格点（主循环）
-  for (let gridX = 0; gridX < SystemState.mainWindow.grid.length; gridX++) {
-    const gridCol = SystemState.mainWindow.grid[gridX];
-    for (let gridY = 0; gridY < gridCol.length; gridY++) {
-      const pointsInGrid = gridCol[gridY];
-      for (const p of pointsInGrid) {
-        // 公共参数：所有点渲染都需要的基础参数（复用，减少重复传参）
-        const commonParams = {
-          light: p.light,
-          pixelData,
-          width,
-          height,
-          getNeighbors,
-        };
-
-        // ========== 整饬新增：CONTROL tag 特殊渲染 ==========
-        if (p.tag === 'CONTROL') {
-          // 控制点使用白色高亮 3x3 像素
-          const cx = Math.floor(p.xM);
-          const cy = Math.floor(p.yM);
-          for (let dx = -1; dx <= 1; dx++) {
-            for (let dy = -1; dy <= 1; dy++) {
-              const px = cx + dx;
-              const py = cy + dy;
-              if (px < 0 || px >= width || py < 0 || py >= height) continue;
-              const idx = (py * width + px) * 4;
-              pixelData[idx] = 255;       // R
-              pixelData[idx + 1] = 255;   // G
-              pixelData[idx + 2] = 255;   // B
-              pixelData[idx + 3] = 255;   // A
-            }
-          }
-          continue;  // 跳过正常渲染
-        }
-        // =====================================================
-
-        // ========== 阶段1新增：显示模式判断 ==========
-        if (CONFIG.displayMode === '2D') {
-          // 纯2D模式：使用 xM/yM，紫色
-          if (p.xM !== 0 && p.yM !== 0) {
-            drawColoredPoints({
-              ...commonParams,
-              colorType: "purple",
-              x: p.xM,
-              y: p.yM,
-              baseLight: 50,
-              maxLutIndex: 500,
-            });
-          }
-        } else {
-          // 3D模式：根据 displayMode 决定左右眼颜色
-          const isLR = CONFIG.displayMode === '3D_LR';
-          const leftColor = isLR ? 'red' : 'blue';
-          const rightColor = isLR ? 'blue' : 'red';
-          const leftBaseLight = isLR ? 35 : 50;
-          const rightBaseLight = isLR ? 50 : 35;
-          const leftMaxLut = isLR ? 350 : 500;
-          const rightMaxLut = isLR ? 500 : 350;
-
-          // --------------------------
-          // 处理立体点（有左右眼差异）
-          // --------------------------
-          if (Math.abs(p.xL - p.xR) > 0) {
-            const first = p.xL % 2 === 0;
-
-            // ① 左眼点
-            if (first && p.xL !== 0 && p.yL !== 0) {
-              drawColoredPoints({
-                ...commonParams,
-                colorType: leftColor,
-                x: p.xL,
-                y: p.yL,
-                baseLight: leftBaseLight,
-                maxLutIndex: leftMaxLut,
-              });
-            }
-
-            // ② 右眼点
-            if (p.xR !== 0 && p.yR !== 0) {
-              drawColoredPoints({
-                ...commonParams,
-                colorType: rightColor,
-                x: p.xR,
-                y: p.yR,
-                baseLight: rightBaseLight,
-                maxLutIndex: rightMaxLut,
-              });
-            }
-
-            if (!first && p.xL !== 0 && p.yL !== 0) {
-              drawColoredPoints({
-                ...commonParams,
-                colorType: leftColor,
-                x: p.xL,
-                y: p.yL,
-                baseLight: leftBaseLight,
-                maxLutIndex: leftMaxLut,
-              });
-            }
-          }
-          // --------------------------
-          // 处理紫色点（无左右眼差异，如网格点）
-          // --------------------------
-          else {
-            if (p.xM !== 0 && p.yM !== 0) {
-              drawColoredPoints({
-                ...commonParams,
-                colorType: "purple",
-                x: p.xM,
-                y: p.yM,
-                baseLight: 50,
-                maxLutIndex: 500,
-              });
-            }
-          }
-        }
-        // =============================================
-      }
-    }
-  }
+  // 调用 Renderer
+  const imageData = Renderer.render(ctx, width, height);
+  const pixelData = imageData.data;
 
   // 阶段11A新增：FOCUS/EDIT 态使用简化光照渲染 screenPoints（排除 FOCUS_ENTERING 中间态）
   if (SystemState.interactionState === 'FOCUS' || SystemState.interactionState === 'EDIT') {
-    renderScreenPoints(pixelData, width, height);
+    Renderer.renderScreenPointsHelper(pixelData, width, height);
   }
 
   // 渲染前更新虚拟鼠标（确保在渲染时虚拟鼠标点存在）
@@ -1507,65 +1450,6 @@ function render() {
   // 4. 批量渲染所有像素（仅1次DOM操作）
   ctx.putImageData(imageData, 0, 0);
 }
-
-// ========================
-// 阶段11A新增：简化光照渲染
-// ========================
-
-/**
- * 使用固定亮度渲染单个点（阶段11A新增）
- */
-function renderPointSimple(p, light, pixelData, width, height) {
-  const x = Math.floor(p.xM);
-  const y = Math.floor(p.yM);
-
-  if (x < 0 || x >= width || y < 0 || y >= height) return;
-
-  // 使用现有 COLOR_LUT
-  const baseLight = 50;  // 使用 purple 的 baseLight
-  const lutIndex = Math.min(
-    Math.floor(light * baseLight * 10),
-    COLOR_LUT.purple.length - 1
-  );
-  const color = COLOR_LUT.purple[Math.max(0, lutIndex)];
-
-  const idx = (y * width + x) * 4;
-  pixelData[idx] = color[0];      // R
-  pixelData[idx + 1] = color[1];  // G
-  pixelData[idx + 2] = color[2];  // B
-  pixelData[idx + 3] = 255;       // A
-}
-
-/**
- * 渲染 screenPoints（截面轮廓等）（整饬修改：移除 CONTROL，控制点现在在主渲染循环中处理）
- */
-function renderScreenPoints(pixelData, width, height) {
-  for (const p of SystemState.screenPoints) {
-    // 执行投影
-    const inverseRate = SystemState.mainWindow.calculateBasePoint(
-      SystemState.mainWindow.capital,
-      CONFIG.eyeD,
-      SystemState.mainWindow.direction,
-      p
-    );
-    if (inverseRate === null) continue;
-
-    if (p.tag === 'SLICE_CONTOUR') {
-      renderPointSimple(p, 0.8, pixelData, width, height);
-    }
-    // 整饬修改：CONTROL 渲染已移至主渲染循环，此处移除
-  }
-}
-
-// ========================
-// 虚拟鼠标系统
-// ========================
-
-/**
- * 更新虚拟鼠标（屏幕辅助元素，独立于空间点）
- * @param {number} mouseX - 鼠标屏幕 X 坐标
- * @param {number} mouseY - 鼠标屏幕 Y 坐标
- */
 
 // =====================================================
 // [G] Window / Screen Glue
@@ -1586,11 +1470,31 @@ function updateVirtualMouse(mouseX, mouseY) {
     p => p.tag !== 'VIRTUAL_MOUSE'
   );
 
-  // 从鼠标位置向外扩展搜索整个grid
-  const snapped = findNearestAttractableExpanding(mouseX, mouseY);
+  // 从鼠标位置向外扩展搜索（调用 Window 的方法）
+  const win = SystemState.mainWindow;
+  let snapped = null;
+
+  if (win && win.findNearestPoint) {
+    snapped = win.findNearestPoint(mouseX, mouseY, 0, (p) => {
+      // 阶段16新增：EDIT 态只吸附屏幕平面附近的 局部格网点
+      if (SystemState.interactionState === 'EDIT') {
+        if (p.tag !== 'LOCAL_GRID') return false;
+      }
+
+      // Phase 2新增：VIEW态拖动时，跳过已被其他物体占用的格点
+      if (SystemState.draggingObject && p.isGridPoint) {
+        if (isGridPointOccupied(p.gx, p.gy, p, SystemState.draggingObject)) {
+          return false;
+        }
+      }
+      return true;
+    });
+  }
 
   // 阶段1新增: 更新Window的virtualCursor缓存(统一出口)
-  SystemState.mainWindow.virtualCursor.setSnappedPoint(snapped);
+  if (win && win.virtualCursor) {
+    win.virtualCursor.setSnappedPoint(snapped);
+  }
 
   let centerX = mouseX;
   let centerY = mouseY;
@@ -1699,7 +1603,12 @@ function updateVirtualMouse(mouseX, mouseY) {
  */
 function isGridPointOccupied(gx, gy, gridPoint, draggingObject) {
   const grid = SystemState.mainWindow.grid;
+  // 必须进行边界检查
+  if (!Number.isInteger(gx) || !Number.isInteger(gy)) return false;
+  if (gx < 0 || gx >= grid.length || gy < 0 || gy >= grid[0].length) return false;
+
   const cell = grid[gx][gy];
+  if (!cell) return false;
 
   // 遍历该cell中的所有点，检查是否有其他物体的中心点
   for (const p of cell) {
@@ -1723,92 +1632,6 @@ function isGridPointOccupied(gx, gy, gridPoint, draggingObject) {
   return false;  // 格点空闲
 }
 
-/**
- * 从鼠标位置向外扩展搜索最近的可吸附点
- * 逐层扩展搜索grid，一旦在某层找到可吸附点就返回最近的
- */
-function findNearestAttractableExpanding(mouseX, mouseY) {
-  const win = SystemState.mainWindow;
-  if (!win || !win.grid) return null;
-
-  const gridSize = win.gridsize;
-  const gridWidth = win.grid.length;
-  const gridHeight = win.grid[0]?.length || 0;
-
-  if (gridWidth === 0 || gridHeight === 0) return null;
-
-  // 计算鼠标所在的grid cell
-  const centerGx = Math.floor(mouseX / gridSize);
-  const centerGy = Math.floor(mouseY / gridSize);
-
-  // 计算需要搜索的最大半径（覆盖整个grid）
-  const maxRange = Math.max(
-    Math.max(centerGx, gridWidth - 1 - centerGx),
-    Math.max(centerGy, gridHeight - 1 - centerGy)
-  ) + 1;
-
-  let nearest = null;
-  let minDist = Infinity;
-
-  // 逐层向外扩展搜索
-  for (let range = 0; range <= maxRange; range++) {
-    let foundInThisLayer = false;
-
-    // 搜索当前层的边界格子
-    for (let dx = -range; dx <= range; dx++) {
-      for (let dy = -range; dy <= range; dy++) {
-        // 只搜索边界（跳过内部已搜索过的）
-        if (range > 0 && Math.abs(dx) < range && Math.abs(dy) < range) continue;
-
-        const gx = centerGx + dx;
-        const gy = centerGy + dy;
-
-        // 边界检查
-        if (gx < 0 || gx >= gridWidth) continue;
-        if (gy < 0 || gy >= gridHeight) continue;
-
-        // 遍历该格子内的所有点
-        for (const p of win.grid[gx][gy]) {
-          if (!p.isAttractable) continue;
-
-          // 阶段16新增：EDIT 态只吸附屏幕平面附近的 局部格网点
-          if (SystemState.interactionState === 'EDIT') {
-            // 1. 只吸附局部格网点 (Control points snap to VM, so VM snaps to Grid)
-            if (p.tag !== 'LOCAL_GRID') continue;
-
-            // 2. 距离检测已移至 updateLocalGrid 控制 p.isAttractable
-          }
-
-          // Phase 2新增：VIEW态拖动时，跳过已被其他物体占用的格点
-          // 这样可以防止拖动时"脱手"（虚拟鼠标吸附到物心导致无法移动）
-          if (SystemState.draggingObject && p.isGridPoint) {
-            if (isGridPointOccupied(gx, gy, p, SystemState.draggingObject)) {
-              continue;  // 跳过已被占用的格点，寻找下一个空闲格点
-            }
-          }
-
-          const dx = p.xM - mouseX;
-          const dy = p.yM - mouseY;
-          const distSq = dx * dx + dy * dy;
-
-          // 找到更近的点
-          if (distSq < minDist) {
-            minDist = distSq;
-            nearest = p;
-            foundInThisLayer = true;
-          }
-        }
-      }
-    }
-
-    // 如果在当前层找到了可吸附点，就停止搜索
-    if (foundInThisLayer) {
-      break;
-    }
-  }
-
-  return nearest;
-}
 
 /**
  * 渲染屏幕辅助元素（虚拟鼠标等）
@@ -1852,9 +1675,9 @@ function renderScreenPixel(x, y, colorType, light, pixelData, width, height) {
   const baseLight = colorType === 'red' ? 35 : 50;
   const lutIndex = Math.min(
     Math.floor(light * baseLight * 10),
-    COLOR_LUT[colorType].length - 1
+    Renderer.LUT[colorType].length - 1
   );
-  const color = COLOR_LUT[colorType][Math.max(0, lutIndex)];
+  const color = Renderer.LUT[colorType][Math.max(0, lutIndex)];
 
   const idx = (y * width + x) * 4;
   pixelData[idx] = color[0];
