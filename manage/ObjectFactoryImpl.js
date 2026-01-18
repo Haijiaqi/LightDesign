@@ -19,6 +19,7 @@
 
 import { Point } from "../base/Point.js";
 import { Object } from "../base/Object.js";
+import { CONFIG } from "./Config.js";
 
 export class ObjectFactoryImpl {
 
@@ -358,8 +359,11 @@ export class ObjectFactoryImpl {
      * 局部格网配置 (集中管理，方便调整)
      */
     static LocalGridConfig = {
-        // 格网尺寸 (临时固定 8cm，正式版应为 Round(Min(ScreenW, ScreenH)/10)*10)
-        size: 8,
+        // 格网尺寸: Round(Min(ScreenW, ScreenH)/10)*10
+        get size() {
+            const minDim = Math.min(CONFIG.screenXLengthCm, CONFIG.screenYLengthCm);
+            return Math.round(minDim / 10) * 10;
+        },
         spacing: 2.0,
 
         // 计算属性
