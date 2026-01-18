@@ -359,10 +359,11 @@ export class ObjectFactoryImpl {
      * 局部格网配置 (集中管理，方便调整)
      */
     static LocalGridConfig = {
-        // 格网尺寸: Round(Min(ScreenW, ScreenH)/10)*10
+        // 格网尺寸: Round(Min(ScreenW, ScreenH)/10)*10 -> 临时固定 8cm
         get size() {
-            const minDim = Math.min(CONFIG.screenXLengthCm, CONFIG.screenYLengthCm);
-            return Math.round(minDim / 10) * 10;
+            // const minDim = Math.min(CONFIG.screenXLengthCm, CONFIG.screenYLengthCm);
+            // return Math.round(minDim / 10) * 10;
+            return 8;
         },
         spacing: 2.0,
 

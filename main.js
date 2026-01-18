@@ -1,3 +1,25 @@
+/**
+ * main.js - 核心逻辑枢纽 (Core Logic Hub)
+ *
+ * 模块职责索引 (Module Responsibility Index):
+ *
+ * [基础类 (Base)]
+ * - base/Window.js:          3D投影窗口控制，负责坐标变换(世界->屏幕)、视锥体计算。
+ * - base/Object.js:          3D物体基类，包含点云数据、中心点及基础属性。
+ * - base/Point.js:           基础点类(x,y,z)，承载位置信息。
+ * - base/Vector.js:          向量数学库，提供法向量计算、点积叉积等工具。
+ *
+ * [管理类 (Manage) - 逻辑/功能]
+ * - manage/SystemState.js:   全局状态单例，存储 SystemState(运行时状态)。
+ * - manage/Config.js:        集中式静态配置，定义屏幕尺寸、渲染参数及交互阈值(SystemState导出)。
+ * - manage/InputManager.js:  输入交互管理器，负责监听鼠标/键盘事件并将原始输入转换为"意图(Intent)"传回 main.js。
+ * - manage/Renderer.js:      渲染器，负责 Canvas 绘图、LUT 颜色查找表及像素级点云绘制。
+ * - manage/CameraSystem.js:  摄像头系统，处理 WebCam 视频流、人脸/光源位置检测逻辑。
+ * - manage/AnimationImpl.js: 动画系统，提供任务队列(Process/Next)、缓动函数及差值计算。
+ * - manage/ObjectFactoryImpl.js: 对象工厂，负责生产几何体(立方体/球)、网格(世界/局部)及测试场景。
+ * - manage/OrientationImpl.js:   姿态管理，处理四元数旋转、轴对齐(Snap)及姿态平滑过渡。
+ */
+
 import { Window } from "./base/Window.js";
 import { Object } from "./base/Object.js";
 import { Point } from "./base/Point.js";
