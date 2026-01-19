@@ -203,9 +203,7 @@ export class Object {
     this.centerPoint.ownerObject = this;      // 关联到所属物体
     // ============================================
 
-    // ========== 整饬新增：控制点数组 ==========
-    this.controlPoints = [];  // 控制点数组（用于 EDIT 态编辑）
-    // =========================================
+    // controlPoints 已在 L81-90 正确初始化，不再重复设置
 
     this.verbose = options.verbose ?? false;
   }

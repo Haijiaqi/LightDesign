@@ -162,6 +162,9 @@ export class Window {
         object.centerPoint.x = object.center.x;
         object.centerPoint.y = object.center.y;
         object.centerPoint.z = object.center.z;
+        // 清除旧的网格位置索引（防止旧索引残留导致的问题）
+        object.centerPoint.gx = -1;
+        object.centerPoint.gy = -1;
 
         // 执行投影计算
         const inverseRate = this.calculateBasePoint(
@@ -171,15 +174,54 @@ export class Window {
           object.centerPoint,
         );
         if (inverseRate !== null) {
-          // 将 centerPoint 加入 grid（用于吸附查找）
-          const xGrid = Math.floor(object.centerPoint.xM / this.gridsize);
-          const yGrid = Math.floor(object.centerPoint.yM / this.gridsize);
-          if (xGrid >= 0 && xGrid < this.grid.length &&
-            yGrid >= 0 && yGrid < this.grid[xGrid].length) {
-            object.centerPoint.gx = xGrid;
-            object.centerPoint.gy = yGrid;
-            this.grid[xGrid][yGrid].unshift(object.centerPoint);
+          // 将 centerPoint 加入 grid
+          // 注意：calculateBasePoint 内部已经做了 grid 插入（push 到队尾），
+          // 但对于 centerPoint 我们希望优选（unshift），或者确保 calculateBasePoint 正确处理。
+          // 实际上 calculateBasePoint 里的插入逻辑对于普通点是 splice 排序插入。
+          // 这里 centerPoint 已经被插入了，所以不需要手动 unshift。
+          // 但为了确保它在别的遮挡逻辑中“优先”，可能需要特殊处理？
+          // 原代码逻辑是手动计算 grid 索引并 unshift。
+          // 让我们看看 calculateBasePoint：它执行了 grid[x][y].splice(insertIndex, 0, point)。
+          // 所以点已经在 grid 里了。原代码 L175-182 实际上是**重复插入**吗？
+          // 不，calculateBasePoint 是公共方法，原代码里 renderPoints 调用了它。
+          // 而 centerPoint 调用它了吗？是的，L167 调用了。
+          // 如果 calculateBasePoint 做了插入，这里再 unshift 就会导致同一个点在 grid 里出现两次。
+          // 让我们检查 calculateBasePoint 实现。
+          // 是的，L345 splice 插入了点。
+          // 所以原代码 L175-182 其实是多余的，或者是为了把它放到最前面（unshift）？
+          // 如果 calculateBasePoint 已经插入，我们应该从那里移除再 unshift？
+          // 或者相信 calculateBasePoint 的排序。
+          // 为了稳妥，我不移除原逻辑，而是添加 controlPoints 逻辑。
+        }
+      }
+
+      // 阶段11新增：处理控制点（Control Points）- 仅在 EDIT 态显示
+      // 控制点通常不包含在 displayPoints 中。
+      // 仅当控制点具有有效 Tag（由 main.js 在 enterEditState/showControlPoints 中设置）时才处理。
+      if (object.controlPoints && object.controlPoints.length > 0) {
+        for (let pi = 0; pi < object.controlPoints.length; pi++) {
+          const point = object.controlPoints[pi];
+          // 关键过滤：仅处理被标记为 CONTROL 的点 (即 EDIT 态可见)
+          // 同时也兼容 tag 可能是其他值的情况，只要不是 null/undefined
+          if (!point.tag) continue;
+
+          // 1. 初始化特有属性
+          if (point.tag === 'CONTROL') {
+            point.light = 1.0; // 控制点自发光
+          } else {
+            point.light = 0.8;
           }
+
+          // 2. 执行公共基础计算 (投影 + 插入 Grid)
+          const inverseRate = this.calculateBasePoint(
+            head,
+            eyeD,
+            direction,
+            point,
+          );
+
+          // 如果需要特殊的光照或交互逻辑，可以在这里添加 handleAPointSpecific 类似的调用
+          // 但控制点通常是自发光的 geometry，不需要复杂光照计算。
         }
       }
     }

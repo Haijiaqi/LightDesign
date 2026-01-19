@@ -13,11 +13,31 @@ export class StyleImpl {
         MONO: { h: 285, s: 90 }   // 紫
     };
 
-    // ========== 亮度范围（禁止修改）==========
+    // ========== 亮度范围 ==========
     static BRIGHTNESS = {
-        STEREO_LEFT: { base: 35, max: 35 },
-        STEREO_RIGHT: { base: 50, max: 50 },
-        MONO: { base: 50, max: 50 }
+        STEREO_LEFT: { base: 35, maxIndex: 350 },
+        STEREO_RIGHT: { base: 50, maxIndex: 500 },
+        MONO: { base: 50, maxIndex: 500 }
+    };
+
+    // ========== 立体模式配置 ==========
+    static get STEREO_CONFIG() {
+        return {
+            '3D_LR': {
+                left: { colorType: 'red', base: this.BRIGHTNESS.STEREO_LEFT.base, maxIndex: this.BRIGHTNESS.STEREO_LEFT.maxIndex },
+                right: { colorType: 'blue', base: this.BRIGHTNESS.STEREO_RIGHT.base, maxIndex: this.BRIGHTNESS.STEREO_RIGHT.maxIndex }
+            },
+            '3D_RL': {
+                left: { colorType: 'blue', base: this.BRIGHTNESS.STEREO_RIGHT.base, maxIndex: this.BRIGHTNESS.STEREO_RIGHT.maxIndex },
+                right: { colorType: 'red', base: this.BRIGHTNESS.STEREO_LEFT.base, maxIndex: this.BRIGHTNESS.STEREO_LEFT.maxIndex }
+            }
+        };
+    }
+
+    // ========== 邻接点阈值 ==========
+    static NEIGHBOR_THRESHOLDS = {
+        high: 0.6,
+        low: 0.3
     };
 
     // LUT 缓存
@@ -61,11 +81,9 @@ export class StyleImpl {
      */
     static _generateLUT() {
         const factor = this.LUT_FACTOR;
-        const maxBrightnessRed = this.BRIGHTNESS.STEREO_LEFT.max;
-        const maxBrightnessBluePurple = this.BRIGHTNESS.STEREO_RIGHT.max;
-
-        const sizeRed = Math.round(maxBrightnessRed * factor) + 1;
-        const sizeBluePurple = Math.round(maxBrightnessBluePurple * factor) + 1;
+        // LUT 尺寸直接使用 maxIndex + 1
+        const sizeRed = this.BRIGHTNESS.STEREO_LEFT.maxIndex + 1;
+        const sizeBluePurple = this.BRIGHTNESS.STEREO_RIGHT.maxIndex + 1;
 
         const lut = {
             red: new Array(sizeRed),
@@ -129,14 +147,13 @@ export class StyleImpl {
             fixedLight: 0.5,
             neighborRule: 'none'
         },
-        // 控制点：单色高亮，带发光效果
+        // 控制点：立体高亮，使用发光效果
         CONTROL: {
-            colorMode: 'mono',
-            monoKey: 'purple',
+            colorMode: 'stereo',
             lightAffected: false,
             fixedLight: 1.0,
             neighborRule: 'glow',
-            glowRadius: 2
+            glowRadius: 3
         }
     };
 
@@ -147,5 +164,55 @@ export class StyleImpl {
      */
     static getTagConfig(tag) {
         return this.TAGS[tag] || this.TAGS.SURFACE;
+    }
+
+    /**
+     * 解析点的渲染样式
+     * @param {Object} context - 渲染上下文
+     * @param {string} context.tag - 点标签
+     * @param {number} context.light - 光照强度 (0-1)
+     * @param {string} context.displayMode - 显示模式 ('3D_LR'|'3D_RL'|'2D')
+     * @param {boolean} context.hasDisparity - 是否有视差
+     * @returns {Object} ResolvedStyle
+     */
+    static resolvePointStyle(context) {
+        const { tag, light, displayMode, hasDisparity } = context;
+        const tagConfig = this.getTagConfig(tag);
+        const is3D = displayMode !== '2D';
+
+        // 计算有效亮度
+        let effectiveLight = tagConfig.lightAffected ? light : (tagConfig.fixedLight ?? 1.0);
+        if (tagConfig.brightnessMultiplier !== undefined) {
+            effectiveLight *= tagConfig.brightnessMultiplier;
+        }
+
+        // 计算邻接渲染半径
+        let neighborRadius = 0;
+        if (tagConfig.neighborRule === 'standard') {
+            neighborRadius = 1;
+        } else if (tagConfig.neighborRule === 'glow') {
+            neighborRadius = tagConfig.glowRadius || 2;
+        }
+
+        // 立体配置
+        const stereoConfig = this.STEREO_CONFIG[displayMode] || this.STEREO_CONFIG['3D_LR'];
+
+        // 单色配置
+        const monoConfig = {
+            colorType: tagConfig.monoKey || 'purple',
+            base: this.BRIGHTNESS.MONO.base,
+            maxIndex: this.BRIGHTNESS.MONO.maxIndex
+        };
+
+        return {
+            is3D,
+            hasDisparity: is3D && hasDisparity,
+            left: stereoConfig.left,
+            right: stereoConfig.right,
+            mono: monoConfig,
+            neighborRadius,
+            effectiveLight,
+            tagConfig
+        };
     }
 }

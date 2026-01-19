@@ -1280,6 +1280,16 @@ function moveObjectTo(obj, x, y, z) {
         p.y += dy;
         p.z += dz;
     }
+    // FIX: 确保 controlPoints 也跟随移动
+    if (obj.controlPoints && obj.controlPoints.length > 0) {
+        // 注意：如果 controlPoints 和 displayPoints 是同一组对象引用，则不需要重复更新。
+        // 根据 Object.js 逻辑，controlPoints 是深复制的新点对象，所以必须更新。
+        for (const cp of obj.controlPoints) {
+            cp.x += dx;
+            cp.y += dy;
+            cp.z += dz;
+        }
+    }
     obj.center.x = x;
     obj.center.y = y;
     obj.center.z = z;
@@ -1472,7 +1482,7 @@ function exitEditState() {
 function showControlPoints(obj) {
     if (!obj) return;
     const points = obj.controlPoints && obj.controlPoints.length > 0 ? obj.controlPoints : (obj.constructionPoints || []).slice(0, 20);
-    for (const cp of points) { cp.tag = null; cp.isAttractable = true; }
+    for (const cp of points) { cp.tag = 'CONTROL'; cp.isAttractable = true; }
 }
 
 function hideControlPoints() {

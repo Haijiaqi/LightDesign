@@ -619,6 +619,24 @@ export class OrientationImpl {
             p.z = center.z + rz * cos + crossZ * sin + axis.z * dotAxis * (1 - cos);
         }
 
+        // FIX: 确保 controlPoints 也跟随旋转
+        if (obj.controlPoints && obj.controlPoints.length > 0) {
+            for (const p of obj.controlPoints) {
+                const rx = p.x - center.x;
+                const ry = p.y - center.y;
+                const rz = p.z - center.z;
+
+                const dotAxis = axis.x * rx + axis.y * ry + axis.z * rz;
+                const crossX = axis.y * rz - axis.z * ry;
+                const crossY = axis.z * rx - axis.x * rz;
+                const crossZ = axis.x * ry - axis.y * rx;
+
+                p.x = center.x + rx * cos + crossX * sin + axis.x * dotAxis * (1 - cos);
+                p.y = center.y + ry * cos + crossY * sin + axis.y * dotAxis * (1 - cos);
+                p.z = center.z + rz * cos + crossZ * sin + axis.z * dotAxis * (1 - cos);
+            }
+        }
+
         // 同步旋转 frontDirection
         if (obj.frontDirection) {
             const p = obj.frontDirection;
