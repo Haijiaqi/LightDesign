@@ -311,18 +311,20 @@ export class OrientationImpl {
         let requireVisual = null;
 
         // 规则表
+        // W：向前俯仰（物体顶部向屏幕内倒），绕 viewX 负方向
+        // S：向后俯仰（物体顶部向用户倒），绕 viewX 正方向
         if (key === 'w') {
-            axis = viewX;
-            if (isStandardFace) { angle = 45; allowedTypes = ['EDGE']; requireVisual = 'H'; }
-            else if (isRolledFace) { angle = 90; allowedTypes = ['EDGE']; requireVisual = 'V'; }
-            else if (isEdgeH) { angle = 45; allowedTypes = ['FACE']; requireRolled = false; }
-            else if (isEdgeV) { angle = 90; allowedTypes = ['FACE']; requireRolled = true; }
-        } else if (key === 's') {
             axis = viewX;
             if (isStandardFace) { angle = -45; allowedTypes = ['EDGE']; requireVisual = 'H'; }
             else if (isRolledFace) { angle = -90; allowedTypes = ['EDGE']; requireVisual = 'V'; }
             else if (isEdgeH) { angle = -45; allowedTypes = ['FACE']; requireRolled = false; }
             else if (isEdgeV) { angle = -90; allowedTypes = ['FACE']; requireRolled = true; }
+        } else if (key === 's') {
+            axis = viewX;
+            if (isStandardFace) { angle = 45; allowedTypes = ['EDGE']; requireVisual = 'H'; }
+            else if (isRolledFace) { angle = 90; allowedTypes = ['EDGE']; requireVisual = 'V'; }
+            else if (isEdgeH) { angle = 45; allowedTypes = ['FACE']; requireRolled = false; }
+            else if (isEdgeV) { angle = 90; allowedTypes = ['FACE']; requireRolled = true; }
         } else if (key === 'a') {
             axis = viewY;
             if (isStandardFace) { angle = 45; allowedTypes = ['EDGE']; requireVisual = 'V'; }
@@ -598,30 +600,58 @@ export class OrientationImpl {
      * @param {Object} axis - 旋转轴 {x, y, z}（需归一化）
      * @param {number} amount - 旋转角度（弧度）
      */
+    // ==========================================================================
+    // 物体旋转工具
+    // ==========================================================================
+
+    /**
+     * 绕指定轴旋转物体
+     * @param {Object} obj - 物体对象
+     * @param {Object} axis - 旋转轴 {x, y, z}（需归一化）
+     * @param {number} amount - 旋转角度（弧度）
+     */
     static rotateObjectAroundAxis(obj, axis, amount) {
+        // 预先计算 sin/cos，供所有分支使用（包括 frontDirection/upDirection 旋转）
         const cos = Math.cos(amount);
         const sin = Math.sin(amount);
-        const center = obj.center;
-        const points = obj.displayPoints.length > 0 ? obj.displayPoints : obj.constructionPoints;
 
-        for (const p of points) {
-            const rx = p.x - center.x;
-            const ry = p.y - center.y;
-            const rz = p.z - center.z;
+        // 阶段3重构：使用 Transform 组件
+        if (obj.transform) {
+            const halfAngle = amount / 2;
+            const s = Math.sin(halfAngle);
+            const qw = Math.cos(halfAngle);
+            const qx = axis.x * s;
+            const qy = axis.y * s;
+            const qz = axis.z * s;
 
-            const dotAxis = axis.x * rx + axis.y * ry + axis.z * rz;
-            const crossX = axis.y * rz - axis.z * ry;
-            const crossY = axis.z * rx - axis.x * rz;
-            const crossZ = axis.x * ry - axis.y * rx;
+            // Dq = (qw, qx, qy, qz)
+            // Existing Q = (ew, ex, ey, ez)
+            // New Q = Dq * Existing Q (Global rotation)
+            const ew = obj.transform.rotation.w;
+            const ex = obj.transform.rotation.x;
+            const ey = obj.transform.rotation.y;
+            const ez = obj.transform.rotation.z;
 
-            p.x = center.x + rx * cos + crossX * sin + axis.x * dotAxis * (1 - cos);
-            p.y = center.y + ry * cos + crossY * sin + axis.y * dotAxis * (1 - cos);
-            p.z = center.z + rz * cos + crossZ * sin + axis.z * dotAxis * (1 - cos);
-        }
+            // Quaternion Multiply: A * B
+            // w = aw*bw - ax*bx - ay*by - az*bz
+            // x = aw*bx + ax*bw + ay*bz - az*by
+            // y = aw*by - ax*bz + ay*bw + az*bx
+            // z = aw*bz + ax*by - ay*bx + az*bw
 
-        // FIX: 确保 controlPoints 也跟随旋转
-        if (obj.controlPoints && obj.controlPoints.length > 0) {
-            for (const p of obj.controlPoints) {
+            obj.transform.rotation.w = qw * ew - qx * ex - qy * ey - qz * ez;
+            obj.transform.rotation.x = qw * ex + qx * ew + qy * ez - qz * ey;
+            obj.transform.rotation.y = qw * ey - qx * ez + qy * ew + qz * ex;
+            obj.transform.rotation.z = qw * ez + qx * ey - qy * ex + qz * ew;
+
+            // Normalize handled in updateWorldPoints called immediately
+            obj._dirty = true;
+            obj.updateWorldPoints();
+        } else {
+            // Fallback for objects without transform
+            const center = obj.center;
+            const points = obj.displayPoints.length > 0 ? obj.displayPoints : obj.constructionPoints;
+
+            for (const p of points) {
                 const rx = p.x - center.x;
                 const ry = p.y - center.y;
                 const rz = p.z - center.z;
@@ -634,6 +664,24 @@ export class OrientationImpl {
                 p.x = center.x + rx * cos + crossX * sin + axis.x * dotAxis * (1 - cos);
                 p.y = center.y + ry * cos + crossY * sin + axis.y * dotAxis * (1 - cos);
                 p.z = center.z + rz * cos + crossZ * sin + axis.z * dotAxis * (1 - cos);
+            }
+
+            // FIX: 确保 controlPoints 也跟随旋转
+            if (obj.controlPoints && obj.controlPoints.length > 0) {
+                for (const p of obj.controlPoints) {
+                    const rx = p.x - center.x;
+                    const ry = p.y - center.y;
+                    const rz = p.z - center.z;
+
+                    const dotAxis = axis.x * rx + axis.y * ry + axis.z * rz;
+                    const crossX = axis.y * rz - axis.z * ry;
+                    const crossY = axis.z * rx - axis.x * rz;
+                    const crossZ = axis.x * ry - axis.y * rx;
+
+                    p.x = center.x + rx * cos + crossX * sin + axis.x * dotAxis * (1 - cos);
+                    p.y = center.y + ry * cos + crossY * sin + axis.y * dotAxis * (1 - cos);
+                    p.z = center.z + rz * cos + crossZ * sin + axis.z * dotAxis * (1 - cos);
+                }
             }
         }
 

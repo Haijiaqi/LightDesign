@@ -3,6 +3,11 @@ export class Point {
     this.x = x;
     this.y = y;
     this.z = z;
+    // ========== 阶段3新增：局部坐标 (Local Space) ==========
+    this.lx = x; // 局部 X
+    this.ly = y; // 局部 Y
+    this.lz = z; // 局部 Z
+    // =======================================================
     this.nx = 0;
     this.ny = 0;
     this.nz = 0;

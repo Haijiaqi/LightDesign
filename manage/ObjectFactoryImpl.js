@@ -89,10 +89,12 @@ export class ObjectFactoryImpl {
         for (let i = 0; i < pointsPerFace; i++) {
             faceGenerators.forEach((gen) => {
                 const { x: px, y: py, z: pz } = gen();
+                // 阶段3修改：生成局部坐标（以原点为中心）
                 const rotatedX = px * cosA - py * sinA;
                 const rotatedY = px * sinA + py * cosA;
                 const rotatedZ = pz;
-                points.push(new Point(rotatedX + x, rotatedY + y, rotatedZ + z));
+                // 不加 x, y, z 偏移，这些是局部坐标
+                points.push(new Point(rotatedX, rotatedY, rotatedZ));
             });
 
             if (ifEntity) {
@@ -102,7 +104,8 @@ export class ObjectFactoryImpl {
                 const rotatedX = intX * cosA - intY * sinA;
                 const rotatedY = intX * sinA + intY * cosA;
                 const rotatedZ = intZ;
-                points.push(new Point(rotatedX + x, rotatedY + y, rotatedZ + z));
+                // 不加 x, y, z 偏移
+                points.push(new Point(rotatedX, rotatedY, rotatedZ));
             }
         }
 
@@ -112,6 +115,7 @@ export class ObjectFactoryImpl {
         const frontY = -Math.cos(rad);
         const frontZ = 0;
 
+        // 通过 center 参数传递世界位置
         return new Object(points, {
             frontDirection: { x: frontX, y: frontY, z: frontZ },
             center: { x, y, z }
@@ -145,6 +149,8 @@ export class ObjectFactoryImpl {
         const cosA = Math.cos(rad);
         const sinA = Math.sin(rad);
 
+        // 阶段3修改：生成局部坐标（以原点为中心）
+        // 不再单独给平面赋法向量，让系统通过 estimateNormals 统一处理
         const generateSurfacePoint = () => {
             const px = (Math.random() - 0.5) * width;
             const pz = (Math.random() - 0.5) * height;
@@ -154,16 +160,8 @@ export class ObjectFactoryImpl {
             const rotatedY = px * sinA + py * cosA;
             const rotatedZ = pz;
 
-            // 法向量（默认(0,-1,0)，同步绕Z轴旋转）
-            const nx = 0 * cosA - -1 * sinA;
-            const ny = 0 * sinA + -1 * cosA;
-            const nz = 0;
-
-            const p = new Point(rotatedX + x, rotatedY + y, rotatedZ + z);
-            p.nx = nx;
-            p.ny = ny;
-            p.nz = nz;
-            return p;
+            // 不加 x, y, z 偏移，这些是局部坐标
+            return new Point(rotatedX, rotatedY, rotatedZ);
         };
 
         for (let i = 0; i < pointsPerFace; i++) {
@@ -176,38 +174,42 @@ export class ObjectFactoryImpl {
             }
         }
 
-        return new Object(points);
+        // 通过 center 参数传递世界位置
+        return new Object(points, { center: { x, y, z } });
     }
 
     /**
      * 创建球体点云
-     * @param {number} x0 - 中心 X 坐标
-     * @param {number} y0 - 中心 Y 坐标
-     * @param {number} z0 - 中心 Z 坐标
+     * @param {number} x0 - 中心 X 坐标（世界坐标）
+     * @param {number} y0 - 中心 Y 坐标（世界坐标）
+     * @param {number} z0 - 中心 Z 坐标（世界坐标）
      * @param {number} radius - 半径
      * @param {number} numPoints - 点数
      * @returns {Object}
      */
     static createSphere(x0, y0, z0, radius = 5, numPoints = 5000) {
         const points = [];
+        // 阶段3修改：生成局部坐标（以原点为中心）
         for (let i = 0; i < numPoints; i++) {
             const u = Math.random();
             const v = Math.random();
             const theta = 2 * Math.PI * u;
             const phi = Math.acos(2 * v - 1);
-            const x = radius * Math.sin(phi) * Math.cos(theta) + x0;
-            const y = radius * Math.sin(phi) * Math.sin(theta) + y0;
-            const z = radius * Math.cos(phi) + z0;
-            points.push(new Point(x, y, z));
+            // 局部坐标：不加 x0, y0, z0
+            const lx = radius * Math.sin(phi) * Math.cos(theta);
+            const ly = radius * Math.sin(phi) * Math.sin(theta);
+            const lz = radius * Math.cos(phi);
+            points.push(new Point(lx, ly, lz));
         }
+        // 通过 center 参数传递世界位置
         return new Object(points, { center: { x: x0, y: y0, z: z0 } });
     }
 
     /**
      * 创建带经纬线的球体（三个正交大圆）
-     * @param {number} x0 - 中心 X 坐标
-     * @param {number} y0 - 中心 Y 坐标
-     * @param {number} z0 - 中心 Z 坐标
+     * @param {number} x0 - 中心 X 坐标（世界坐标）
+     * @param {number} y0 - 中心 Y 坐标（世界坐标）
+     * @param {number} z0 - 中心 Z 坐标（世界坐标）
      * @param {number} radius - 半径
      * @param {number} numMeridians - 经线数（未使用，保留接口）
      * @param {number} pointsPerCircle - 每圆点数
@@ -223,36 +225,38 @@ export class ObjectFactoryImpl {
     ) {
         const points = [];
 
-        // 圆1: XY平面 (z=z0)
+        // 阶段3修改：生成局部坐标（以原点为中心）
+        // 圆1: XY平面 (z=0)
         for (let p = 0; p <= pointsPerCircle; p++) {
             const theta = (p / pointsPerCircle) * 2 * Math.PI;
             points.push(new Point(
-                x0 + radius * Math.cos(theta),
-                y0 + radius * Math.sin(theta),
-                z0
+                radius * Math.cos(theta),
+                radius * Math.sin(theta),
+                0
             ));
         }
 
-        // 圆2: XZ平面 (y=y0)
+        // 圆2: XZ平面 (y=0)
         for (let p = 0; p <= pointsPerCircle; p++) {
             const theta = (p / pointsPerCircle) * 2 * Math.PI;
             points.push(new Point(
-                x0 + radius * Math.cos(theta),
-                y0,
-                z0 + radius * Math.sin(theta)
+                radius * Math.cos(theta),
+                0,
+                radius * Math.sin(theta)
             ));
         }
 
-        // 圆3: YZ平面 (x=x0)
+        // 圆3: YZ平面 (x=0)
         for (let p = 0; p <= pointsPerCircle; p++) {
             const theta = (p / pointsPerCircle) * 2 * Math.PI;
             points.push(new Point(
-                x0,
-                y0 + radius * Math.cos(theta),
-                z0 + radius * Math.sin(theta)
+                0,
+                radius * Math.cos(theta),
+                radius * Math.sin(theta)
             ));
         }
 
+        // 通过 center 参数传递世界位置
         return new Object(points, { center: { x: x0, y: y0, z: z0 } });
     }
 
@@ -319,11 +323,13 @@ export class ObjectFactoryImpl {
                     );
 
                     if (isSurface) {
-                        const x = cx + ix * spacing;
-                        const y = cy + iy * spacing;
-                        const z = cz + iz * spacing;
+                        // 阶段3修复：生成局部坐标（以原点为中心）
+                        // 不加 cx, cy, cz，这些通过 center 选项传递
+                        const lx = ix * spacing;
+                        const ly = iy * spacing;
+                        const lz = iz * spacing;
 
-                        const p = new Point(x, y, z);
+                        const p = new Point(lx, ly, lz);
                         p.isAttractable = false;
                         points.push(p);
                     }
@@ -345,9 +351,18 @@ export class ObjectFactoryImpl {
      */
     static createTestScene() {
         return [
-            ObjectFactoryImpl.createSphere(0, 50, 0, 3, 2000),
-            ObjectFactoryImpl.createCube(5, 100, -10, 50, 0, 0),
-            ObjectFactoryImpl.createIntegerGridObject(10, 50, 0, 5, 1),
+            // 测试平面: 20cm 宽 × 5cm 高，位于 (0, 50, 0)
+            ObjectFactoryImpl.createPlane(20, 5, 2000, 0, 50, 0, 0, false),
+
+            // 球体: 半径 3cm，位于 (-10, 50, 0) - 整10位置
+            ObjectFactoryImpl.createSphere(-10, 50, 0, 3, 3000),
+
+            // 立方体: 边长 4cm，位于 (10, 50, 0) - 整10位置
+            // 参数顺序: size, pointsPerFace, x, y, z, alpha, ifEntity
+            ObjectFactoryImpl.createCube(4, 300, 10, 50, 0, 0, false),
+
+            // 整格点对象: 6点边长，间距1cm，位于 (0, 60, 0)
+            ObjectFactoryImpl.createIntegerGridObject(0, 60, 0, 6, 1),
         ];
     }
 
@@ -488,15 +503,22 @@ export class ObjectFactoryImpl {
 
         console.log(`局部格网生成: 格点 ${Math.pow(2 * count + 1, 3)}个, 虚线点 ${points.length - Math.pow(2 * count + 1, 3)}个`);
 
-        const gridObj = new Object();
-        gridObj.displayPoints = points;
-        gridObj.center = { x: targetObj.center.x, y: targetObj.center.y, z: targetObj.center.z };
-
-        if (targetObj.quaternion) {
-            gridObj.quaternion = { ...targetObj.quaternion };
-        } else {
-            gridObj.quaternion = { w: 1, x: 0, y: 0, z: 0 };
-        }
+        // 阶段3修复：正确初始化 transform
+        // targetObj.center 和 quaternion 实际上引用了 transform.position 和 rotation
+        // 我们需要传递值的副本
+        const gridObj = new Object(points, {
+            center: {
+                x: targetObj.center.x,
+                y: targetObj.center.y,
+                z: targetObj.center.z
+            },
+            quaternion: targetObj.quaternion ? {
+                w: targetObj.quaternion.w,
+                x: targetObj.quaternion.x,
+                y: targetObj.quaternion.y,
+                z: targetObj.quaternion.z
+            } : { w: 1, x: 0, y: 0, z: 0 }
+        });
 
         gridObj.isLocalGrid = true;
         gridObj.owner = targetObj;

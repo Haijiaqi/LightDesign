@@ -88,6 +88,12 @@ async function init() {
         range: 0.5 * displayWidth
     };
     SystemState.objects.push(SystemState.worldGrid);
+
+    // [New] Create Light Object as a persistent, movable object
+    SystemState.lightObject = ObjectFactoryImpl.createSphere(CONFIG.lightX, CONFIG.lightY, CONFIG.lightZ, 0.5, 20);
+    SystemState.lightObject.tag = 'LIGHT_SOURCE';
+    SystemState.objects.push(SystemState.lightObject);
+
     document.body.appendChild(SystemState.canvas);
     setupEventListeners();
     // Camera init
@@ -286,6 +292,9 @@ function processIntent(intent) {
             break;
         case 'MOVE_OBJECT':
             moveObjectTo(intent.object, intent.x, intent.y, intent.z);
+            if (intent.object && intent.object.tag === 'LIGHT_SOURCE') {
+                updateLight();
+            }
             break;
         case 'CAMERA_ZOOM':
             handleCameraZoom(intent.delta);
@@ -397,56 +406,100 @@ function processIntent(intent) {
 // EFFECTUATORS & LOGIC (From main_raw.js)
 // ============================================================================
 
-function handleCameraZoom(speed) {
-    const dir = SystemState.mainWindow.direction;
-    const currentY = SystemState.mainWindow.capital.y;
-    const initialY = SystemState.movementConstraints?.initialY ?? CONFIG.userDistanceFromOrigin;
-    const range = SystemState.movementConstraints?.range ?? (CONFIG.screenXLengthCm * 0.5);
-    const minY = initialY - range;
-    const maxY = initialY + range;
-    // Calculate dx, dy, dz based on direction
-    const dx = dir.x * speed;
-    const dy = dir.y * speed;
-    const dz = dir.z * speed;
+// ============================================================================
+// EFFECTUATORS & LOGIC (From main_raw.js)
+// ============================================================================
 
-    const nextY = currentY + dy;
-    if (nextY >= minY && nextY <= maxY) {
-        SystemState.mainWindow.capital.x += dx;
-        SystemState.mainWindow.capital.y += dy;
-        SystemState.mainWindow.capital.z += dz;
-        dir.start.x += dx;
-        dir.start.y += dy;
-        dir.start.z += dz;
-    } else {
-        console.log("已达到移动限制");
+function handleCameraZoom(speed) {
+    const win = SystemState.mainWindow;
+    const rotCenter = SystemState.rotationCenter;
+    if (!win || !rotCenter) return;
+
+    // 1. 获取当前半径向量 (在 XY 平面)
+    const dx = win.capital.x - rotCenter.x;
+    const dy = win.capital.y - rotCenter.y;
+    const currentRadius = Math.sqrt(dx * dx + dy * dy);
+
+    // 2. 限制范围
+    // 2. 限制范围
+    // 最小距离：不能穿过 Z 轴 (保留 0.1cm 缓冲，防止除零或奇异点)
+    const minRadius = 0.1;
+    // 最大距离：世界格网边界，即 screenXLengthCm (约 31cm)
+    const maxRadius = CONFIG.screenXLengthCm;
+
+    // 3. 计算移动
+    // speed > 0 means get closer
+    const newRadius = Math.max(minRadius, Math.min(maxRadius, currentRadius - speed));
+
+    if (Math.abs(newRadius - currentRadius) < 0.001) {
+        // console.log('[ZOOM] 已达边界'); // Reduce log spam
+        return;
     }
+
+    // 4. 应用新半径 (保持角度不变)
+    // 归一化方向向量 (从圆心指向相机)
+    const nx = dx / currentRadius;
+    const ny = dy / currentRadius;
+
+    const newX = rotCenter.x + nx * newRadius;
+    const newY = rotCenter.y + ny * newRadius;
+    const deltaX = newX - win.capital.x;
+    const deltaY = newY - win.capital.y;
+
+    win.capital.x = newX;
+    win.capital.y = newY;
+    // Z 不动
+
+    // 同步 direction.start
+    win.direction.start.x += deltaX;
+    win.direction.start.y += deltaY;
+    // Z 不动
+
     SystemState.ifControl = true;
+    console.log(`[ZOOM] R: ${currentRadius.toFixed(1)} -> ${newRadius.toFixed(1)}`);
 }
 
 function resetCameraDistance() {
+    // ESC 重置：只在 XY 平面重置距离，保持角度不变，Z 坐标完全不动
+    // 旋转只改变 capital.x/y，FGV 也只改变 XY（因为 direction.z = 0）
+
     const win = SystemState.mainWindow;
-    if (!win || !win.direction || !win.capital) return;
-    const dir = win.direction;
-    const dirStart = dir.start;
-    const initialY = SystemState.movementConstraints?.initialY ?? CONFIG.userDistanceFromOrigin;
-    const currentY = win.capital.y;
-    const deltaY = currentY - initialY;
-    if (Math.abs(deltaY) < 0.001) {
-        console.log('[STATE] VIEW ESC: 已在初始位置');
+    if (!win || !win.capital) return;
+
+    const rotCenter = SystemState.rotationCenter;
+    if (!rotCenter) return;
+
+    // 初始距离（在 XY 平面）：初始时 capital = (0, userDistanceFromOrigin, eyeZ)
+    // rotCenter = (0, 0, screenZ)，所以 XY 平面距离 = userDistanceFromOrigin
+    const initialR = CONFIG.userDistanceFromOrigin;
+
+    // 当前 capital 相对于 rotationCenter 在 XY 平面的位置
+    const dx = win.capital.x - rotCenter.x;
+    const dy = win.capital.y - rotCenter.y;
+    const currentR = Math.sqrt(dx * dx + dy * dy);
+
+    // 检查是否已在初始距离
+    if (Math.abs(currentR - initialR) < 0.1) {
+        console.log('[STATE] VIEW ESC: 已在初始距离');
         return;
     }
-    const moveAmount = -deltaY / (Math.abs(dir.y) > 0.001 ? dir.y : 1);
-    const moveX = dir.x * moveAmount;
-    const moveY = dir.y * moveAmount;
-    const moveZ = dir.z * moveAmount;
-    win.capital.x += moveX;
-    win.capital.y += moveY;
-    win.capital.z += moveZ;
-    dirStart.x += moveX;
-    dirStart.y += moveY;
-    dirStart.z += moveZ;
+
+    // 计算缩放因子（只在 XY 平面）
+    const scale = initialR / currentR;
+
+    // 直接赋值新的 capital 位置（只改 X/Y，Z 不动）
+    win.capital.x = rotCenter.x + dx * scale;
+    win.capital.y = rotCenter.y + dy * scale;
+    // win.capital.z 不动！
+
+    // 同步更新 direction.start（只改 X/Y）
+    const eyeToScreenDist = CONFIG.screenDistance - CONFIG.userDistanceFromOrigin;
+    win.direction.start.x = win.capital.x + win.direction.x * eyeToScreenDist;
+    win.direction.start.y = win.capital.y + win.direction.y * eyeToScreenDist;
+    // win.direction.start.z 不动！
+
     SystemState.ifControl = true;
-    console.log(`[STATE] VIEW ESC: capital.y ${currentY.toFixed(1)}cm → ${win.capital.y.toFixed(1)}cm`);
+    console.log(`[STATE] VIEW ESC: XY距离 ${currentR.toFixed(1)}cm → ${initialR.toFixed(1)}cm`);
 }
 
 function handleInput() {
@@ -500,16 +553,12 @@ function applyVelocities(dt) {
         userRotate(rotVel);
         SystemState.ifControl = true;
     }
+    // FGV 移动已迁移至 InputManager 通过 CAMERA_ZOOM 发送直接意图，此处的 velocity 逻辑不再使用
+    /*
     if (Math.abs(moveVel) > 0.0001) {
-        const dir = SystemState.mainWindow.direction;
-        SystemState.mainWindow.capital.x += dir.x * moveVel;
-        SystemState.mainWindow.capital.y += dir.y * moveVel;
-        SystemState.mainWindow.capital.z += dir.z * moveVel;
-        dir.start.x += dir.x * moveVel;
-        dir.start.y += dir.y * moveVel;
-        dir.start.z += dir.z * moveVel;
-        SystemState.ifControl = true;
+        // Legacy code removed
     }
+    */
 }
 
 function estimateNormals() {
@@ -539,12 +588,25 @@ function estimateNormals() {
 function updateLight() {
     const eyeZ = CONFIG.userEyeHeight;
     const targetY = CONFIG.screenDistance;
-    const lightX = CONFIG.lightX;
-    const lightY = CONFIG.lightY;
-    const lightZ = CONFIG.lightZ;
+
+    // [Fix] Use real-time coordinates from the light object if it exists
+    let lx, ly, lz;
+    if (SystemState.lightObject && SystemState.lightObject.center) {
+        lx = SystemState.lightObject.center.x;
+        ly = SystemState.lightObject.center.y;
+        lz = SystemState.lightObject.center.z;
+    } else {
+        // Fallback to config only during early init
+        lx = CONFIG.lightX;
+        ly = CONFIG.lightY;
+        lz = CONFIG.lightZ;
+    }
+
     const lightDir = new Vector(0, 0, 0);
-    lightDir.normalInit(lightX, lightY, lightZ, 0, targetY, eyeZ);
+    // Light camera looks at (0, targetY, eyeZ) from (lx, ly, lz)
+    lightDir.normalInit(lx, ly, lz, 0, targetY, eyeZ);
     const lightCamPos = lightDir.getPoint(-5);
+
     SystemState.lightWindow.calculate(
         lightCamPos,
         0,
@@ -553,10 +615,10 @@ function updateLight() {
         1.0,
         SystemState.otherObjects,
     );
+
+    // [Fix] Do NOT recreate the sphere every frame. 
+    // The lightObject is now in SystemState.objects and rendered normally.
     SystemState.otherObjects.length = 0;
-    SystemState.otherObjects.push(
-        ObjectFactoryImpl.createSphere(lightX, lightY, lightZ, 0.5, 20),
-    );
 }
 
 function updateCamera() {
@@ -565,7 +627,7 @@ function updateCamera() {
         CONFIG.eyeD,
         SystemState.mainWindow.direction,
         SystemState.objects,
-        0,
+        1.0,
         SystemState.otherObjects,
     );
     if (SystemState.debugCenterPoint) {
@@ -581,6 +643,7 @@ function render() {
     const ctx = SystemState.ctx;
     const { screenWidthPx: width, screenHeightPx: height } = SystemState;
     updateCamera();
+    updateVisibleReflection(); // Ensure reflection vectors are updated before rendering
     const imageData = Renderer.render(ctx, width, height); // NOTE: Renderer.render now handles point drawing logic
     const pixelData = imageData.data;
     if (SystemState.interactionState === 'FOCUS' || SystemState.interactionState === 'EDIT') {
@@ -607,6 +670,14 @@ function updateVirtualMouse(mouseX, mouseY) {
     let snapped = null;
     if (win && win.findNearestPoint) {
         snapped = win.findNearestPoint(mouseX, mouseY, 0, (p) => {
+            // [Fix] 拖拽时忽略物体自身的可吸附点（主要是中心点）
+            if (SystemState.isDragging && SystemState.draggingObject) {
+                if (p.ownerObject === SystemState.draggingObject) {
+                    // console.log('[DEBUG] Ignoring self point for drag:', p.tag);
+                    return false;
+                }
+            }
+
             if (SystemState.interactionState === 'EDIT') {
                 if (p.tag !== 'LOCAL_GRID') return false;
             }
@@ -629,6 +700,7 @@ function updateVirtualMouse(mouseX, mouseY) {
     let centerYR = mouseY;
     let perspectiveScale = 1;
     if (SystemState.interactionState === 'FOCUS' || SystemState.interactionState === 'FOCUS_ENTERING') {
+        // FOCUS态：虚拟鼠标在指定深度平面，不吸附
         const baseDis = CONFIG.screenDistance - CONFIG.userDistanceFromOrigin;
         const vmDepth = baseDis + SystemState.focusVirtualMouseDepth;
         perspectiveScale = Math.max(0.1, baseDis / vmDepth);
@@ -643,6 +715,7 @@ function updateVirtualMouse(mouseX, mouseY) {
         centerYR = mouseY;
         vm.snappedTo = null;
     } else if (snapped) {
+        // VIEW态 或 EDIT态：吸附到格点（世界网格或局部网格）
         centerXL = snapped.xL;
         centerXR = snapped.xR;
         centerYL = snapped.yL;
@@ -654,6 +727,7 @@ function updateVirtualMouse(mouseX, mouseY) {
         perspectiveScale = Math.max(0.3, Math.min(3.0, baseDis / pointDis));
         vm.snappedTo = snapped;
     } else {
+        // 无吸附点时：跟随鼠标（屏幕平面）
         centerX = mouseX;
         centerY = mouseY;
         centerXL = mouseX;
@@ -744,9 +818,16 @@ function updateSliceContour() {
 
 function updateVisibleReflection() {
     // Copy from main_raw.js
-    const lightX = CONFIG.lightX;
-    const lightY = CONFIG.lightY;
-    const lightZ = CONFIG.lightZ;
+    // Use dynamic light position
+    let lightX = CONFIG.lightX;
+    let lightY = CONFIG.lightY;
+    let lightZ = CONFIG.lightZ;
+    if (SystemState.lightObject && SystemState.lightObject.center) {
+        lightX = SystemState.lightObject.center.x;
+        lightY = SystemState.lightObject.center.y;
+        lightZ = SystemState.lightObject.center.z;
+    }
+
     const grid = SystemState.mainWindow.grid;
     const K = 5;
     if (!grid || grid.length === 0) return;
@@ -760,14 +841,21 @@ function updateVisibleReflection() {
             for (let i = 0; i < count; i++) {
                 const p = points[i];
                 if (p.nx === 0 && p.ny === 0 && p.nz === 0) continue;
+
+                // Calculate Vector from Light to Point
                 const dx = p.x - lightX;
                 const dy = p.y - lightY;
                 const dz = p.z - lightZ;
                 const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
                 if (dist < 0.001) continue;
+
+                // Incident Vector I = Normalize(Point - Light)
                 const ix = dx / dist;
                 const iy = dy / dist;
                 const iz = dz / dist;
+
+                // Reflection Vector R = I - 2 * dot(I, N) * N
+                // Note: I points FROM light TO point.
                 const dot = ix * p.nx + iy * p.ny + iz * p.nz;
                 p.rx = ix - 2 * dot * p.nx;
                 p.ry = iy - 2 * dot * p.ny;
@@ -775,6 +863,7 @@ function updateVisibleReflection() {
             }
         }
     }
+
 }
 
 function resizeCanvas() {
@@ -908,36 +997,28 @@ function enterFocusState(obj) {
             progress
         }),
         apply: (targetObj, value) => {
-            const lastPos = targetObj._lastAnimPos || fromPos;
-            const dx = value.position.x - lastPos.x;
-            const dy = value.position.y - lastPos.y;
-            const dz = value.position.z - lastPos.z;
-            const allPoints = [
-                ...(targetObj.displayPoints || []),
-                ...(targetObj.constructionPoints || [])
-            ];
-            for (const p of allPoints) {
-                p.x += dx;
-                p.y += dy;
-                p.z += dz;
-            }
-            targetObj.center.x = value.position.x;
-            targetObj.center.y = value.position.y;
-            targetObj.center.z = value.position.z;
-            if (targetObj.centerPoint) {
-                targetObj.centerPoint.x = value.position.x;
-                targetObj.centerPoint.y = value.position.y;
-                targetObj.centerPoint.z = value.position.z;
-            }
+            // 阶段3修改：使用 Transform 系统更新位置
+            // 不再直接修改点的世界坐标，而是更新 transform.position
+            targetObj.transform.position.x = value.position.x;
+            targetObj.transform.position.y = value.position.y;
+            targetObj.transform.position.z = value.position.z;
+
+            // 处理旋转（增量旋转）
             if (value.progress > 0 && value.progress <= 1 && totalAngle > 0.001 && axisLen > 0.001) {
                 const lastProgress = targetObj._lastRotProgress || 0;
                 const progressDelta = value.progress - lastProgress;
                 const rotationAmount = totalAngle * progressDelta;
                 if (rotationAmount > 0.0001) {
+                    // rotateObjectAroundAxis 内部会调用 updateWorldPoints()
                     OrientationImpl.rotateObjectAroundAxis(targetObj, rotationAxis, rotationAmount);
                 }
                 targetObj._lastRotProgress = value.progress;
+            } else {
+                // 如果没有旋转，需要手动调用 updateWorldPoints 更新位置
+                targetObj._dirty = true;
+                targetObj.updateWorldPoints();
             }
+
             targetObj._lastAnimPos = { ...value.position };
         }
     });
@@ -1096,37 +1177,28 @@ function exitFocusState() {
         apply: (targetObj, value) => {
             const frameStart = value.progress < 0.1 || value.progress > 0.9;
             if (frameStart) tracePoint(targetObj, `anim-${(value.progress * 100).toFixed(0)}%-start`);
-            if (targetObj.center) {
-                const dx = value.position.x - (targetObj._lastAnimPos?.x ?? fromPos.x);
-                const dy = value.position.y - (targetObj._lastAnimPos?.y ?? fromPos.y);
-                const dz = value.position.z - (targetObj._lastAnimPos?.z ?? fromPos.z);
-                const pointSet = new Set([
-                    ...(targetObj.displayPoints || []),
-                    ...(targetObj.constructionPoints || [])
-                ]);
-                for (const p of pointSet) {
-                    p.x += dx;
-                    p.y += dy;
-                    p.z += dz;
-                }
-                targetObj.center.x = value.position.x;
-                targetObj.center.y = value.position.y;
-                targetObj.center.z = value.position.z;
-                if (targetObj.centerPoint) {
-                    targetObj.centerPoint.x = value.position.x;
-                    targetObj.centerPoint.y = value.position.y;
-                    targetObj.centerPoint.z = value.position.z;
-                }
-            }
+
+            // 阶段3修改：使用 Transform 系统更新位置
+            targetObj.transform.position.x = value.position.x;
+            targetObj.transform.position.y = value.position.y;
+            targetObj.transform.position.z = value.position.z;
+
+            // 处理旋转（增量旋转）
             if (value.progress > 0 && value.progress <= 1 && totalAngle > 0.001 && axisLen > 0.001) {
                 const lastProgress = targetObj._lastRotProgress || 0;
                 const progressDelta = value.progress - lastProgress;
                 const rotationAmount = totalAngle * progressDelta;
                 if (rotationAmount > 0.0001) {
+                    // rotateObjectAroundAxis 内部会调用 updateWorldPoints()
                     OrientationImpl.rotateObjectAroundAxis(targetObj, rotationAxis, rotationAmount);
                 }
                 targetObj._lastRotProgress = value.progress;
+            } else {
+                // 如果没有旋转，需要手动调用 updateWorldPoints 更新位置
+                targetObj._dirty = true;
+                targetObj.updateWorldPoints();
             }
+
             if (frameStart) tracePoint(targetObj, `anim-${(value.progress * 100).toFixed(0)}%-end`);
             targetObj._lastAnimPos = { ...value.position };
         }
@@ -1164,64 +1236,39 @@ function calculateCenterPosition() {
 }
 
 function rotateFocusedObject(dx, dy) {
+    // 阶段3重构：使用 Transform 系统进行旋转
+    // 调用 OrientationImpl.rotateObjectAroundAxis()，它会：
+    // 1. 更新 transform.rotation 四元数
+    // 2. 同步更新 frontDirection/upDirection
+    // 3. 调用 updateWorldPoints() 刷新世界坐标
     const obj = SystemState.focusedObject;
     if (!obj) return;
     if (obj.animationLock) return;
+
     const sensitivity = 0.005;
     const win = SystemState.mainWindow;
-    const screenX = win.vx;
-    const screenY = win.vy;
+
+    // 获取屏幕坐标系轴向量
+    const axisX = { x: win.vx.x, y: win.vx.y, z: win.vx.z };
+    const axisY = { x: win.vy.x, y: win.vy.y, z: win.vy.z };
+
+    // 归一化轴向量
+    const normX = Math.sqrt(axisX.x ** 2 + axisX.y ** 2 + axisX.z ** 2);
+    const normY = Math.sqrt(axisY.x ** 2 + axisY.y ** 2 + axisY.z ** 2);
+    if (normX > 0.001) { axisX.x /= normX; axisX.y /= normX; axisX.z /= normX; }
+    if (normY > 0.001) { axisY.x /= normY; axisY.y /= normY; axisY.z /= normY; }
+
     const angleAroundScreenY = -dx * sensitivity;
     const angleAroundScreenX = dy * sensitivity;
-    const center = obj.center;
-    const points = obj.displayPoints.length > 0 ? obj.displayPoints : obj.constructionPoints;
-    const axisX = { x: screenX.x, y: screenX.y, z: screenX.z };
-    const axisY = { x: screenY.x, y: screenY.y, z: screenY.z };
 
-    function rotatePointAroundAxis(p, axis, angle, pivot) {
-        if (angle === 0) return;
-        const cos = Math.cos(angle);
-        const sin = Math.sin(angle);
-        const ux = axis.x, uy = axis.y, uz = axis.z;
-        const rx = p.x - pivot.x;
-        const ry = p.y - pivot.y;
-        const rz = p.z - pivot.z;
-        const dot = ux * rx + uy * ry + uz * rz;
-        const crossX = uy * rz - uz * ry;
-        const crossY = uz * rx - ux * rz;
-        const crossZ = ux * ry - uy * rx;
-        p.x = pivot.x + rx * cos + crossX * sin + ux * dot * (1 - cos);
-        p.y = pivot.y + ry * cos + crossY * sin + uy * dot * (1 - cos);
-        p.z = pivot.z + rz * cos + crossZ * sin + uz * dot * (1 - cos);
+    // 使用 OrientationImpl 进行旋转（正确更新 transform.rotation）
+    // 先绕屏幕 Y 轴（水平拖拽 → 绕视窗上方向旋转）
+    if (Math.abs(angleAroundScreenY) > 0.0001) {
+        OrientationImpl.rotateObjectAroundAxis(obj, axisY, angleAroundScreenY);
     }
-
-    for (const p of points) {
-        rotatePointAroundAxis(p, axisY, angleAroundScreenY, center);
-        rotatePointAroundAxis(p, axisX, angleAroundScreenX, center);
-    }
-    // Rotate front/up directions... (Copy from main_raw.js 1778-1800)
-    if (obj.frontDirection) {
-        const origin = { x: 0, y: 0, z: 0 };
-        rotatePointAroundAxis(obj.frontDirection, axisY, angleAroundScreenY, origin);
-        rotatePointAroundAxis(obj.frontDirection, axisX, angleAroundScreenX, origin);
-        const flen = Math.sqrt(obj.frontDirection.x ** 2 + obj.frontDirection.y ** 2 + obj.frontDirection.z ** 2);
-        if (flen > 0) {
-            obj.frontDirection.x /= flen; obj.frontDirection.y /= flen; obj.frontDirection.z /= flen;
-        }
-        if (obj.centerPoint) {
-            obj.centerPoint.x = center.x;
-            obj.centerPoint.y = center.y;
-            obj.centerPoint.z = center.z;
-        }
-    }
-    if (obj.upDirection) {
-        const origin = { x: 0, y: 0, z: 0 };
-        rotatePointAroundAxis(obj.upDirection, axisY, angleAroundScreenY, origin);
-        rotatePointAroundAxis(obj.upDirection, axisX, angleAroundScreenX, origin);
-        const ulen = Math.sqrt(obj.upDirection.x ** 2 + obj.upDirection.y ** 2 + obj.upDirection.z ** 2);
-        if (ulen > 0) {
-            obj.upDirection.x /= ulen; obj.upDirection.y /= ulen; obj.upDirection.z /= ulen;
-        }
+    // 再绕屏幕 X 轴（垂直拖拽 → 绕视窗右方向旋转）
+    if (Math.abs(angleAroundScreenX) > 0.0001) {
+        OrientationImpl.rotateObjectAroundAxis(obj, axisX, angleAroundScreenX);
     }
 
     updateSliceContour();
@@ -1270,30 +1317,48 @@ function applyTouchImpulse(impulse) {
 }
 
 function moveObjectTo(obj, x, y, z) {
-    if (!obj || !obj.center) return;
-    const dx = x - obj.center.x;
-    const dy = y - obj.center.y;
-    const dz = z - obj.center.z;
-    const points = obj.displayPoints.length > 0 ? obj.displayPoints : obj.constructionPoints;
-    for (const p of points) {
-        p.x += dx;
-        p.y += dy;
-        p.z += dz;
-    }
-    // FIX: 确保 controlPoints 也跟随移动
-    if (obj.controlPoints && obj.controlPoints.length > 0) {
-        // 注意：如果 controlPoints 和 displayPoints 是同一组对象引用，则不需要重复更新。
-        // 根据 Object.js 逻辑，controlPoints 是深复制的新点对象，所以必须更新。
-        for (const cp of obj.controlPoints) {
-            cp.x += dx;
-            cp.y += dy;
-            cp.z += dz;
+    if (!obj) return;
+
+    // 阶段3重构：使用 Transform 组件
+    // 禁止直接修改 Point 世界坐标
+
+    // 更新 Transform
+    // 注意：obj.center 引用了 obj.transform.position，但为了明确语义，使用 transform
+    if (obj.transform) {
+        obj.transform.position.x = x;
+        obj.transform.position.y = y;
+        obj.transform.position.z = z;
+
+        obj._dirty = true;
+        obj.updateWorldPoints();
+    } else {
+        // Fallback for legacy objects (if any)
+        const dx = x - obj.center.x;
+        const dy = y - obj.center.y;
+        const dz = z - obj.center.z;
+
+        const points = obj.displayPoints.length > 0 ? obj.displayPoints : obj.constructionPoints;
+        for (const p of points) {
+            p.x += dx;
+            p.y += dy;
+            p.z += dz;
         }
+        // FIX: 确保 controlPoints 也跟随移动
+        if (obj.controlPoints && obj.controlPoints.length > 0) {
+            for (const cp of obj.controlPoints) {
+                cp.x += dx;
+                cp.y += dy;
+                cp.z += dz;
+            }
+        }
+        obj.center.x = x;
+        obj.center.y = y;
+        obj.center.z = z;
     }
-    obj.center.x = x;
-    obj.center.y = y;
-    obj.center.z = z;
+
     if (obj.centerPoint) {
+        // centerPoint is updated in updateWorldPoints if transform exists
+        // but double check for sync
         obj.centerPoint.x = x;
         obj.centerPoint.y = y;
         obj.centerPoint.z = z;
@@ -1470,10 +1535,37 @@ function exitEditState() {
     SystemState.interactionState = 'FOCUS';
     const objExit = SystemState.focusedObject;
     if (objExit) {
-        // Recenter object logic
+        // 阶段3修复：使用动画平滑回到屏幕中心（保持姿态 D 不变）
+        const fromPos = { x: objExit.center.x, y: objExit.center.y, z: objExit.center.z };
         const centerPos = calculateCenterPosition();
-        if (typeof moveObjectTo === 'function') {
-            moveObjectTo(objExit, centerPos.x, centerPos.y, centerPos.z);
+
+        // 检查是否需要移动（避免不必要的动画）
+        const dx = centerPos.x - fromPos.x;
+        const dy = centerPos.y - fromPos.y;
+        const dz = centerPos.z - fromPos.z;
+        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+
+        if (dist > 0.01) {
+            // 使用动画任务平滑移动回屏幕中心
+            const moveTask = AnimationImpl.createTask({
+                id: 'edit_exit_recenter_' + Date.now(),
+                target: objExit,
+                duration: 300,
+                easing: AnimationImpl.Easing.easeOut,
+                compute: (progress) => ({
+                    position: AnimationImpl.lerpVec3(fromPos, centerPos, progress)
+                }),
+                apply: (targetObj, value) => {
+                    // 使用 Transform 系统更新位置
+                    targetObj.transform.position.x = value.position.x;
+                    targetObj.transform.position.y = value.position.y;
+                    targetObj.transform.position.z = value.position.z;
+                    targetObj._dirty = true;
+                    targetObj.updateWorldPoints();
+                }
+            });
+            SystemState.taskQueues.submit(moveTask);
+            console.log(`[STATE] EDIT→FOCUS: 动画回中心, 距离=${dist.toFixed(2)}cm`);
         }
     }
     SystemState.ifControl = true;
@@ -1520,11 +1612,53 @@ function findControlPointAt(screenX, screenY) {
 
 function moveControlPoint(controlPoint, dx, dy) {
     if (!controlPoint) return;
-    const scale = 0.05;
-    controlPoint.x += dx * scale;
-    controlPoint.z -= dy * scale; // Assuming standard orientation? 
     const obj = SystemState.focusedObject;
-    if (obj) obj._needsRefit = true;
+    if (!obj || !obj.transform) return;
+
+    const scale = 0.05;
+    const worldDx = dx * scale;
+    const worldDy = 0; // Assuming Y is up/down in screen? Original code modified Z with dy.
+    const worldDz = -dy * scale; // Original: z -= dy * scale
+
+    // Inverse Transform: Delta_local = Q_inv * Delta_world
+    // Q_inv for unit quaternion is (w, -x, -y, -z)
+    const qw = obj.transform.rotation.w;
+    const qx = obj.transform.rotation.x;
+    const qy = obj.transform.rotation.y;
+    const qz = obj.transform.rotation.z;
+
+    // We only rotate the vector, so T doesn't matter for Delta.
+    // v' = q_inv * v * q
+    // invQ = (qw, -qx, -qy, -qz)
+
+    // Inline quaternion vector rotation with inverse
+    const iqw = qw;
+    const iqx = -qx;
+    const iqy = -qy;
+    const iqz = -qz;
+
+    const vx = worldDx;
+    const vy = worldDy;
+    const vz = worldDz;
+
+    const ix = iqw * vx + iqy * vz - iqz * vy;
+    const iy = iqw * vy + iqz * vx - iqx * vz;
+    const iz = iqw * vz + iqx * vy - iqy * vx;
+    const iw = -iqx * vx - iqy * vy - iqz * vz;
+
+    const lx = ix * iqw + iw * -iqx + iy * -iqz - iz * -iqy;
+    const ly = iy * iqw + iw * -iqy + iz * -iqx - ix * -iqz;
+    const lz = iz * iqw + iw * -iqz + ix * -iqy - iy * -iqx;
+
+    // Apply to local coordinates
+    controlPoint.lx += lx;
+    controlPoint.ly += ly;
+    controlPoint.lz += lz;
+
+    obj._dirty = true;
+    obj.updateWorldPoints();
+
+    if (obj) obj._needsRefit = true; // Trigger geometry refit if needed
 }
 
 function deleteControlPoint(controlPoint) {
@@ -1555,36 +1689,46 @@ function addControlPointAt(screenX, screenY) {
 }
 
 function updateLocalGrid() {
-    // Copy logic 1979-2014
-    // Critical for Edit mode
+    // 性能优化：只在 EDIT 态时更新
+    if (SystemState.interactionState !== 'EDIT') return;
+
     const grid = SystemState.localGrid;
     const target = SystemState.focusedObject;
     const win = SystemState.mainWindow;
     if (!grid || !target || !win) return;
-    grid.center.x = target.center.x;
-    grid.center.y = target.center.y;
-    grid.center.z = target.center.z;
-    if (target.frontDirection && target.upDirection) {
-        grid.quaternion = OrientationImpl.getQuaternionFromVectors(target.frontDirection, target.upDirection);
-    } else if (target.quaternion) {
-        grid.quaternion = { ...target.quaternion };
-    }
+
+    // 1. 同步 Transform (Pose)
+    // 确保 Grid 的位置和旋转与 Target 完全一致
+    grid.transform.position.x = target.transform.position.x;
+    grid.transform.position.y = target.transform.position.y;
+    grid.transform.position.z = target.transform.position.z;
+
+    grid.transform.rotation.w = target.transform.rotation.w;
+    grid.transform.rotation.x = target.transform.rotation.x;
+    grid.transform.rotation.y = target.transform.rotation.y;
+    grid.transform.rotation.z = target.transform.rotation.z;
+
+    // 2. 更新世界坐标
+    grid._dirty = true;
+    grid.updateWorldPoints();
+
+    // 3. 切片显示逻辑 (Slice Visibility)
     const dir = win.direction;
     const planePt = dir.start;
+    const orientationType = target._currentOrientationState?.type || 'FACE';
+    const layerSpacing = ObjectFactoryImpl.LocalGridConfig.getLayerSpacingForOrientation(orientationType);
+    const SLICE_THRESHOLD = layerSpacing * 0.6;
+
     for (const p of grid.displayPoints) {
-        if (p._localX === undefined) continue;
-        const rotated = OrientationImpl.applyQuaternion({ x: p._localX, y: p._localY, z: p._localZ }, grid.quaternion);
-        p.x = grid.center.x + rotated.x;
-        p.y = grid.center.y + rotated.y;
-        p.z = grid.center.z + rotated.z;
+        // p.x, p.y, p.z 已经在 updateWorldPoints 中被更新为世界坐标
         const dist = (p.x - planePt.x) * dir.x + (p.y - planePt.y) * dir.y + (p.z - planePt.z) * dir.z;
-        const orientationType = target._currentOrientationState?.type || 'FACE';
-        const layerSpacing = ObjectFactoryImpl.LocalGridConfig.getLayerSpacingForOrientation(orientationType);
-        const SLICE_THRESHOLD = layerSpacing * 0.6;
+
         if (p.tag === 'LOCAL_GRID' && Math.abs(dist) <= SLICE_THRESHOLD) {
-            p.isAttractable = true; p._isActiveSlice = true;
+            p.isAttractable = true;
+            p._isActiveSlice = true;
         } else {
-            p.isAttractable = false; p._isActiveSlice = false;
+            p.isAttractable = false;
+            p._isActiveSlice = false;
         }
     }
 }

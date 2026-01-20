@@ -40,10 +40,17 @@ export const InputManager = {
         let moveTarget = 0;
         let moveFactor = 0;
 
-        if (keys["f"] || keys["g"]) { moveTarget = CONFIG.moveSpeed; moveFactor = 1.0; }
-        else if (keys["v"]) { moveTarget = -CONFIG.moveSpeed; moveFactor = 1.0; }
+        if (keys["f"] || keys["g"]) {
+            // 复用 CAMERA_ZOOM 逻辑，直接位移，无惯性
+            // 速度稍小一点以适配按键的连续触发
+            intents.push({ type: 'CAMERA_ZOOM', delta: CONFIG.moveSpeed * 0.5 });
+        }
+        else if (keys["v"]) {
+            intents.push({ type: 'CAMERA_ZOOM', delta: -CONFIG.moveSpeed * 0.5 });
+        }
 
-        intents.push({ type: 'SET_MOVE_VELOCITY', target: moveTarget, factor: moveFactor || 1.0 });
+        // 移除旧的 velocity 设置
+        // intents.push({ type: 'SET_MOVE_VELOCITY', target: moveTarget, factor: moveFactor || 1.0 });
 
         // Light control intents
         if (keys["arrowleft"]) intents.push({ type: 'ADJUST_LIGHT_ANGLE', delta: -CONFIG.rotationSpeed });
@@ -73,6 +80,7 @@ export const InputManager = {
             const intent = { type: 'START_DRAG_VIEW', x: e.clientX, y: e.clientY };
 
             if (snapped && snapped.isObjectCenter && snapped.ownerObject) {
+                console.log('[DEBUG] MouseDown: Snapped to ObjectCenter:', snapped.ownerObject.tag || snapped.ownerObject.metadata?.name);
                 intent.payload = {
                     draggingObject: snapped.ownerObject,
                     dragStartCenter: {
@@ -81,7 +89,9 @@ export const InputManager = {
                         z: snapped.ownerObject.center.z
                     }
                 };
-                console.log('开始拖拽物体');
+                console.log('[DEBUG] START_DRAG_VIEW intent created');
+            } else {
+                console.log('[DEBUG] MouseDown: Snapped is not valid object center. Snapped:', snapped);
             }
             return intent;
         }
@@ -91,6 +101,9 @@ export const InputManager = {
     handleViewMouseMove(e) {
         if (SystemState.draggingObject) {
             const snapped = SystemState.virtualMouse.snappedTo;
+            if (snapped) {
+                // console.log('[DEBUG] MouseMove: Dragging. Snapped:', snapped.tag, 'isGridPoint:', snapped.isGridPoint);
+            }
             if (snapped && snapped.isGridPoint) {
                 return {
                     type: 'MOVE_OBJECT',
@@ -290,9 +303,7 @@ export const InputManager = {
     },
 
     handleEditWheel(e) {
-        e.preventDefault();
-        const delta = e.deltaY > 0 ? -1 : 1;
-        return { type: 'CHANGE_DEPTH_LAYER', delta };
+        return this.handleEditWheelSliceDepth(e);
     },
 
     handleEditWheelSliceDepth(e) {
@@ -329,8 +340,6 @@ export const InputManager = {
             const stepSize = ObjectFactoryImpl.LocalGridConfig.getLayerSpacingForOrientation(orientationType);
 
             console.log(`[Wheel] Type: ${orientationType}, Step: ${stepSize.toFixed(3)}cm`);
-            const currentLayer = Math.round(currentDepth / stepSize);
-            // targetLayer calculation ...
 
             // We will return an intent to SCROLL
             // We update accumulator here to "consumption"
@@ -341,10 +350,11 @@ export const InputManager = {
                 steps: steps * sign,
                 stepSize,
                 maxDepth,
-                currentDepth
+                currentDepth,
+                obj: obj // 关键补充：必须传递 obj
             };
         }
-        return null;
+        return null; // Don't return intent until threshold
     },
 
     handleEditClick(event) {

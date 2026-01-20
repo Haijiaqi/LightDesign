@@ -154,6 +154,14 @@ export class StyleImpl {
             fixedLight: 1.0,
             neighborRule: 'glow',
             glowRadius: 3
+        },
+        // 光源：超亮显示，不受光照影响
+        LIGHT_SOURCE: {
+            colorMode: 'stereo',
+            lightAffected: false,
+            fixedLight: 3.0, // 更亮以确保光源显眼
+            neighborRule: 'glow',
+            glowRadius: 3
         }
     };
 

@@ -71,7 +71,24 @@ export class Object {
 
     // ━━━ 显示点（用于视觉渲染）━━━
     if (points.length > 0) {
-      this.displayPoints = points.map(p => new Point(p.x, p.y, p.z));
+      // 阶段3修复：复制点时保留重要属性（tag, isAttractable, light 等）
+      this.displayPoints = points.map(p => {
+        const np = new Point(p.x, p.y, p.z);
+        // 保留吸附和渲染相关属性
+        if (p.tag !== undefined) np.tag = p.tag;
+        if (p.isAttractable !== undefined) np.isAttractable = p.isAttractable;
+        if (p.isGridPoint !== undefined) np.isGridPoint = p.isGridPoint;
+        if (p.light !== undefined) np.light = p.light;
+        // 保留局部坐标备份（如果存在）
+        if (p._localX !== undefined) np._localX = p._localX;
+        if (p._localY !== undefined) np._localY = p._localY;
+        if (p._localZ !== undefined) np._localZ = p._localZ;
+        // 修复：保留法向量（用于光照计算）
+        if (p.nx !== undefined) np.nx = p.nx;
+        if (p.ny !== undefined) np.ny = p.ny;
+        if (p.nz !== undefined) np.nz = p.nz;
+        return np;
+      });
     } else {
       this.displayPoints = [];
     }
@@ -104,7 +121,19 @@ export class Object {
     this._isVolumetric = false;
     this.mode = 'parametric';
     this._centerVersion = 0;
-    this.center = options.center ?? GeometryImpl.computeCenter(this._extractPositions(this.controlPoints));
+    // ━━━ 阶段3新增：变换组件 (System of Record) ━━━
+    this.transform = {
+      position: options.center ? { ...options.center } : GeometryImpl.computeCenter(this._extractPositions(this.controlPoints)),
+      rotation: options.quaternion ? { ...options.quaternion } : { w: 1, x: 0, y: 0, z: 0 },
+      scale: { x: 1, y: 1, z: 1 } // ⚠️ 预留字段，强制 (1,1,1)，禁止修改
+    };
+    this._dirty = true;
+
+    // 兼容旧属性 (Deprecating)
+    this.center = this.transform.position; // 引用同一个对象
+    this.quaternion = this.transform.rotation; // 引用同一个对象
+    // ===============================================
+
     this._boundingBox = null;
     this._boundingBoxDirty = true;
 
@@ -182,12 +211,10 @@ export class Object {
     // ========== FOCUS 态增强：正面方向 ==========
     // 单位向量，表示物体的"正面"朝向（世界坐标系）
     // 默认 -Y：初始时物体正面背对用户（用户在 +Y 方向看向原点）
-    // 默认 -Y：初始时物体正面背对用户（用户在 +Y 方向看向原点）
     this.frontDirection = options.frontDirection ?? { x: 0, y: -1, z: 0 };
     // 正上方向，默认 +Z (世界坐标系 Up)
     this.upDirection = options.upDirection ?? { x: 0, y: 0, z: 1 };
     // ==============================================
-    // ===============================
 
     this.metadata = {
       name: options.name ?? 'Untitled',
@@ -201,11 +228,47 @@ export class Object {
     this.centerPoint.isAttractable = true;
     this.centerPoint.isObjectCenter = true;  // 标记为物心
     this.centerPoint.ownerObject = this;      // 关联到所属物体
+    // 物心在局部坐标系中始终为原点
+    this.centerPoint.lx = 0;
+    this.centerPoint.ly = 0;
+    this.centerPoint.lz = 0;
     // ============================================
 
-    // controlPoints 已在 L81-90 正确初始化，不再重复设置
-
     this.verbose = options.verbose ?? false;
+
+    // ========== 阶段3修复：初始化局部坐标 ==========
+    // 如果 options.center 被显式传入，说明工厂方法已经生成了局部坐标
+    // 此时 Point.x/y/z 就是 lx/ly/lz，直接复制即可
+    // 如果 center 是从点云计算得出的，需要减去 center 得到局部坐标
+    const centerWasExplicit = !!options.center;
+    const cx = this.center.x;
+    const cy = this.center.y;
+    const cz = this.center.z;
+
+    const initLocalCoords = (points) => {
+      if (!points) return;
+      for (const p of points) {
+        if (centerWasExplicit) {
+          // 工厂方法已生成局部坐标，直接使用 x/y/z
+          p.lx = p.x;
+          p.ly = p.y;
+          p.lz = p.z;
+        } else {
+          // 传入的是世界坐标，需要减去计算得出的 center
+          p.lx = p.x - cx;
+          p.ly = p.y - cy;
+          p.lz = p.z - cz;
+        }
+      }
+    };
+
+    initLocalCoords(this.displayPoints);
+    initLocalCoords(this.controlPoints);
+    // constructionPoints 初始时指向 controlPoints，无需重复处理
+    // ================================================
+
+    // 初始化世界坐标
+    this.updateWorldPoints();
   }
 
   // ==========================================================================
@@ -247,6 +310,120 @@ export class Object {
   // ==========================================================================
   // 辅助方法
   // ==========================================================================
+
+  // ==========================================================================
+  // 坐标系统核心方法 (阶段3重构)
+  // ==========================================================================
+
+  /**
+   * 强制刷新世界坐标
+   * System of Record: transform (position, rotation) + local points (lx, ly, lz)
+   * Derived: world points (x, y, z)
+   * 
+   * @param {object} options
+   * @param {boolean} options.force - 强制更新即使 dirty 为 false
+   */
+  updateWorldPoints(options = {}) {
+    if (!this._dirty && !options.force) return;
+
+    const tx = this.transform.position.x;
+    const ty = this.transform.position.y;
+    const tz = this.transform.position.z;
+
+    const qx = this.transform.rotation.x;
+    const qy = this.transform.rotation.y;
+    const qz = this.transform.rotation.z;
+    const qw = this.transform.rotation.w;
+
+    // 归一化四元数 (契约强制)
+    const len = Math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw);
+    if (len > 0) {
+      this.transform.rotation.x /= len;
+      this.transform.rotation.y /= len;
+      this.transform.rotation.z /= len;
+      this.transform.rotation.w /= len;
+    }
+
+    const nqx = this.transform.rotation.x;
+    const nqy = this.transform.rotation.y;
+    const nqz = this.transform.rotation.z;
+    const nqw = this.transform.rotation.w;
+
+    // 定义应用变换的内部函数 (Inline for performance)
+    const applyTransform = (points) => {
+      if (!points) return;
+      for (const p of points) {
+        // 1. Quaterion Rotate: P_rot = Q * P_local * Q_inv
+        // Local coordinates
+        const lx = p.lx;
+        const ly = p.ly;
+        const lz = p.lz;
+
+        // Quaternion multiplication logic
+        const ix = nqw * lx + nqy * lz - nqz * ly;
+        const iy = nqw * ly + nqz * lx - nqx * lz;
+        const iz = nqw * lz + nqx * ly - nqy * lx;
+        const iw = -nqx * lx - nqy * ly - nqz * lz;
+
+        const rx = ix * nqw + iw * -nqx + iy * -nqz - iz * -nqy;
+        const ry = iy * nqw + iw * -nqy + iz * -nqx - ix * -nqz;
+        const rz = iz * nqw + iw * -nqz + ix * -nqy - iy * -nqx;
+
+        // 2. Translate: P_world = P_rot + T
+        p.x = rx + tx;
+        p.y = ry + ty;
+        p.z = rz + tz;
+
+        // 3. 旋转法向量（如果存在且非零）- 法向量只旋转不平移
+        // 保存原始局部法向量用于旋转
+        // 关键修复：只有非零法向量才保存和旋转，避免覆盖 calculateNormal 的动态赋值
+        const hasLocalNormal = p._lnx !== undefined;
+        const hasWorldNormal = (p.nx !== 0 || p.ny !== 0 || p.nz !== 0);
+
+        if (!hasLocalNormal && hasWorldNormal) {
+          // 首次调用时保存非零的局部法向量
+          p._lnx = p.nx;
+          p._lny = p.ny;
+          p._lnz = p.nz;
+        }
+
+        // 只对有保存的非零局部法向量的点进行旋转
+        if (hasLocalNormal && (p._lnx !== 0 || p._lny !== 0 || p._lnz !== 0)) {
+          const lnx = p._lnx;
+          const lny = p._lny;
+          const lnz = p._lnz;
+
+          // 四元数旋转法向量
+          const nix = nqw * lnx + nqy * lnz - nqz * lny;
+          const niy = nqw * lny + nqz * lnx - nqx * lnz;
+          const niz = nqw * lnz + nqx * lny - nqy * lnx;
+          const niw = -nqx * lnx - nqy * lny - nqz * lnz;
+
+          p.nx = nix * nqw + niw * -nqx + niy * -nqz - niz * -nqy;
+          p.ny = niy * nqw + niw * -nqy + niz * -nqx - nix * -nqz;
+          p.nz = niz * nqw + niw * -nqz + nix * -nqy - niy * -nqx;
+        }
+        // 如果没有保存的局部法向量，保持 calculateNormal 赋予的世界法向量不变
+      }
+    };
+
+    // 批量更新所有点集
+    applyTransform(this.controlPoints);
+    applyTransform(this.displayPoints);
+    applyTransform(this.constructionPoints); // Includes surface & internal
+
+    // 更新中心点虚拟对象
+    if (this.centerPoint) {
+      this.centerPoint.x = tx;
+      this.centerPoint.y = ty;
+      this.centerPoint.z = tz;
+      this.centerPoint.lx = 0; // Center in local is always 0,0,0
+      this.centerPoint.ly = 0;
+      this.centerPoint.lz = 0;
+    }
+
+    this._dirty = false;
+  }
 
   _extractPositions(points) {
     return points.map(p => ({ x: p.x, y: p.y, z: p.z }));

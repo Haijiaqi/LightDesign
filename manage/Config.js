@@ -9,8 +9,8 @@ export const CONFIG = {
     screenCenterHeight: 0,
     userDistanceFromOrigin: 10,
     screenDistance: 50,
-    lightX: 5,
-    lightY: 15,
+    lightX: 10,
+    lightY: 30,
     lightZ: 0,
     spherePoints: 1000,
     cubePoints: 250,
@@ -19,7 +19,7 @@ export const CONFIG = {
     minElevation: -Math.PI / 2 + 0.1,
     maxElevation: Math.PI / 2 - 0.1,
     dragRotationSpeed: 0.01,
-    normalEstimationIterations: 500,
+    normalEstimationIterations: 2000, // 增加法向量估算密度
     normalEstimationRadius: 15,
     cameraControl: {
         enabled: false,

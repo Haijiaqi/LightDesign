@@ -4,7 +4,7 @@ import { StyleImpl } from "./StyleImpl.js";
 export const Renderer = {
     LUT: StyleImpl.getLUT(),
     forEachNeighbor(x, y, light, radius, callback) {
-        // 阈值检查：如果亮度太低，不绘制邻接点 (保持原有逻辑)
+        // 阈值检查：如果亮度太低，不绘制邻接点
         if (light <= 0.3) return;
 
         // 遍历 [-radius, +radius] 范围
@@ -14,19 +14,24 @@ export const Renderer = {
 
                 // 计算距离
                 const dist = Math.sqrt(dx * dx + dy * dy);
-                if (dist > radius + 0.5) continue; // 圆形裁剪
 
-                // 简单的朴素衰减 (无波纹)
-                let ratio = 0.4;
-                if (dist <= 1.5) {
-                    ratio = 0.6;
-                } else if (dist <= 2.5) {
-                    ratio = 0.3;
+                // 圆形裁剪：允许半径范围内的所有点（包括四角）
+                if (dist > radius + 0.5) continue;
+
+                // 亮度权重：中心1.0，正方向0.7，四角0.4
+                // 正方向邻居 (距离=1): (0,1), (0,-1), (1,0), (-1,0)
+                // 斜邻居 (距离=1.414): (1,1), (1,-1), (-1,1), (-1,-1)
+                let ratio;
+                if (dist <= 1.1) {
+                    ratio = 0.7;  // 正方向邻接
+                } else if (dist <= 1.5) {
+                    ratio = 0.4;  // 斜向邻接（四角）
+                } else if (dist <= 2.1) {
+                    ratio = 0.3;  // 次外层（仅大半径时生效）
                 } else {
-                    ratio = 0.15;
+                    ratio = 0.15; // 最外层
                 }
 
-                // 计算坐标
                 const nx = x + dx;
                 const ny = y + dy;
 
@@ -121,9 +126,8 @@ export const Renderer = {
                     });
 
                     if (style.hasDisparity) {
-                        // 立体渲染：左右眼分离
-                        const first = ((p.xL || 0) % 2 === 0);
-                        if (first && p.xL !== 0 && p.yL !== 0) {
+                        // 立体渲染：左右眼分离，始终先左后右（避免顺序抖动导致闪烁）
+                        if (p.xL !== 0 && p.yL !== 0) {
                             this.drawColoredPointImpl(
                                 pixelData, width, height, p.xL, p.yL,
                                 style.effectiveLight,
@@ -140,16 +144,6 @@ export const Renderer = {
                                 style.right.colorType,
                                 style.right.base,
                                 style.right.maxIndex,
-                                style.neighborRadius
-                            );
-                        }
-                        if (!first && p.xL !== 0 && p.yL !== 0) {
-                            this.drawColoredPointImpl(
-                                pixelData, width, height, p.xL, p.yL,
-                                style.effectiveLight,
-                                style.left.colorType,
-                                style.left.base,
-                                style.left.maxIndex,
                                 style.neighborRadius
                             );
                         }

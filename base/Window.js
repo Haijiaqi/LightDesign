@@ -418,126 +418,140 @@ export class Window {
     return inverseRate;
   }
   handleAPointSpecific(head, eyeD, point, light, inverseRate) {
-    // 1. A点特有：light 初始值（OtherPoint 初始值为1，此处为0.5）
+    // 基础亮度（所有情况的保底值）- 提升到 0.5 确保暗部清晰可见
+    const BASE_AMBIENT = 0.5;
+
+    // 初始亮度
     point.light = 0.4;
 
-    // 2. A点特有：eyeD 存在时的屏幕边界校验与光照计算
-    if (eyeD) {
-      // 法向量与光照计算（OtherPoint 无此逻辑）
-      if (point.rx != 0 || point.ry != 0 || point.rz != 0) {
-        const hpdx = point.x - head.x;
-        const hpdy = point.y - head.y;
-        const hpdz = point.z - head.z;
-        const projN =
-          (-hpdx * point.nx + -hpdy * point.ny + -hpdz * point.nz) / 1;
+    if (!eyeD) return;
 
-        if (projN > 0) {
-          const projR =
-            (-hpdx * point.rx + -hpdy * point.ry + -hpdz * point.rz) /
-            point.dir;
-          point.light *= projR > 0 ? projR : 0;
-        } else {
-          point.light *= 0;
-        }
+    // 计算观察向量 V = Head - Point (归一化)
+    const vx = head.x - point.x;
+    const vy = head.y - point.y;
+    const vz = head.z - point.z;
+    const vDist = point.dir; // 已计算的距离
+    if (vDist < 0.001) return; // 防止除零
+    const viewDirX = vx / vDist;
+    const viewDirY = vy / vDist;
+    const viewDirZ = vz / vDist;
+
+    // 检查法向量是否存在
+    const hasNormal = (point.nx !== 0 || point.ny !== 0 || point.nz !== 0);
+    // 检查反射向量是否存在（由 updateVisibleReflection 计算）
+    const hasReflection = (point.rx !== 0 || point.ry !== 0 || point.rz !== 0);
+
+    if (!hasNormal) {
+      // 无法向量：使用基础环境光
+      point.light = BASE_AMBIENT;
+    } else {
+      // N·V = 法向量与观察方向的点积
+      const NdotV = point.nx * viewDirX + point.ny * viewDirY + point.nz * viewDirZ;
+
+      // 观察者在背面（看不到正面）
+      if (NdotV <= 0) {
+        point.light = BASE_AMBIENT; // 只有基础亮度
       } else {
-        point.light = 0;
+        // 观察者在正面
+        if (hasReflection) {
+          // 有反射向量说明有光源入射
+          // 计算 V·R = 观察方向与反射方向的点积（镜面高光）
+          const VdotR = viewDirX * point.rx + viewDirY * point.ry + viewDirZ * point.rz;
+
+          // 漫反射：基于 N·V（Headlight 模式）
+          let diffuse = BASE_AMBIENT + Math.pow(NdotV, 0.7) * 0.5;
+
+          // 镜面高光：仅当反射光进入眼睛时
+          let specular = 0;
+          if (VdotR > 0) {
+            specular = Math.pow(VdotR, 8) * 1.2;
+          }
+
+          point.light = point.light * diffuse + specular;
+        } else {
+          // 无反射向量：纯漫反射（Headlight 模式）
+          let diffuse = BASE_AMBIENT + Math.pow(NdotV, 0.7) * 0.5;
+          point.light *= diffuse;
+        }
+
+        // 确保最小可见度
+        if (point.light < BASE_AMBIENT) {
+          point.light = BASE_AMBIENT;
+        }
       }
-
-      // 光照补偿（OtherPoint 无此逻辑）
-      point.light += 0.6;
-
-      // 光照衰减（OtherPoint 无此逻辑）
-      const attenuation = 1 / (point.dir * 0.001 + 1);
-      point.light *= attenuation;
     }
 
-    // 3. A点特有：光照开启时的反射向量计算（OtherPoint 无此逻辑）
-    if (light && (point.nx != 0 || point.ny != 0 || point.nz != 0)) {
-      const hpdx = point.x - head.x;
-      const hpdy = point.y - head.y;
-      const hpdz = point.z - head.z;
-      const dot = point.nx * hpdx + point.ny * hpdy + point.nz * hpdz;
-      const twoDot = 2 * dot;
+    // 距离衰减
+    const attenuation = 1 / (point.dir * 0.001 + 1);
+    point.light *= attenuation;
 
-      // 反射向量计算
-      point.rx = (hpdx - twoDot * point.nx) / point.dir;
-      point.ry = (hpdy - twoDot * point.ny) / point.dir;
-      point.rz = (hpdz - twoDot * point.nz) / point.dir;
-
-      // 反射向量衰减
-      const attenuation = (1 / (point.dir * 0.001 + 1)) * light;
-      point.rx *= attenuation;
-      point.ry *= attenuation;
-      point.rz *= attenuation;
+    // 最终保底：确保衰减后仍有基础亮度
+    if (point.light < BASE_AMBIENT * 0.8) {
+      point.light = BASE_AMBIENT * 0.8;
     }
   }
+
+
   calculateNormal() {
+    // ========== 配置 ==========
+    const OCCLUSION_DECAY_RATE = 8;     // 指数衰减速率 (每 cm)
+    const MIN_LIGHT_THRESHOLD = 0.1;    // 亮度阈值，低于此值尾截
+    const SURFACE_DEPTH_THRESHOLD = 0.01; // 同平面深度阈值 (cm)
+
     // 遍历每个网格单元
     for (let i = 0; i < this.grid.length; i++) {
       for (let j = 0; j < this.grid[i].length; j++) {
         const points = this.grid[i][j];
         if (points.length < 3) continue;
 
-        // 4. 找出深度相近的连续点集 [start, end]
-        let start = 0;
-        let end = 2; // 至少3个点
-
-        // 检查前3个点是否深度相近（阈值 0.01，单位与 dis 一致）
+        // ========== 朴素同平面判别算法（保留） ==========
+        // 1. 检查前3个点是否深度相近
         const firstDis = points[0].dis;
         let avg = (points[0].dis + points[1].dis + points[2].dis) / 3;
-        if (Math.abs(avg - firstDis) > 0.01) {
-          // 假设 end 是起始前的索引，e 从 end + 1 开始处理
-          let e = 1;
-          for (let i = e; i < points.length; i++) {
-            // 保护 LOCAL_GRID 不被剔除或衰减
-            if (points[i].tag === 'LOCAL_GRID' || points[i].tag === 'LOCAL_GRID_DASH') continue;
 
-            points[i].light *= Math.pow(0.075, (i - 0));
-            // 计算当前索引与 e 的差值：如果是奇数，说明是需要剔除的间隔元素
-            // if ((i - e) % 2 === 1) {
-            // points.splice(i, 1); // 从原数组中删除该元素
-            // }
+        if (Math.abs(avg - firstDis) > SURFACE_DEPTH_THRESHOLD) {
+          // 前3个点深度差异大：非共面，应用连续衰减
+          for (let k = points.length - 1; k >= 1; k--) {
+            const p = points[k];
+
+            // 保护特殊点
+            const tag = p.tag;
+            if (tag === 'LOCAL_GRID' || tag === 'LOCAL_GRID_DASH' ||
+              tag === 'GRID_LINE' || tag === 'LIGHT_SOURCE' || tag === 'CONTROL' ||
+              p.isAttractable || p.isObjectCenter) {
+              continue;
+            }
+
+            // 连续指数衰减
+            const depthDiff = p.dis - firstDis;
+            const attenuation = Math.exp(-OCCLUSION_DECAY_RATE * depthDiff);
+            p.light *= attenuation;
+
+            // 尾截
+            if (p.light < MIN_LIGHT_THRESHOLD) {
+              points.splice(k, 1);
+            }
           }
-          // 剩余元素（e, e+2, e+4...）执行 light 乘以 0.75 的操作
-          // for (let i = e; i < points.length; i++) {
-          // points[i].light *= 0.075;
-          // }
-          // 前3个点深度差异大，跳过
           continue;
         }
 
-        // 向后扩展，直到深度差 > 0.01
+        // 2. 向后扩展，直到深度差超过阈值
+        let surfaceEnd = 2;
         for (let k = 3; k < points.length; k++) {
           const newAvg = (avg * k + points[k].dis) / (k + 1);
-          if (Math.abs(newAvg - firstDis) <= 0.01) {
-            end = k;
+          if (Math.abs(newAvg - firstDis) <= SURFACE_DEPTH_THRESHOLD) {
+            surfaceEnd = k;
             avg = newAvg;
           } else {
             break;
           }
         }
-        // 假设 end 是起始前的索引，e 从 end + 1 开始处理
-        let e = end + 1;
-        for (let i = points.length - 1; i > e; i--) {
-          // 保护 LOCAL_GRID
-          if (points[i].tag === 'LOCAL_GRID' || points[i].tag === 'LOCAL_GRID_DASH') continue;
 
-          // 计算当前索引与 e 的差值：如果是奇数，说明是需要剔除的间隔元素
-          // if ((i - e) % 2 === 1) {
-          points.splice(i, 1); // 从原数组中删除该元素
-          // }
-        }
-        // 剩余元素（e, e+2, e+4...）执行 light 乘以 0.75 的操作
-        // for (let i = e; i < points.length; i++) {
-        // points[i].light *= 0.075;
-        // }
-        // 检查 XY 分布是否足够广（单位：像素）
-        let xmin = Infinity,
-          xmax = -Infinity;
-        let ymin = Infinity,
-          ymax = -Infinity;
-
-        for (let k = start; k <= end; k++) {
+        // 3. 检查 XY 分布是否足够广（判断是否真正构成平面）
+        //    如果同深度的点只集中在很小的屏幕区域，可能只是巧合重叠
+        let xmin = Infinity, xmax = -Infinity;
+        let ymin = Infinity, ymax = -Infinity;
+        for (let k = 0; k <= surfaceEnd; k++) {
           const px = points[k].xM;
           const py = points[k].yM;
           if (px < xmin) xmin = px;
@@ -546,20 +560,55 @@ export class Window {
           if (py > ymax) ymax = py;
         }
 
-        if (xmax - xmin > 2 && ymax - ymin > 2) {
-          // 6. 赋法向量给深度相近且空间分布广的点
-          for (let k = start; k <= end; k++) {
-            if (points[k].nx == 0 && points[k].ny == 0 && points[k].nz == 0) {
-              points[k].nx = -this.direction.x;
-              points[k].ny = -this.direction.y;
-              points[k].nz = -this.direction.z;
-            } else {
-              if (Math.random() < 0.5) {
-                points[k].nx = -this.direction.x;
-                points[k].ny = -this.direction.y;
-                points[k].nz = -this.direction.z;
-              }
+        // 只有当 XY 跨度足够大（至少 2 像素）时才赋法向量
+        const hasXYSpread = (xmax - xmin >= 2) || (ymax - ymin >= 2);
+
+        // 4. 对表面点（0 ~ surfaceEnd）赋法向量（仅当 XY 分布足够广时）
+        if (hasXYSpread) {
+          for (let k = 0; k <= surfaceEnd; k++) {
+            const p = points[k];
+            const tag = p.tag;
+            if (tag === 'GRID_LINE' || tag === 'LIGHT_SOURCE' || tag === 'CONTROL' ||
+              tag === 'LOCAL_GRID' || tag === 'LOCAL_GRID_DASH') {
+              continue;
             }
+
+            if (p.nx === 0 && p.ny === 0 && p.nz === 0) {
+              p.nx = -this.direction.x;
+              p.ny = -this.direction.y;
+              p.nz = -this.direction.z;
+            }
+          }
+        }
+
+        // 4. 对被遮挡的点（surfaceEnd+1 ~ 末尾）应用连续衰减和尾截
+        for (let k = points.length - 1; k > surfaceEnd; k--) {
+          const p = points[k];
+
+          // 保护特殊点
+          const tag = p.tag;
+          if (tag === 'LOCAL_GRID' || tag === 'LOCAL_GRID_DASH' ||
+            tag === 'GRID_LINE' || tag === 'LIGHT_SOURCE' || tag === 'CONTROL' ||
+            p.isAttractable || p.isObjectCenter) {
+            continue;
+          }
+
+          // 连续指数衰减
+          const depthDiff = p.dis - firstDis;
+          const attenuation = Math.exp(-OCCLUSION_DECAY_RATE * depthDiff);
+          p.light *= attenuation;
+
+          // 尾截
+          if (p.light < MIN_LIGHT_THRESHOLD) {
+            points.splice(k, 1);
+            continue;
+          }
+
+          // 赋法向量
+          if (p.nx === 0 && p.ny === 0 && p.nz === 0) {
+            p.nx = -this.direction.x;
+            p.ny = -this.direction.y;
+            p.nz = -this.direction.z;
           }
         }
       }
@@ -639,6 +688,13 @@ export class Window {
               minDistSq = distSq;
               nearest = p;
               foundInThisLayer = true; // 标记本层已找到
+            } else if (distSq === minDistSq) {
+              // 平局处理：优先选择物体中心点 (Object Center)
+              // 解决 LightSource 中心点与 WorldGrid 格点重合导致无法拖拽的问题
+              if (p.isObjectCenter) {
+                nearest = p;
+                foundInThisLayer = true;
+              }
             }
           }
         }
