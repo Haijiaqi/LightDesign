@@ -78,7 +78,17 @@ export const Renderer = {
         }
     },
     render(ctx, width, height) {
-        const imageData = ctx.createImageData(width, height);
+        // [OPTIMIZATION A] 复用 ImageData
+        let imageData = SystemState.imageData;
+        if (!imageData || imageData.width !== width || imageData.height !== height) {
+            imageData = ctx.createImageData(width, height);
+            SystemState.imageData = imageData;
+        } else {
+            // 手动清空 buffer (alpha设为0 或 全0)
+            // fill(0) 是最快的清空方式
+            new Int32Array(imageData.data.buffer).fill(0);
+        }
+
         const pixelData = imageData.data;
         const win = SystemState.mainWindow;
         const displayMode = CONFIG.displayMode;

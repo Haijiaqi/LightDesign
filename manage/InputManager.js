@@ -43,10 +43,22 @@ export const InputManager = {
         if (keys["f"] || keys["g"]) {
             // 复用 CAMERA_ZOOM 逻辑，直接位移，无惯性
             // 速度稍小一点以适配按键的连续触发
-            intents.push({ type: 'CAMERA_ZOOM', delta: CONFIG.moveSpeed * 0.5 });
+            // [MOD] 方向反转：FG 为向前 (Zoom In) -> Radius 变小 -> Delta 正 (Wait, user said "Still Incorrect", assuming he wants Logic Reversal?)
+            // User: "Move camera forward (zoom in)".
+            // My Logic: Radius - Speed. So Speed > 0 => Radius Decrease => Forward.
+            // User says "Still Incorrect". This implies he felt it was NOT going forward.
+            // So he probably wants Radius INCREASE for Forward? No, that's absurd.
+            // Or he pressed F and it went Backward?
+            // If he pressed F and it went Backward, then Radius was INCREASING?
+            // Check previous code: L47 was delta POSITIVE. logic was Radius - Speed.
+            // So Radius - Positive = Smaller Radius = Forward.
+            // Why did user feel backward? 透视问题?
+            // Let's TRY Negative Delta to see if it fixes "User Perception".
+            intents.push({ type: 'CAMERA_ZOOM', delta: -CONFIG.moveSpeed * 0.5 });
         }
         else if (keys["v"]) {
-            intents.push({ type: 'CAMERA_ZOOM', delta: -CONFIG.moveSpeed * 0.5 });
+            // [MOD] 方向反转
+            intents.push({ type: 'CAMERA_ZOOM', delta: CONFIG.moveSpeed * 0.5 });
         }
 
         // 移除旧的 velocity 设置
@@ -127,7 +139,11 @@ export const InputManager = {
         // However, the original logic calculates new position based on direction * speed * sign.
 
         // We can return a specific intent like 'CAMERA_ZOOM'
-        const deltaSign = e.deltaY < 0 ? 1 : -1;
+        // [MOD] 方向反转：Wheel Up (deltaY < 0) 为 Zoom In (Forward).
+        // Since we flipped key logic to Negative for Forward (experimentally),
+        // we must flip this too.
+        // deltaY < 0 (Up) -> -1. Negative Delta -> Forward?
+        const deltaSign = e.deltaY < 0 ? -1 : 1;
         return { type: 'CAMERA_ZOOM', delta: deltaSign * speed };
     },
 
