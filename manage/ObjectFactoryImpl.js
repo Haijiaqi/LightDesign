@@ -310,24 +310,24 @@ export class ObjectFactoryImpl {
      */
     static createIntegerGridObject(cx, cy, cz, size = 6, spacing = 1) {
         const points = [];
-        const startOffset = -Math.floor(size / 2);
-        const endOffset = startOffset + size - 1;
+        // 修复：使用对称范围，确保几何中心与局部原点重合
+        // size=6 时: halfExtent=2.5, 坐标范围 [-2.5, 2.5]
+        const halfExtent = (size - 1) * spacing / 2;
 
-        for (let ix = startOffset; ix <= endOffset; ix++) {
-            for (let iy = startOffset; iy <= endOffset; iy++) {
-                for (let iz = startOffset; iz <= endOffset; iz++) {
+        for (let i = 0; i < size; i++) {
+            for (let j = 0; j < size; j++) {
+                for (let k = 0; k < size; k++) {
                     const isSurface = (
-                        ix === startOffset || ix === endOffset ||
-                        iy === startOffset || iy === endOffset ||
-                        iz === startOffset || iz === endOffset
+                        i === 0 || i === size - 1 ||
+                        j === 0 || j === size - 1 ||
+                        k === 0 || k === size - 1
                     );
 
                     if (isSurface) {
-                        // 阶段3修复：生成局部坐标（以原点为中心）
-                        // 不加 cx, cy, cz，这些通过 center 选项传递
-                        const lx = ix * spacing;
-                        const ly = iy * spacing;
-                        const lz = iz * spacing;
+                        // 对称坐标：以原点为中心
+                        const lx = (i - (size - 1) / 2) * spacing;
+                        const ly = (j - (size - 1) / 2) * spacing;
+                        const lz = (k - (size - 1) / 2) * spacing;
 
                         const p = new Point(lx, ly, lz);
                         p.isAttractable = false;
@@ -362,7 +362,7 @@ export class ObjectFactoryImpl {
             ObjectFactoryImpl.createCube(4, 300, 10, 50, 0, 0, false),
 
             // 整格点对象: 6点边长，间距1cm，位于 (0, 60, 0)
-            ObjectFactoryImpl.createIntegerGridObject(0, 60, 0, 6, 1),
+            ObjectFactoryImpl.createIntegerGridObject(0, 50, 0, 3, 1),
         ];
     }
 

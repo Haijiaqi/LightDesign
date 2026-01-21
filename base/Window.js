@@ -419,7 +419,7 @@ export class Window {
   }
   handleAPointSpecific(head, eyeD, point, light, inverseRate) {
     // 基础亮度（所有情况的保底值）- 提升到 0.5 确保暗部清晰可见
-    const BASE_AMBIENT = 0.5;
+    const BASE_AMBIENT = 0.8;
 
     // 初始亮度
     point.light = 0.4;

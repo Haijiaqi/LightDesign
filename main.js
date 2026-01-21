@@ -392,6 +392,15 @@ function processIntent(intent) {
 
         // ...
 
+        case 'START_DRAG_VIEW':
+            SystemState.isDragging = true;
+            SystemState.lastMouseX = intent.x;
+            SystemState.lastMouseY = intent.y;
+            if (intent.payload) {
+                SystemState.draggingObject = intent.payload.draggingObject;
+                SystemState.dragStartCenter = intent.payload.dragStartCenter;
+            }
+            break;
         case 'MOVE_OBJECT':
             moveObjectTo(intent.object, intent.x, intent.y, intent.z);
             SystemState.sceneDirty = true;
