@@ -20,6 +20,8 @@
 import { Point } from "../base/Point.js";
 import { Object } from "../base/Object.js";
 import { CONFIG } from "./Config.js";
+import { EditConfig } from "./EditConfig.js";
+
 
 export class ObjectFactoryImpl {
 
@@ -374,42 +376,17 @@ export class ObjectFactoryImpl {
      * 局部格网配置 (集中管理，方便调整)
      */
     static LocalGridConfig = {
-        // 格网尺寸: Round(Min(ScreenW, ScreenH)/10)*10 -> 临时固定 8cm
-        get size() {
-            // const minDim = Math.min(CONFIG.screenXLengthCm, CONFIG.screenYLengthCm);
-            // return Math.round(minDim / 10) * 10;
-            return 8;
-        },
-        spacing: 2.0,
+        get size() { return EditConfig.size; },
+        get spacing() { return EditConfig.spacing; },
+        get halfSize() { return EditConfig.halfSize; },
+        get layerCount() { return EditConfig.layerCount; },
 
-        // 计算属性
-        get halfSize() { return this.size / 2; },
-        get layerCount() { return Math.floor(this.halfSize / this.spacing); },
-
-        /**
-         * 根据姿态类型获取层间距
-         * - 面向 (FACE)：层间距 = spacing
-         * - 棱向 (EDGE)：层间距 = spacing × cos(45°) = spacing / √2
-         */
         getLayerSpacingForOrientation(orientationType) {
-            if (!orientationType) return this.spacing;
-            if (orientationType.includes('EDGE')) {
-                return this.spacing / Math.SQRT2;
-            }
-            return this.spacing;
+            return EditConfig.getLayerSpacingForOrientation(orientationType);
         },
 
-        /**
-         * 根据姿态类型获取最大切片深度
-         * - 面向：halfSize
-         * - 棱向：halfSize × √2
-         */
         getMaxDepthForOrientation(orientationType) {
-            if (!orientationType) return this.halfSize;
-            if (orientationType.includes('EDGE')) {
-                return this.halfSize * Math.SQRT2;
-            }
-            return this.halfSize;
+            return EditConfig.getMaxDepthForOrientation(orientationType);
         }
     };
 

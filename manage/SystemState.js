@@ -5,6 +5,8 @@ import { CONFIG } from "./Config.js";
 
 // Re-export CONFIG so other modules don't break
 export { CONFIG };
+export { EditConfig } from "./EditConfig.js";
+
 
 /**
  * SystemStateClass - 全局运行时状态管理器

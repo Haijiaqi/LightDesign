@@ -1,6 +1,6 @@
-import { SystemState, CONFIG } from "./SystemState.js";
+import { SystemState, CONFIG, EditConfig } from "./SystemState.js";
 import { OrientationImpl } from "./OrientationImpl.js";
-import { ObjectFactoryImpl } from "./ObjectFactoryImpl.js"; // Needed for LocalGridConfig
+import { ObjectFactoryImpl } from "./ObjectFactoryImpl.js";
 
 // [MIGRATE]
 // 瞬态变量，移动到模块作用域
@@ -352,8 +352,8 @@ export const InputManager = {
                 (obj.center.y - planePt.y) * dir.y +
                 (obj.center.z - planePt.z) * dir.z;
             const orientationType = obj._currentOrientationState?.type || 'FACE';
-            const maxDepth = ObjectFactoryImpl.LocalGridConfig.getMaxDepthForOrientation(orientationType);
-            const stepSize = ObjectFactoryImpl.LocalGridConfig.getLayerSpacingForOrientation(orientationType);
+            const maxDepth = EditConfig.getMaxDepthForOrientation(orientationType);
+            const stepSize = EditConfig.getLayerSpacingForOrientation(orientationType);
 
             console.log(`[Wheel] Type: ${orientationType}, Step: ${stepSize.toFixed(3)}cm`);
 

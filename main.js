@@ -28,7 +28,7 @@ import { AnimationImpl } from "./manage/AnimationImpl.js";
 import { ObjectFactoryImpl } from "./manage/ObjectFactoryImpl.js";
 import { OrientationImpl } from "./manage/OrientationImpl.js";
 
-import { SystemState, CONFIG } from "./manage/SystemState.js";
+import { SystemState, CONFIG, EditConfig } from "./manage/SystemState.js";
 import { CameraSystem } from "./manage/CameraSystem.js";
 import { Renderer } from "./manage/Renderer.js";
 import { InputManager } from "./manage/InputManager.js";
@@ -469,7 +469,7 @@ function processIntent(intent) {
         case 'ADJUST_SLICE_DEPTH':
             {
                 const currentDepth = SystemState.focusSliceDepth;
-                const limit = ObjectFactoryImpl.LocalGridConfig.halfSize;
+                const limit = EditConfig.halfSize;
                 const newDepth = Math.max(-limit, Math.min(limit, currentDepth + intent.delta));
                 if (newDepth !== currentDepth) {
                     const diff = newDepth - currentDepth;
@@ -1307,9 +1307,9 @@ function finishEnterEditState(obj) {
         }
         console.log(`[STATE] EDIT对齐: 移动=${(-currentDist).toFixed(2)}cm, 新center.y=${obj.center.y.toFixed(2)}`);
     }
-    const localGrid = ObjectFactoryImpl.createLocalGridObject(obj);
-    SystemState.localGrid = localGrid;
-    SystemState.objects.push(localGrid);
+    // const localGrid = ObjectFactoryImpl.createLocalGridObject(obj);
+    // SystemState.localGrid = localGrid;
+    // SystemState.objects.push(localGrid);
     showControlPoints(obj);
     SystemState.ifControl = true;
     console.log('[STATE] EDIT entered');
@@ -1318,10 +1318,10 @@ function finishEnterEditState(obj) {
 function exitEditState() {
     if (SystemState.interactionState !== 'EDIT') return;
     hideControlPoints();
-    if (SystemState.localGrid) {
-        SystemState.objects = SystemState.objects.filter(o => o !== SystemState.localGrid);
-        SystemState.localGrid = null;
-    }
+    // if (SystemState.localGrid) {
+    //     SystemState.objects = SystemState.objects.filter(o => o !== SystemState.localGrid);
+    //     SystemState.localGrid = null;
+    // }
     if (!SystemState.objects.includes(SystemState.worldGrid)) {
         SystemState.objects.push(SystemState.worldGrid);
     }
@@ -1582,8 +1582,8 @@ function snapToNearestLayer(obj) {
     const dir = win.direction;
     const planePt = dir.start;
     const orientationType = obj._currentOrientationState?.type || 'FACE';
-    const layerSpacing = ObjectFactoryImpl.LocalGridConfig.getLayerSpacingForOrientation(orientationType);
-    const maxDepth = ObjectFactoryImpl.LocalGridConfig.getMaxDepthForOrientation(orientationType);
+    const layerSpacing = EditConfig.getLayerSpacingForOrientation(orientationType);
+    const maxDepth = EditConfig.getMaxDepthForOrientation(orientationType);
     const currentDist = (obj.center.x - planePt.x) * dir.x + (obj.center.y - planePt.y) * dir.y + (obj.center.z - planePt.z) * dir.z;
     let nearestLayer = Math.round(currentDist / layerSpacing);
     const maxLayer = Math.floor(maxDepth / layerSpacing);
