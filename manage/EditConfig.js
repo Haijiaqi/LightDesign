@@ -12,10 +12,10 @@ export const EditConfig = {
 
     // ===== 派生参数 (基于设备尺寸) =====
 
-    /** 编辑区域尺寸 (直径)，厘米 */
+    /** 编辑区域尺寸 (直径)，厘米 - 最接近的整十厘米 */
     get size() {
         const minDim = Math.min(CONFIG.screenXLengthCm, CONFIG.screenYLengthCm);
-        return Math.floor(minDim);
+        return Math.floor(minDim / 10) * 10;  // 向下取整到10的倍数
     },
 
     /** 编辑区域半尺寸，厘米 */
@@ -52,5 +52,38 @@ export const EditConfig = {
             return this.halfSize * Math.SQRT2;
         }
         return this.halfSize;
+    },
+
+    /**
+     * 根据姿态类型和视觉方向获取格网间距缩放
+     * @param {string} type - 'FACE' 或 'EDGE'
+     * @param {string} visualOrientation - 'H' 或 'V' (仅EDGE态有效)
+     * @returns {{scaleX: number, scaleY: number}}
+     */
+    getGridSpacingScale(type, visualOrientation) {
+        if (type !== 'EDGE') {
+            return { scaleX: 1.0, scaleY: 1.0 };
+        }
+        if (visualOrientation === 'H') {
+            return { scaleX: 1.0 / Math.SQRT2, scaleY: 1.0 };
+        }
+        return { scaleX: 1.0, scaleY: 1.0 / Math.SQRT2 };
+    },
+
+    /**
+     * 根据姿态类型和视觉方向获取格网尺寸
+     * @param {string} type - 'FACE' 或 'EDGE'
+     * @param {string} visualOrientation - 'H' 或 'V' (仅EDGE态有效)
+     * @returns {{width: number, height: number}} 厘米
+     */
+    getGridDimensions(type, visualOrientation) {
+        const base = this.size;
+        if (type !== 'EDGE') {
+            return { width: base, height: base };
+        }
+        if (visualOrientation === 'H') {
+            return { width: base, height: base * Math.SQRT2 };
+        }
+        return { width: base * Math.SQRT2, height: base };
     }
 };

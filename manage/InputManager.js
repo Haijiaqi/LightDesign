@@ -319,7 +319,7 @@ export const InputManager = {
     },
 
     handleEditWheel(e) {
-        return this.handleEditWheelSliceDepth(e);
+        return InputManager.handleEditWheelSliceDepth(e);
     },
 
     handleEditWheelSliceDepth(e) {

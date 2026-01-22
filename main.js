@@ -29,6 +29,7 @@ import { ObjectFactoryImpl } from "./manage/ObjectFactoryImpl.js";
 import { OrientationImpl } from "./manage/OrientationImpl.js";
 
 import { SystemState, CONFIG, EditConfig } from "./manage/SystemState.js";
+import { OverlaySystem } from "./manage/OverlaySystem.js";
 import { CameraSystem } from "./manage/CameraSystem.js";
 import { Renderer } from "./manage/Renderer.js";
 import { InputManager } from "./manage/InputManager.js";
@@ -547,6 +548,8 @@ function processIntent(intent) {
                 const targetX = obj.center.x + dir.x * delta;
                 const targetY = obj.center.y + dir.y * delta;
                 const targetZ = obj.center.z + dir.z * delta;
+                // 更新切片深度状态
+                SystemState.focusSliceDepth = targetDepth;
                 animateSliceTransition(obj, targetX, targetY, targetZ, 150);
             }
             break;
@@ -802,14 +805,52 @@ function render() {
     updateVisibleReflection(); // Ensure reflection vectors are updated before rendering
     const imageData = Renderer.render(ctx, width, height); // NOTE: Renderer.render now handles point drawing logic
     const pixelData = imageData.data;
-    if (SystemState.interactionState === 'FOCUS' || SystemState.interactionState === 'EDIT') {
-        Renderer.renderScreenPointsHelper(pixelData, width, height);
-    }
+
+    // Overlay System Update & Render
+    const overlayContext = {
+        vmEnabled: SystemState.virtualMouse.enabled,
+        mouseX: SystemState.lastMouseX,
+        mouseY: SystemState.lastMouseY,
+        snappedPoint: SystemState.virtualMouse.snappedTo,
+        interactionState: SystemState.interactionState,
+        focusedObject: SystemState.focusedObject,
+        focusVirtualMouseDepth: SystemState.focusVirtualMouseDepth,
+        sliceDepth: SystemState.focusSliceDepth || 0,
+    };
+    OverlaySystem.updateAll(SystemState.mainWindow, overlayContext);
+    const overlayPoints = OverlaySystem.getAllPoints();
+    renderOverlayPoints(pixelData, width, height, overlayPoints);
+
+    // if (SystemState.interactionState === 'FOCUS' || SystemState.interactionState === 'EDIT') {
+    //    Renderer.renderScreenPointsHelper(pixelData, width, height);
+    // }
+
+    // NOTE: updateVirtualMouse must still run for snapping logic, 
+    // even though circle drawing is now handled by OverlaySystem
     if (SystemState.virtualMouse.enabled) {
         updateVirtualMouse(SystemState.lastMouseX, SystemState.lastMouseY);
     }
-    renderScreenOverlay(pixelData, width, height);
+    // renderScreenOverlay(pixelData, width, height); // Replaced by renderOverlayPoints
+
     ctx.putImageData(imageData, 0, 0);
+}
+
+function renderOverlayPoints(pixelData, width, height, points) {
+    const isLR = CONFIG.displayMode === '3D_LR';
+    const leftColor = isLR ? 'red' : 'blue';
+    const rightColor = isLR ? 'blue' : 'red';
+
+    for (const p of points) {
+        if (p.xM < 0 || p.xM >= width || p.yM < 0 || p.yM >= height) continue;
+
+        // 检查是否有视差 (3D效果)
+        if (Math.abs((p.xL || 0) - (p.xR || 0)) > 0) {
+            Renderer.renderScreenPixel(p.xL, p.yL, leftColor, p.light, pixelData, width, height);
+            Renderer.renderScreenPixel(p.xR, p.yR, rightColor, p.light, pixelData, width, height);
+        } else {
+            Renderer.renderScreenPixel(p.xM, p.yM, 'purple', p.light, pixelData, width, height);
+        }
+    }
 }
 
 function updateVirtualMouse(mouseX, mouseY) {
