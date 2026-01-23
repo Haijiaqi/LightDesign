@@ -111,6 +111,7 @@ export class Window {
       }
     }
     if (this.eyeD && this.windowObjects.length == 0) {
+      const gridSize = Math.floor(Math.min(this.xlength, this.ylength) / 10) * 10;
       const gridConfig =
       {
         DPIx: this.DPIx,
@@ -121,8 +122,8 @@ export class Window {
         screenHeightCm: this.ylength,
         horizontalInterval: 1, // 横向间距2cm
         verticalInterval: 1, // 纵向间距2cm
-        gridWidth: 20, // 网格区域宽20cm（左右各10cm）
-        gridHeight: 10, // 网格区域高16cm（上下各8cm）
+        gridWidth: gridSize,
+        gridHeight: gridSize,
         centerPosCm: { x: 0, y: 0 }, // 中心交点在屏幕物理中心
         dashPattern: [0.1, 0.4], // 实长1cm，虚长0.5cm
         light: 0.5

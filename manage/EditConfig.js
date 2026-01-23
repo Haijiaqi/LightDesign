@@ -56,6 +56,11 @@ export const EditConfig = {
 
     /**
      * 根据姿态类型和视觉方向获取格网间距缩放
+     * 
+     * ⚠️ 几何来源：ℤ³ 与编辑平面的交集
+     * - 轴向步进: spacing = baseSpacing (scale = 1.0)
+     * - 对角步进: spacing = baseSpacing × √2 (scale = √2)
+     * 
      * @param {string} type - 'FACE' 或 'EDGE'
      * @param {string} visualOrientation - 'H' 或 'V' (仅EDGE态有效)
      * @returns {{scaleX: number, scaleY: number}}
@@ -64,26 +69,49 @@ export const EditConfig = {
         if (type !== 'EDGE') {
             return { scaleX: 1.0, scaleY: 1.0 };
         }
+        // EDGE-H: X轴沿棱(单位步进), Y轴沿对角(√2步进)
         if (visualOrientation === 'H') {
-            return { scaleX: 1.0 / Math.SQRT2, scaleY: 1.0 };
+            return { scaleX: 1.0, scaleY: Math.SQRT2 };
         }
-        return { scaleX: 1.0, scaleY: 1.0 / Math.SQRT2 };
+        // EDGE-V: X轴沿对角(√2步进), Y轴沿棱(单位步进)
+        return { scaleX: Math.SQRT2, scaleY: 1.0 };
     },
 
     /**
      * 根据姿态类型和视觉方向获取格网尺寸
+     * 
+     * ⚠️ 约束：gridWidth/gridHeight 必须是对应 spacing 的整数倍
+     * - FACE: 均为 baseSpacing 的整数倍
+     * - EDGE-H: width = n × baseSpacing, height = m × (√2 × baseSpacing)
+     * - EDGE-V: width = n × (√2 × baseSpacing), height = m × baseSpacing
+     * 
      * @param {string} type - 'FACE' 或 'EDGE'
      * @param {string} visualOrientation - 'H' 或 'V' (仅EDGE态有效)
      * @returns {{width: number, height: number}} 厘米
      */
     getGridDimensions(type, visualOrientation) {
         const base = this.size;
+        const s = this.spacing; // baseSpacing
+
         if (type !== 'EDGE') {
-            return { width: base, height: base };
+            // FACE: 均为 baseSpacing 的整数倍
+            const w = Math.floor(base / s) * s;
+            const h = Math.floor(base / s) * s;
+            return { width: w, height: h };
         }
+
         if (visualOrientation === 'H') {
-            return { width: base, height: base * Math.SQRT2 };
+            // EDGE-H: width = n × s, height = m × (√2 × s)
+            const w = Math.floor(base / s) * s;
+            const hSpacing = s * Math.SQRT2;
+            const h = Math.floor((base * Math.SQRT2) / hSpacing) * hSpacing;
+            return { width: w, height: h };
         }
-        return { width: base * Math.SQRT2, height: base };
+
+        // EDGE-V: width = n × (√2 × s), height = m × s
+        const wSpacing = s * Math.SQRT2;
+        const w = Math.floor((base * Math.SQRT2) / wSpacing) * wSpacing;
+        const h = Math.floor(base / s) * s;
+        return { width: w, height: h };
     }
 };

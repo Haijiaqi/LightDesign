@@ -870,7 +870,6 @@ function updateVirtualMouse(mouseX, mouseY) {
             // [Fix] 拖拽时忽略物体自身的可吸附点（主要是中心点）
             if (SystemState.isDragging && SystemState.draggingObject) {
                 if (p.ownerObject === SystemState.draggingObject) {
-                    // console.log('[DEBUG] Ignoring self point for drag:', p.tag);
                     return false;
                 }
             }
@@ -885,6 +884,40 @@ function updateVirtualMouse(mouseX, mouseY) {
             }
             return true;
         });
+
+        // [Task] Search Overlay Auxiliary Grid (EDIT mode)
+        if (SystemState.interactionState === 'EDIT') {
+            const editPoints = OverlaySystem.getEditGridIntersections();
+            let bestEditPoint = null;
+            let minEditDistSq = Infinity;
+            const SNAP_THRESHOLD_SQ = 20 * 20;
+
+            for (const p of editPoints) {
+                if (!p.isAttractable) continue;
+                const dx = p.xM - mouseX;
+                const dy = p.yM - mouseY;
+                const distSq = dx * dx + dy * dy;
+                if (distSq < SNAP_THRESHOLD_SQ && distSq < minEditDistSq) {
+                    minEditDistSq = distSq;
+                    bestEditPoint = p;
+                }
+            }
+
+            if (bestEditPoint) {
+                let replace = true;
+                if (snapped) {
+                    const dx = snapped.xM - mouseX;
+                    const dy = snapped.yM - mouseY;
+                    const snapDistSq = dx * dx + dy * dy;
+                    if (snapDistSq < minEditDistSq) {
+                        replace = false;
+                    }
+                }
+                if (replace) {
+                    snapped = bestEditPoint;
+                }
+            }
+        }
     }
     if (win && win.virtualCursor) {
         win.virtualCursor.setSnappedPoint(snapped);
