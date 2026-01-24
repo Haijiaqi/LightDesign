@@ -2,213 +2,162 @@
 import { CONFIG } from "./SystemState.js";
 import { EditConfig } from "./EditConfig.js";
 
+
 // =============================================================================
-// 模块级缓存 (Module-level Cache)
+// 静态格网缓存 (Static Grid Cache)
+// 使用 Int16Array 存储相对于中心的像素坐标 (Model Space Cache)
 // =============================================================================
-const _gridCache = {
+const _staticCache = {
     valid: false,
-    type: null,              // 'FACE' | 'EDGE'
-    visual: null,            // 'H' | 'V' (EDGE时)
-    roll: 0,                 // FACE态的Roll角度
-    layerIndex: 0,           // 层级索引 (用于相位计算)
-    centerScreenX: 0,
-    centerScreenY: 0,
-    intersections: [],
-    allPixels: [],
+    DPIx: 0,
+    DPIy: 0,
+    pixelWidth: 0,
+    pixelHeight: 0,
+    gridSizeX: 0,
+    gridSizeY: 0,
+    spacingX: 0,
+    spacingY: 0,
+
+    // 缓存池：Key = `${ type }_${ visual }_${ isOddLayer ? 'ODD' : 'EVEN' } `
+    // Value = { lines: Int16Array, intersections: Int16Array }
+    pool: new Map(),
+
+    // 临时存储当前帧变换后的交点，供吸附使用
+    currentIntersectionsTransformed: []
 };
 
 // =============================================================================
-// 虚线格网生成函数 (支持非对称间距、相位偏移、旋转)
+// 静态点云生成函数 (生成 Int16Array)
 // =============================================================================
-
-/**
- * 生成屏幕坐标系的虚线格网
- * @param {object} params
- * @param {number} params.DPIx - 水平 DPI (px/cm)
- * @param {number} params.DPIy - 垂直 DPI (px/cm)
- * @param {number} params.pixelWidth - 屏幕像素宽度
- * @param {number} params.pixelHeight - 屏幕像素高度
- * @param {number} params.centerXcm - 网格中心 X (相对屏幕中心, cm)
- * @param {number} params.centerYcm - 网格中心 Y (相对屏幕中心, cm)
- * @param {number} params.gridSizeX - 网格宽度 (cm)
- * @param {number} params.gridSizeY - 网格高度 (cm)
- * @param {number} params.spacingX - 水平格线间距 (cm)
- * @param {number} params.spacingY - 垂直格线间距 (cm)
- * @param {number} params.phaseX - 水平相位偏移 (0 或 0.5)
- * @param {number} params.phaseY - 垂直相位偏移 (0 或 0.5)
- * @param {number} params.rotation - 整体旋转角度 (弧度)
- * @param {number[]} params.dashPattern - 虚线模式 [实长cm, 虚长cm]
- * @param {number} params.light - 亮度 0~1
- * @returns {{intersections: object[], allPixels: object[]}}
- */
-function generateDashedGrid(params) {
+function generateStaticPointClouds(params) {
     const {
-        DPIx, DPIy, pixelWidth, pixelHeight,
-        centerXcm, centerYcm, gridSizeX, gridSizeY,
-        spacingX, spacingY, phaseX, phaseY,
-        rotation = 0,
-        dashPattern, light
+        DPIx, DPIy,
+        gridSizeX, gridSizeY,
+        spacingX, spacingY,
+        phaseX, phaseY,
+        dashPattern
     } = params;
 
     const [dashOnCm, dashOffCm] = dashPattern;
-    const halfGridX = gridSizeX / 2;
-    const halfGridY = gridSizeY / 2;
-    const xMinCm = -halfGridX;
-    const xMaxCm = halfGridX;
-    const yMinCm = -halfGridY;
-    const yMaxCm = halfGridY;
-
     const dashCycleCm = dashOnCm + dashOffCm;
-    const cosR = Math.cos(rotation);
-    const sinR = Math.sin(rotation);
 
-    const globalPointMap = new Map();
+    // 预估最大点数以分配 Buffer (保守估计)
+    // 假设每 cm 约 DPI 个点，总长 (gridSizeX/spacingY * gridSizeY + ...)
+    // 直接使用动态数组然后转 Int16Array 更简单安全
+    const linesPoints = [];
+    const intersectionsPoints = [];
 
-    // 将局部坐标(相对网格中心)转换为屏幕像素坐标
-    const localToPixel = (lx, ly) => {
-        // 先旋转
-        const rx = lx * cosR - ly * sinR;
-        const ry = lx * sinR + ly * cosR;
-        // 平移到屏幕中心 + 网格中心偏移
-        const xCm = centerXcm + rx;
-        const yCm = centerYcm + ry;
-        // 转像素
-        const px = Math.round(pixelWidth / 2 + xCm * DPIx);
-        const py = Math.round(pixelHeight / 2 - yCm * DPIy);
-        return { px, py };
+    // 辅助：添加点到数组 (相对于中心，单位 Pixel)
+    const addPixel = (array, xCm, yCm) => {
+        const px = Math.round(xCm * DPIx);
+        const py = Math.round(-yCm * DPIy); // Y轴向上为正，屏幕向下为正
+        array.push(px, py);
     };
 
-    const createUniquePoint = (px, py, isIntersection = false) => {
-        const key = `${px},${py}`;
-        if (globalPointMap.has(key)) return globalPointMap.get(key);
-        const point = {
-            space: 'screen',
-            tag: isIntersection ? 'EDIT_GRID_INTERSECTION' : 'EDIT_GRID',
-            xM: px, yM: py, xL: px, xR: px, yL: py, yR: py,
-            light: light,
-            isIntersection,
-            isAttractable: isIntersection
-        };
-        globalPointMap.set(key, point);
-        return point;
-    };
+    // 1. 生成对称虚线段 (返回相对于线中心的 cm 偏移)
+    function sampleSymmetricLineLocs(maxExtentCm, onCm, offCm, cycleCm) {
+        const locs = [];
+        if (cycleCm <= 0) return locs;
 
-    // 虚线采样：沿着线段从start到end，按dashPattern采样
-    function sampleDashedLine(startCm, endCm, onCm, offCm, cycleCm) {
-        const points = [];
-        if (cycleCm <= 0 || endCm <= startCm) return points;
-
-        let pos = 0; // 从中心开始
-        // 正方向
-        while (pos <= endCm) {
+        // 正向
+        let pos = 0;
+        while (pos < maxExtentCm) {
             const segStart = pos;
-            const segEnd = pos + onCm;
-            if (segStart <= endCm) {
-                points.push({ start: Math.max(segStart, startCm), end: Math.min(segEnd, endCm) });
+            const segEnd = Math.min(pos + onCm, maxExtentCm);
+            if (segEnd > segStart) {
+                // 按像素步进采样
+                const stepCm = 1.0 / Math.max(DPIx, DPIy);
+                for (let v = segStart; v <= segEnd; v += stepCm) {
+                    locs.push(v);
+                }
             }
             pos += cycleCm;
         }
-        // 负方向
-        pos = -cycleCm;
-        while (pos + onCm >= startCm) {
-            const segStart = pos;
-            const segEnd = pos + onCm;
-            if (segEnd >= startCm) {
-                points.push({ start: Math.max(segStart, startCm), end: Math.min(segEnd, endCm) });
+        // 负向
+        pos = 0;
+        while (pos > -maxExtentCm) {
+            const segEnd = pos;
+            const segStart = Math.max(pos - onCm, -maxExtentCm);
+            if (segEnd > segStart) {
+                const stepCm = 1.0 / Math.max(DPIx, DPIy);
+                for (let v = segEnd; v >= segStart; v -= stepCm) {
+                    locs.push(v);
+                }
             }
             pos -= cycleCm;
         }
-        return points;
+        return locs;
     }
 
-    // 生成线位置 (考虑相位偏移)
-    // phase=0: 线在 0, ±spacing, ±2*spacing, ...
-    // phase=0.5: 线在 ±0.5*spacing, ±1.5*spacing, ±2.5*spacing, ...
-    const verticalLinesX = [];
-    const startOffsetX = phaseX * spacingX;
+    // 2. 生成网格线
+    function generateLines(axisLength, lineLength, phase, spacing, isVertical) {
+        const halfAxis = axisLength / 2;
+        const halfLine = lineLength / 2;
+        const startOffset = phase * spacing;
+
+        for (let i = 0; ; i++) {
+            const basePos = startOffset + i * spacing;
+            if (basePos > halfAxis) break;
+
+            const isCenterLine = (i === 0 && phase === 0);
+            const linePositions = [];
+            if (basePos <= halfAxis) linePositions.push(basePos);
+            if (!isCenterLine && -basePos >= -halfAxis) linePositions.push(-basePos);
+
+            // 获取该线的虚线采样 (一次采样，多次复用)
+            // 注意：这里简化为假设 X/Y DPI 接近，使用统一采样以免逻辑过于复杂
+            // 严格来说应该区分 DPIx/DPIy，但视觉上差异可忽略
+            const lineSamples = sampleSymmetricLineLocs(halfLine, dashOnCm, dashOffCm, dashCycleCm);
+
+            for (const linePos of linePositions) {
+                for (const val of lineSamples) {
+                    if (isVertical) {
+                        addPixel(linesPoints, linePos, val); // X=LinePos, Y=Val
+                    } else {
+                        addPixel(linesPoints, val, linePos); // X=Val, Y=LinePos
+                    }
+                }
+            }
+            if (i > 100) break;
+        }
+    }
+
+    generateLines(gridSizeX, gridSizeY, phaseX, spacingX, true);  // 竖线
+    generateLines(gridSizeY, gridSizeX, phaseY, spacingY, false); // 横线
+
+    // 3. 生成交点 (只生成用于吸附的关键点)
+    const vLines = [];
     for (let i = 0; ; i++) {
-        const posPlus = startOffsetX + i * spacingX;
-        const posMinus = -startOffsetX - i * spacingX;
-        let added = false;
-        if (posPlus <= xMaxCm) {
-            verticalLinesX.push(posPlus);
-            added = true;
-        }
-        // 关键修复：当 phase≠0 时，i=0 也需要添加负向线
-        // 当 phase=0 时，posPlus=posMinus=0，避免重复添加
-        const isDifferentFromPlus = Math.abs(posPlus - posMinus) > 0.001;
-        if (isDifferentFromPlus && posMinus >= xMinCm) {
-            verticalLinesX.push(posMinus);
-            added = true;
-        }
-        if (!added) break;
+        const p = phaseX * spacingX + i * spacingX;
+        if (p > gridSizeX / 2) break;
+        if (i === 0 && phaseX === 0) vLines.push(p);
+        else { vLines.push(p); vLines.push(-p); }
+        if (i > 100) break;
+    }
+    const hLines = [];
+    for (let i = 0; ; i++) {
+        const p = phaseY * spacingY + i * spacingY;
+        if (p > gridSizeY / 2) break;
+        if (i === 0 && phaseY === 0) hLines.push(p);
+        else { hLines.push(p); hLines.push(-p); }
         if (i > 100) break;
     }
 
-    const horizontalLinesY = [];
-    const startOffsetY = phaseY * spacingY;
-    for (let i = 0; ; i++) {
-        const posPlus = startOffsetY + i * spacingY;
-        const posMinus = -startOffsetY - i * spacingY;
-        let added = false;
-        if (posPlus <= yMaxCm) {
-            horizontalLinesY.push(posPlus);
-            added = true;
-        }
-        const isDifferentFromPlus = Math.abs(posPlus - posMinus) > 0.001;
-        if (isDifferentFromPlus && posMinus >= yMinCm) {
-            horizontalLinesY.push(posMinus);
-            added = true;
-        }
-        if (!added) break;
-        if (i > 100) break;
-    }
+    // 中心点放第一个 (优化吸附优先级)
+    addPixel(intersectionsPoints, 0, 0); // 总是尝试添加中心，后续去重或逻辑保证
 
-    // 画水平线 (Y固定，X变化)
-    for (const ly of horizontalLinesY) {
-        const ranges = sampleDashedLine(xMinCm, xMaxCm, dashOnCm, dashOffCm, dashCycleCm);
-        for (const { start, end } of ranges) {
-            // 按像素密度采样
-            const stepCm = 1.0 / DPIx;
-            for (let lx = start; lx <= end; lx += stepCm) {
-                const { px, py } = localToPixel(lx, ly);
-                createUniquePoint(px, py);
-            }
+    // 添加其他交点
+    for (const ly of hLines) {
+        for (const lx of vLines) {
+            if (lx === 0 && ly === 0) continue; // 跳过中心
+            addPixel(intersectionsPoints, lx, ly);
         }
     }
 
-    // 画竖直线 (X固定，Y变化)
-    for (const lx of verticalLinesX) {
-        const ranges = sampleDashedLine(yMinCm, yMaxCm, dashOnCm, dashOffCm, dashCycleCm);
-        for (const { start, end } of ranges) {
-            const stepCm = 1.0 / DPIy;
-            for (let ly = start; ly <= end; ly += stepCm) {
-                const { px, py } = localToPixel(lx, ly);
-                createUniquePoint(px, py);
-            }
-        }
-    }
-
-    // 生成交点
-    const intersections = [];
-    for (const ly of horizontalLinesY) {
-        for (const lx of verticalLinesX) {
-            const { px, py } = localToPixel(lx, ly);
-            const key = `${px},${py}`;
-            let point = globalPointMap.get(key);
-            if (!point) {
-                point = createUniquePoint(px, py, true);
-            } else {
-                point.isIntersection = true;
-                point.isAttractable = true;
-                point.tag = 'EDIT_GRID_INTERSECTION';
-            }
-            intersections.push(point);
-        }
-    }
-
-    const allPixels = Array.from(globalPointMap.values());
-    return { intersections, allPixels };
+    return {
+        lines: new Int16Array(linesPoints),
+        intersections: new Int16Array(intersectionsPoints)
+    };
 }
 
 // =============================================================================
@@ -217,10 +166,12 @@ function generateDashedGrid(params) {
 class Overlay {
     constructor(name, updateFn) {
         this.name = name;
-        this.points = [];
+        this.points = []; // 兼容旧逻辑
         this.visible = true;
         this.zIndex = 0;
         this._updateFn = updateFn;
+        // 优化接口：直接渲染回调
+        this._renderToBufferFn = null;
     }
 
     update(win, context) {
@@ -231,6 +182,12 @@ class Overlay {
         if (this._updateFn) {
             this._updateFn(this, win, context);
         }
+    }
+
+    // 新增：渲染到 Buffer 接口
+    renderToBuffer(pixelData, width, height, win, context) {
+        if (!this.visible || !this._renderToBufferFn) return;
+        this._renderToBufferFn(this, pixelData, width, height, win, context);
     }
 
     clear() {
@@ -254,7 +211,7 @@ class OverlaySystemImpl {
     }
 
     _initBuiltins() {
-        // === 1. Virtual Mouse Overlay ===
+        // === 1. Virtual Mouse Overlay === (保持不变，仍使用对象点)
         const vmOverlay = new Overlay('VirtualMouse', (me, win, ctx) => {
             me.clear();
             if (!ctx.vmEnabled) return;
@@ -308,110 +265,21 @@ class OverlaySystemImpl {
         vmOverlay.zIndex = 100;
         this.add(vmOverlay);
 
-        // === 2. Edit Assist Overlay ===
+
+        // === 2. Edit Assist Overlay (经过深度优化) ===
         const editAssistOverlay = new Overlay('EditAssist', (me, win, ctx) => {
+            // Update 阶段只计算必要的参数，不生成点
+            // 但需要生成 slice contour (截面轮廓保留为对象点，因为它是动态的且点少)
             me.clear();
-            if (ctx.interactionState !== 'EDIT') {
-                _gridCache.valid = false;
-                return;
-            }
+            if (ctx.interactionState !== 'EDIT') return;
 
             const obj = ctx.focusedObject;
             if (!obj) return;
 
-            // 获取姿态状态
-            const state = obj._currentOrientationState;
-            const type = state?.type || 'FACE';
-            const visual = state?.visualOrientation || null;  // 'H' | 'V' (EDGE时)
-            const roll = state?.roll || 0;  // FACE态的Roll角度
-
-            // 获取间距缩放
-            const { scaleX, scaleY } = EditConfig.getGridSpacingScale(type, visual);
-            const layerSpacing = EditConfig.getLayerSpacingForOrientation(type);
-
-            // 获取网格尺寸
-            const { width: gridWidth, height: gridHeight } = EditConfig.getGridDimensions(type, visual);
-
-            // 计算层级索引 (用于相位偏移)
-            const sliceDepth = ctx.sliceDepth || 0;
-            const layerIndex = Math.round(sliceDepth / layerSpacing);
-            const isOddLayer = Math.abs(layerIndex) % 2 === 1;
-
-            // 相位偏移：仅EDGE态奇数层偏移
-            // 偏移方向垂直于棱的方向：
-            // - EDGE_H (棱水平): 棱沿X, 偏移在Y方向
-            // - EDGE_V (棱竖直): 棱沿Y, 偏移在X方向
-            let phaseX = 0;
-            let phaseY = 0;
-            if (isOddLayer && type === 'EDGE') {
-                if (visual === 'H') {
-                    phaseY = 0.5;  // 水平棱态：Y方向偏移（垂直于棱）
-                } else {
-                    phaseX = 0.5;  // 竖直棱态：X方向偏移（垂直于棱）
-                }
-            }
-
-            // DEBUG
-            console.log(`[Grid] type=${type}, visual=${visual}, sliceDepth=${sliceDepth.toFixed(2)}, layerIndex=${layerIndex}, isOdd=${isOddLayer}, phaseX=${phaseX}, phaseY=${phaseY}`);
-
-            // 旋转角度：FACE态使用Roll，EDGE态Roll归零
-            const rotation = (type === 'FACE') ? (roll * Math.PI / 180) : 0;
-
-            // 物体投影中心 (屏幕坐标)
-            const objCenterScreenX = obj.center?.xM ?? (win.width / 2);
-            const objCenterScreenY = obj.center?.yM ?? (win.height / 2);
-            const centerXcm = (objCenterScreenX - win.width / 2) / win.DPIx;
-            const centerYcm = -(objCenterScreenY - win.height / 2) / win.DPIy;
-
-            // 检查缓存是否有效
-            const cacheKeyChanged =
-                _gridCache.type !== type ||
-                _gridCache.visual !== visual ||
-                _gridCache.roll !== roll ||
-                _gridCache.layerIndex !== layerIndex ||
-                Math.abs(_gridCache.centerScreenX - objCenterScreenX) > 1 ||
-                Math.abs(_gridCache.centerScreenY - objCenterScreenY) > 1;
-
-            if (!_gridCache.valid || cacheKeyChanged) {
-                const baseSpacing = EditConfig.spacing;
-                const spacingX = baseSpacing * scaleX;
-                const spacingY = baseSpacing * scaleY;
-
-                const result = generateDashedGrid({
-                    DPIx: win.DPIx,
-                    DPIy: win.DPIy,
-                    pixelWidth: win.width,
-                    pixelHeight: win.height,
-                    centerXcm: centerXcm,
-                    centerYcm: centerYcm,
-                    gridSizeX: gridWidth,
-                    gridSizeY: gridHeight,
-                    spacingX: spacingX,
-                    spacingY: spacingY,
-                    phaseX: phaseX,
-                    phaseY: phaseY,
-                    rotation: rotation,
-                    dashPattern: [0.3, 0.2],
-                    light: 0.5
-                });
-                _gridCache.intersections = result.intersections;
-                _gridCache.allPixels = result.allPixels;
-                _gridCache.type = type;
-                _gridCache.visual = visual;
-                _gridCache.roll = roll;
-                _gridCache.layerIndex = layerIndex;
-                _gridCache.centerScreenX = objCenterScreenX;
-                _gridCache.centerScreenY = objCenterScreenY;
-                _gridCache.valid = true;
-            }
-
-            // A. 渲染格网
-            for (const p of _gridCache.allPixels) {
-                me.points.push(p);
-            }
-
-            // B. 截面轮廓
+            // B. 截面轮廓 (Slice Contour) - 保持动态生成
             if (obj.displayPoints && obj.displayPoints.length > 0) {
+                const type = obj._currentOrientationState?.type || 'FACE';
+                const layerSpacing = EditConfig.getLayerSpacingForOrientation(type);
                 const dir = win.direction;
                 const planePt = dir.start;
                 const threshold = layerSpacing * 0.6;
@@ -428,6 +296,160 @@ class OverlaySystemImpl {
                 }
             }
         });
+
+        // 核心优化：直接渲染到 Buffer
+        editAssistOverlay._renderToBufferFn = (me, pixelData, width, height, win, ctx) => {
+            if (ctx.interactionState !== 'EDIT') return;
+            const obj = ctx.focusedObject;
+            if (!obj) return;
+
+            // 1. 获取状态 Key
+            const state = obj._currentOrientationState;
+            const type = state?.type || 'FACE';
+            const visual = state?.visualOrientation || null;
+            const roll = state?.roll || 0;
+            const sliceDepth = ctx.sliceDepth ?? ctx.focusSliceDepth ?? 0;
+            const layerSpacing = EditConfig.getLayerSpacingForOrientation(type);
+            const layerIndex = Math.round(sliceDepth / layerSpacing);
+            const isOddLayer = Math.abs(layerIndex) % 2 === 1;
+
+            // 缓存 Key
+            const cacheKey = `${type}_${visual}_${isOddLayer ? 'ODD' : 'EVEN'} `;
+
+            // 2. 检查静态缓存是否可用
+            // 如果 DPI 或 grid size 变了，全清
+            const dims = EditConfig.getGridDimensions(type, visual);
+            if (!_staticCache.valid ||
+                Math.abs(_staticCache.DPIx - win.DPIx) > 1 ||
+                Math.abs(_staticCache.DPIy - win.DPIy) > 1 ||
+                Math.abs(_staticCache.gridSizeX - dims.width) > 0.1 ||
+                Math.abs(_staticCache.gridSizeY - dims.height) > 0.1) {
+                _staticCache.pool.clear();
+                _staticCache.valid = true;
+                _staticCache.DPIx = win.DPIx;
+                _staticCache.DPIy = win.DPIy;
+                _staticCache.pixelWidth = win.width;
+                _staticCache.pixelHeight = win.height;
+                _staticCache.gridSizeX = dims.width;
+                _staticCache.gridSizeY = dims.height;
+            }
+
+            // 3. 从 Pool 获取或生成点云
+            let cloud = _staticCache.pool.get(cacheKey);
+            if (!cloud) {
+                // 生成新点云
+                const { scaleX, scaleY } = EditConfig.getGridSpacingScale(type, visual);
+                const baseSpacing = EditConfig.spacing;
+                const { width: gw, height: gh } = EditConfig.getGridDimensions(type, visual);
+
+                let phaseX = 0, phaseY = 0;
+                if (isOddLayer && type === 'EDGE') {
+                    if (visual === 'H') phaseY = 0.5;
+                    else phaseX = 0.5;
+                }
+
+                cloud = generateStaticPointClouds({
+                    DPIx: win.DPIx, DPIy: win.DPIy,
+                    gridSizeX: gw, gridSizeY: gh,
+                    spacingX: baseSpacing * scaleX,
+                    spacingY: baseSpacing * scaleY,
+                    phaseX, phaseY,
+                    dashPattern: [0.3, 0.2]
+                });
+                _staticCache.pool.set(cacheKey, cloud);
+            }
+
+            // 4. 计算刚体变换 (2D Affine Transform)
+            // [Fix] 使用垂直投影 (Orthographic Projection) 计算屏幕位置
+            // 确保网格锁定在屏幕平面，不随透视深度变化而移动
+            let objCenterScreenX = width / 2;
+            let objCenterScreenY = height / 2;
+
+            if (win.vx && win.vy && win.direction) {
+                const dx = obj.center.x - win.direction.start.x;
+                const dy = obj.center.y - win.direction.start.y;
+                const dz = obj.center.z - win.direction.start.z;
+
+                // 投影到屏幕基向量 (vx, vy)
+                // offX = V dot vx
+                const offX = dx * win.vx.x + dy * win.vx.y + dz * win.vx.z;
+                // offY = V dot vy
+                const offY = dx * win.vy.x + dy * win.vy.y + dz * win.vy.z;
+
+                // 转屏幕像素 (遵循 Window.js 坐标系: X向右, Y向下, 原点左上)
+                // Window.js: x = xlength/2 + offX (vx投影)
+                // Window.js: y = ylength/2 - offY (vy投影)
+                objCenterScreenX = width / 2 + offX * win.DPIx;
+                objCenterScreenY = height / 2 - offY * win.DPIy;
+            } else {
+                // Fallback if window vectors are missing (unlikely)
+                objCenterScreenX = obj.centerPoint?.xM ?? (width / 2);
+                objCenterScreenY = obj.centerPoint?.yM ?? (height / 2);
+            }
+
+            // 旋转：FACE 态用 roll，EDGE 态为 0
+            const rotation = (type === 'FACE') ? (roll * Math.PI / 180) : 0;
+            const cosR = Math.cos(rotation);
+            const sinR = Math.sin(rotation);
+
+            // 5. 极速渲染循环 (Direct Pixel Access)
+            // 颜色：紫色 (128, 0, 128) 叠加模式
+            const R = 128, G = 0, B = 128;
+
+            const drawPoints = (points) => {
+                const len = points.length;
+                for (let i = 0; i < len; i += 2) {
+                    const lx = points[i];
+                    const ly = points[i + 1];
+
+                    // 旋转
+                    const rx = lx * cosR - ly * sinR;
+                    const ry = lx * sinR + ly * cosR;
+
+                    // 平移 + 整数化
+                    const px = (objCenterScreenX + rx + 0.5) | 0;
+                    const py = (objCenterScreenY + ry + 0.5) | 0;
+
+                    // 边界检查 & 写入
+                    if (px >= 0 && px < width && py >= 0 && py < height) {
+                        const idx = (py * width + px) * 4;
+                        // Additive Blending (简单叠加)
+                        pixelData[idx] = Math.min(255, pixelData[idx] + R);
+                        pixelData[idx + 1] = Math.min(255, pixelData[idx + 1] + G);
+                        pixelData[idx + 2] = Math.min(255, pixelData[idx + 2] + B);
+                        pixelData[idx + 3] = 255;
+                    }
+                }
+            };
+
+            // 绘制虚线点
+            drawPoints(cloud.lines);
+
+            // 绘制交点 (加亮)
+            // drawPoints(cloud.intersections); // 暂时不额外绘制交点，只用于吸附
+
+            // TODO: 如何让交点对 `getEditGridIntersections` 可见？
+            // 我们需要把变换后的交点存下来供 `InputManager` 使用
+            // 这里为了性能，只在需要吸附时（InputManager调用）计算，或者简单缓存这一帧的变换结果
+            // 暂存到 `_staticCache` 的临时字段
+            _staticCache.currentIntersectionsTransformed = [];
+            const intersections = cloud.intersections;
+            const len = intersections.length;
+            for (let i = 0; i < len; i += 2) {
+                const lx = intersections[i];
+                const ly = intersections[i + 1];
+                const rx = lx * cosR - ly * sinR;
+                const ry = lx * sinR + ly * cosR;
+                const px = objCenterScreenX + rx;
+                const py = objCenterScreenY + ry;
+                // 构造伪 Point 对象供 InputManager 使用
+                _staticCache.currentIntersectionsTransformed.push({
+                    xM: px, yM: py, xL: px, xR: px, yL: py, yR: py,
+                    isAttractable: true, isIntersection: true
+                });
+            }
+        };
+
         editAssistOverlay.zIndex = 50;
         this.add(editAssistOverlay);
     }
@@ -446,6 +468,7 @@ class OverlaySystemImpl {
         }
     }
 
+    // 仅获取普通 Overlay 的点 (VM, SliceContour)
     getAllPoints() {
         return this.overlays
             .filter(o => o.visible)
@@ -453,11 +476,18 @@ class OverlaySystemImpl {
             .flatMap(o => o.points);
     }
 
+    // 新增：执行直接 buffer 渲染
+    renderAllToBuffer(pixelData, width, height, win, context) {
+        for (const o of this.overlays) {
+            o.renderToBuffer(pixelData, width, height, win, context);
+        }
+    }
+
     /**
      * 获取当前 EDIT 态的格网交点 (供吸附使用)
      */
     getEditGridIntersections() {
-        return _gridCache.valid ? _gridCache.intersections : [];
+        return _staticCache.currentIntersectionsTransformed || [];
     }
 }
 

@@ -399,11 +399,11 @@ export class ObjectFactoryImpl {
         const config = ObjectFactoryImpl.LocalGridConfig;
         const finalSize = config.size;
         const spacing = config.spacing;
+        const count = config.layerCount;
 
-        console.log(`创建局部格网: 尺寸 ${finalSize}cm, 间距 ${spacing}cm`);
+        console.log(`创建局部格网: 尺寸=${finalSize}cm, 间距=${spacing}cm, layerCount=${count}`);
 
         const points = [];
-        const count = config.layerCount;
 
         // 虚线配置
         const dashPointsPerEdge = 3;
@@ -429,6 +429,8 @@ export class ObjectFactoryImpl {
         }
 
         // 生成虚线点
+        // 生成虚线点 (优化：暂时注释掉，只保留关键交点)
+        /*
         for (let ix = -count; ix <= count; ix++) {
             for (let iy = -count; iy <= count; iy++) {
                 for (let iz = -count; iz <= count; iz++) {
@@ -477,6 +479,7 @@ export class ObjectFactoryImpl {
                 }
             }
         }
+        */
 
         console.log(`局部格网生成: 格点 ${Math.pow(2 * count + 1, 3)}个, 虚线点 ${points.length - Math.pow(2 * count + 1, 3)}个`);
 
@@ -499,6 +502,12 @@ export class ObjectFactoryImpl {
 
         gridObj.isLocalGrid = true;
         gridObj.owner = targetObj;
+
+        // 禁用局部格网的中心点吸附（它不应该干扰编辑操作）
+        if (gridObj.centerPoint) {
+            gridObj.centerPoint.isAttractable = false;
+            gridObj.centerPoint.isObjectCenter = false;
+        }
 
         return gridObj;
     }

@@ -1,5 +1,6 @@
 import { SystemState, CONFIG } from "./SystemState.js";
 import { StyleImpl } from "./StyleImpl.js";
+import { OverlaySystem } from "./OverlaySystem.js";
 
 export const Renderer = {
     LUT: StyleImpl.getLUT(),
@@ -173,6 +174,10 @@ export const Renderer = {
                 }
             }
         }
+
+        // [OPTIMIZATION B] OverlaySystem 直接 Buffer 渲染
+        // 在所有 3D 点绘制完毕后，直接叠加辅助格网
+        OverlaySystem.renderAllToBuffer(pixelData, width, height, win, SystemState);
         return imageData;
     },
     renderPointSimple(p, light, pixelData, width, height) {

@@ -162,6 +162,18 @@ export class StyleImpl {
             fixedLight: 3.0, // 更亮以确保光源显眼
             neighborRule: 'glow',
             glowRadius: 3
+        },
+        // 局部格网格点：立体渲染，使用动态设置的 light 值
+        LOCAL_GRID: {
+            colorMode: 'stereo',
+            lightAffected: true,  // 使用点的 light 属性
+            neighborRule: 'none'
+        },
+        // 局部格网虚线点：立体渲染，使用动态设置的 light 值
+        LOCAL_GRID_DASH: {
+            colorMode: 'stereo',
+            lightAffected: true,  // 使用点的 light 属性
+            neighborRule: 'none'
         }
     };
 

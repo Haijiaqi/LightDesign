@@ -8,7 +8,7 @@ export const EditConfig = {
     // ===== 基础参数 (直接设定) =====
 
     /** 层间距（面向态），厘米 */
-    spacing: 2.0,
+    spacing: 1.0,
 
     // ===== 派生参数 (基于设备尺寸) =====
 
@@ -28,6 +28,11 @@ export const EditConfig = {
         return Math.floor(this.halfSize / this.spacing);
     },
 
+    /** 局部格网的实际边长半径 (= layerCount * spacing) */
+    get localGridHalfSize() {
+        return this.layerCount * this.spacing;
+    },
+
     // ===== 姿态适配函数 =====
 
     /**
@@ -43,15 +48,18 @@ export const EditConfig = {
     },
 
     /**
-     * 根据姿态类型获取最大切片深度
+     * 根据姿态类型获取最大移动深度（局部格网的实际边界）
+     * - 正面向：边长方向半径 = layerCount * spacing
+     * - 棱面向：对角方向半径 = layerCount * spacing * √2
      * @param {string} orientationType - 'FACE_*' 或 'EDGE_*'
      * @returns {number} 最大深度 (厘米)
      */
     getMaxDepthForOrientation(orientationType) {
+        const baseHalfSize = this.localGridHalfSize;
         if (orientationType && orientationType.includes('EDGE')) {
-            return this.halfSize * Math.SQRT2;
+            return baseHalfSize * Math.SQRT2;
         }
-        return this.halfSize;
+        return baseHalfSize;
     },
 
     /**
@@ -78,40 +86,40 @@ export const EditConfig = {
     },
 
     /**
-     * 根据姿态类型和视觉方向获取格网尺寸
+     * 根据姿态类型和视觉方向获取屏幕辅助格网尺寸
+     * 
+     * 尺寸应与局部格网匹配：
+     * - FACE: 边长 = localGridHalfSize * 2 = layerCount * spacing * 2
+     * - EDGE: 对角方向 = localGridHalfSize * √2 * 2
      * 
      * ⚠️ 约束：gridWidth/gridHeight 必须是对应 spacing 的整数倍
-     * - FACE: 均为 baseSpacing 的整数倍
-     * - EDGE-H: width = n × baseSpacing, height = m × (√2 × baseSpacing)
-     * - EDGE-V: width = n × (√2 × baseSpacing), height = m × baseSpacing
      * 
      * @param {string} type - 'FACE' 或 'EDGE'
      * @param {string} visualOrientation - 'H' 或 'V' (仅EDGE态有效)
      * @returns {{width: number, height: number}} 厘米
      */
     getGridDimensions(type, visualOrientation) {
-        const base = this.size;
-        const s = this.spacing; // baseSpacing
+        const s = this.spacing;
+        const localHalf = this.localGridHalfSize;  // = layerCount * spacing
 
         if (type !== 'EDGE') {
-            // FACE: 均为 baseSpacing 的整数倍
-            const w = Math.floor(base / s) * s;
-            const h = Math.floor(base / s) * s;
-            return { width: w, height: h };
+            // FACE: 边长 = 局部格网边长
+            const size = localHalf * 2;
+            return { width: size, height: size };
         }
+
+        // EDGE: 屏幕上看到局部格网的截面是菱形
+        // 棱方向：边长 = localHalf * 2
+        // 对角方向：= localHalf * √2 * 2
+        const edgeSize = localHalf * 2;  // 沿棱方向
+        const diagSize = localHalf * Math.SQRT2 * 2;  // 沿对角方向
 
         if (visualOrientation === 'H') {
-            // EDGE-H: width = n × s, height = m × (√2 × s)
-            const w = Math.floor(base / s) * s;
-            const hSpacing = s * Math.SQRT2;
-            const h = Math.floor((base * Math.SQRT2) / hSpacing) * hSpacing;
-            return { width: w, height: h };
+            // EDGE-H: X沿棱, Y沿对角
+            return { width: edgeSize, height: diagSize };
         }
-
-        // EDGE-V: width = n × (√2 × s), height = m × s
-        const wSpacing = s * Math.SQRT2;
-        const w = Math.floor((base * Math.SQRT2) / wSpacing) * wSpacing;
-        const h = Math.floor(base / s) * s;
-        return { width: w, height: h };
+        // EDGE-V: X沿对角, Y沿棱
+        return { width: diagSize, height: edgeSize };
     }
 };
+

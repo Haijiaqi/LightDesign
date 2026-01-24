@@ -143,6 +143,7 @@ export class Window {
         ? object.displayPoints
         : object.constructionPoints;
       if (!renderPoints || renderPoints.length === 0) continue;
+
       for (let pi = 0; pi < renderPoints.length; pi++) {
         const point = renderPoints[pi];
         // 1. 执行公共基础计算
@@ -158,7 +159,12 @@ export class Window {
       }
 
       // 阶段10新增：处理物心点（centerPoint）
-      if (object.centerPoint) {
+      // 注意1：跳过局部格网对象的 centerPoint
+      // 注意2：跳过被淡化的物体（FOCUS/EDIT 态下的非焦点物体）
+      const shouldRenderCenterPoint = object.centerPoint
+        && !object.isLocalGrid
+        && (object.visualAlpha === undefined || object.visualAlpha >= 0.5);
+      if (shouldRenderCenterPoint) {
         // 同步 centerPoint 坐标到物体中心
         object.centerPoint.x = object.center.x;
         object.centerPoint.y = object.center.y;
@@ -267,6 +273,25 @@ export class Window {
     //     }
     //   }
     // }
+
+    // 一次性调试日志：统计 grid 中 LOCAL_GRID 点数量
+    if (!this._gridDebugLogged) {
+      let localGridCount = 0;
+      let localGridDashCount = 0;
+      for (let gx = 0; gx < this.grid.length; gx++) {
+        for (let gy = 0; gy < this.grid[gx].length; gy++) {
+          for (const p of this.grid[gx][gy]) {
+            if (p.tag === 'LOCAL_GRID') localGridCount++;
+            if (p.tag === 'LOCAL_GRID_DASH') localGridDashCount++;
+          }
+        }
+      }
+      if (localGridCount > 0 || localGridDashCount > 0) {
+        console.log(`[DEBUG Window.calculate] Grid stats: LOCAL_GRID=${localGridCount}, LOCAL_GRID_DASH=${localGridDashCount}`);
+        this._gridDebugLogged = true;
+      }
+    }
+
     this.calculateNormal();
   }
 
@@ -419,6 +444,8 @@ export class Window {
     return inverseRate;
   }
   handleAPointSpecific(head, eyeD, point, light, inverseRate) {
+    // 局部格网点与普通点一样处理，不做特殊跳过
+
     // 基础亮度（所有情况的保底值）- 提升到 0.5 确保暗部清晰可见
     const BASE_AMBIENT = 0.8;
 

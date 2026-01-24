@@ -534,12 +534,13 @@ function processIntent(intent) {
         case 'SCROLL_SLICE_DEPTH':
             {
                 const { steps, stepSize, maxDepth, currentDepth } = intent;
-                const sign = Math.sign(steps);
-                const absSteps = Math.abs(steps);
                 const targetLayer = Math.round(currentDepth / stepSize) + steps;
                 const targetDepth = targetLayer * stepSize;
+                // 边界检查：maxDepth 已在 EditConfig.getMaxDepthForOrientation 中正确计算
+                // - 正面向：maxDepth = layerCount * spacing = 4 cm
+                // - 棱面向：maxDepth = layerCount * spacing * √2 ≈ 5.66 cm
                 if (targetDepth > maxDepth || targetDepth < -maxDepth) {
-                    console.log(`Depth limit reached: current=${currentDepth.toFixed(1)}, target=${targetDepth.toFixed(1)}, limit=±${maxDepth.toFixed(1)}`);
+                    console.log(`Depth limit reached: target=${targetDepth.toFixed(2)}, limit=±${maxDepth.toFixed(2)}`);
                     return;
                 }
                 const obj = SystemState.focusedObject;
@@ -875,6 +876,7 @@ function updateVirtualMouse(mouseX, mouseY) {
             }
 
             if (SystemState.interactionState === 'EDIT') {
+                // EDIT 态：只吸附局部格网的活动层格点（由 updateLocalGrid 控制 isAttractable）
                 if (p.tag !== 'LOCAL_GRID') return false;
             }
             if (SystemState.draggingObject && p.isGridPoint) {
@@ -885,39 +887,7 @@ function updateVirtualMouse(mouseX, mouseY) {
             return true;
         });
 
-        // [Task] Search Overlay Auxiliary Grid (EDIT mode)
-        if (SystemState.interactionState === 'EDIT') {
-            const editPoints = OverlaySystem.getEditGridIntersections();
-            let bestEditPoint = null;
-            let minEditDistSq = Infinity;
-            const SNAP_THRESHOLD_SQ = 20 * 20;
-
-            for (const p of editPoints) {
-                if (!p.isAttractable) continue;
-                const dx = p.xM - mouseX;
-                const dy = p.yM - mouseY;
-                const distSq = dx * dx + dy * dy;
-                if (distSq < SNAP_THRESHOLD_SQ && distSq < minEditDistSq) {
-                    minEditDistSq = distSq;
-                    bestEditPoint = p;
-                }
-            }
-
-            if (bestEditPoint) {
-                let replace = true;
-                if (snapped) {
-                    const dx = snapped.xM - mouseX;
-                    const dy = snapped.yM - mouseY;
-                    const snapDistSq = dx * dx + dy * dy;
-                    if (snapDistSq < minEditDistSq) {
-                        replace = false;
-                    }
-                }
-                if (replace) {
-                    snapped = bestEditPoint;
-                }
-            }
-        }
+        // 注意：屏幕辅助格网交点不再参与吸附（问题2），只作为视觉辅助
     }
     if (win && win.virtualCursor) {
         win.virtualCursor.setSnappedPoint(snapped);
@@ -1381,9 +1351,23 @@ function finishEnterEditState(obj) {
         }
         console.log(`[STATE] EDIT对齐: 移动=${(-currentDist).toFixed(2)}cm, 新center.y=${obj.center.y.toFixed(2)}`);
     }
-    // const localGrid = ObjectFactoryImpl.createLocalGridObject(obj);
-    // SystemState.localGrid = localGrid;
-    // SystemState.objects.push(localGrid);
+
+    // 关键：初始化切片深度为 0（物体已对齐到屏幕平面）
+    SystemState.focusSliceDepth = 0;
+    const localGrid = ObjectFactoryImpl.createLocalGridObject(obj);
+    SystemState.localGrid = localGrid;
+    SystemState.objects.push(localGrid);
+
+    // 调试日志：确认局部格网创建成功
+    console.log(`[DEBUG] LocalGrid created: displayPoints=${localGrid.displayPoints?.length}, isLocalGrid=${localGrid.isLocalGrid}`);
+    if (localGrid.displayPoints?.length > 0) {
+        const p0 = localGrid.displayPoints[0];
+        console.log(`[DEBUG] First point: tag=${p0.tag}, light=${p0.light}, lx=${p0.lx?.toFixed(2)}, x=${p0.x?.toFixed(2)}`);
+    }
+
+    // 立即调用一次 updateLocalGrid 确保初始亮度设置
+    updateLocalGrid();
+
     showControlPoints(obj);
     SystemState.ifControl = true;
     console.log('[STATE] EDIT entered');
@@ -1392,10 +1376,10 @@ function finishEnterEditState(obj) {
 function exitEditState() {
     if (SystemState.interactionState !== 'EDIT') return;
     hideControlPoints();
-    // if (SystemState.localGrid) {
-    //     SystemState.objects = SystemState.objects.filter(o => o !== SystemState.localGrid);
-    //     SystemState.localGrid = null;
-    // }
+    if (SystemState.localGrid) {
+        SystemState.objects = SystemState.objects.filter(o => o !== SystemState.localGrid);
+        SystemState.localGrid = null;
+    }
     if (!SystemState.objects.includes(SystemState.worldGrid)) {
         SystemState.objects.push(SystemState.worldGrid);
     }
@@ -1568,10 +1552,11 @@ function updateLocalGrid() {
     const grid = SystemState.localGrid;
     const target = SystemState.focusedObject;
     const win = SystemState.mainWindow;
-    if (!grid || !target || !win) return;
+    if (!grid || !target || !win) {
+        return;
+    }
 
-    // 1. 同步 Transform (Pose)
-    // 确保 Grid 的位置和旋转与 Target 完全一致
+    // 1. 同步 Transform (Pose) - 确保 Grid 的位置和旋转与 Target 完全一致
     grid.transform.position.x = target.transform.position.x;
     grid.transform.position.y = target.transform.position.y;
     grid.transform.position.z = target.transform.position.z;
@@ -1585,7 +1570,7 @@ function updateLocalGrid() {
     grid._dirty = true;
     grid.updateWorldPoints();
 
-    // 3. 切片显示逻辑 (Slice Visibility)
+    // 3. 切片吸附逻辑：只有屏幕平面附近的格点才能吸附虚拟鼠标
     const dir = win.direction;
     const planePt = dir.start;
     const orientationType = target._currentOrientationState?.type || 'FACE';
@@ -1593,17 +1578,19 @@ function updateLocalGrid() {
     const SLICE_THRESHOLD = layerSpacing * 0.6;
 
     for (const p of grid.displayPoints) {
-        // p.x, p.y, p.z 已经在 updateWorldPoints 中被更新为世界坐标
-        const dist = (p.x - planePt.x) * dir.x + (p.y - planePt.y) * dir.y + (p.z - planePt.z) * dir.z;
-
-        if (p.tag === 'LOCAL_GRID' && Math.abs(dist) <= SLICE_THRESHOLD) {
-            p.isAttractable = true;
-            p._isActiveSlice = true;
-        } else {
+        if (p.tag === 'LOCAL_GRID') {
+            // 计算点到屏幕平面的距离
+            const dist = (p.x - planePt.x) * dir.x + (p.y - planePt.y) * dir.y + (p.z - planePt.z) * dir.z;
+            const absDist = Math.abs(dist);
+            // 只有活动层（屏幕平面附近）的格点可吸附
+            p.isAttractable = (absDist <= SLICE_THRESHOLD);
+        } else if (p.tag === 'LOCAL_GRID_DASH') {
             p.isAttractable = false;
-            p._isActiveSlice = false;
         }
     }
+
+    // 确保触发重新渲染
+    SystemState.ifControl = true;
 }
 
 function animateSliceTransition(obj, targetX, targetY, targetZ, duration = 150) {
@@ -1663,6 +1650,10 @@ function snapToNearestLayer(obj) {
     const maxLayer = Math.floor(maxDepth / layerSpacing);
     nearestLayer = Math.max(-maxLayer, Math.min(maxLayer, nearestLayer));
     const nearestLayerDist = nearestLayer * layerSpacing;
+
+    // 关键：更新切片深度状态，确保屏幕辅助格网奇偶性正确
+    SystemState.focusSliceDepth = nearestLayerDist;
+
     const delta = nearestLayerDist - currentDist;
     if (Math.abs(delta) > 0.001) {
         const targetX = obj.center.x + delta * dir.x;
