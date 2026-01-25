@@ -404,10 +404,7 @@ export class ObjectFactoryImpl {
         console.log(`创建局部格网: 尺寸=${finalSize}cm, 间距=${spacing}cm, layerCount=${count}`);
 
         const points = [];
-
-        // 虚线配置
-        const dashPointsPerEdge = 3;
-        const dashSpacing = spacing / (dashPointsPerEdge + 1);
+        const controlPoints = [];
 
         // 生成立方体点阵
         for (let ix = -count; ix <= count; ix++) {
@@ -421,71 +418,38 @@ export class ObjectFactoryImpl {
                     p._localX = x;
                     p._localY = y;
                     p._localZ = z;
-                    p.isAttractable = true;
-                    p.tag = 'LOCAL_GRID';
-                    points.push(p);
-                }
-            }
-        }
 
-        // 生成虚线点
-        // 生成虚线点 (优化：暂时注释掉，只保留关键交点)
-        /*
-        for (let ix = -count; ix <= count; ix++) {
-            for (let iy = -count; iy <= count; iy++) {
-                for (let iz = -count; iz <= count; iz++) {
-                    const x0 = ix * spacing;
-                    const y0 = iy * spacing;
-                    const z0 = iz * spacing;
+                    // 判断是否是棱上的点（12条棱）
+                    // 棱的定义：恰好有两个坐标在边界（±count），第三个坐标在内部
+                    const onEdgeX = (ix === -count || ix === count);
+                    const onEdgeY = (iy === -count || iy === count);
+                    const onEdgeZ = (iz === -count || iz === count);
+                    const edgeCount = (onEdgeX ? 1 : 0) + (onEdgeY ? 1 : 0) + (onEdgeZ ? 1 : 0);
 
-                    // +X 方向
-                    if (ix < count) {
-                        for (let d = 1; d <= dashPointsPerEdge; d++) {
-                            const dp = new Point(x0 + d * dashSpacing, y0, z0);
-                            dp._localX = dp.x;
-                            dp._localY = dp.y;
-                            dp._localZ = dp.z;
-                            dp.isAttractable = false;
-                            dp.tag = 'LOCAL_GRID_DASH';
-                            points.push(dp);
-                        }
-                    }
-
-                    // +Y 方向
-                    if (iy < count) {
-                        for (let d = 1; d <= dashPointsPerEdge; d++) {
-                            const dp = new Point(x0, y0 + d * dashSpacing, z0);
-                            dp._localX = dp.x;
-                            dp._localY = dp.y;
-                            dp._localZ = dp.z;
-                            dp.isAttractable = false;
-                            dp.tag = 'LOCAL_GRID_DASH';
-                            points.push(dp);
-                        }
-                    }
-
-                    // +Z 方向
-                    if (iz < count) {
-                        for (let d = 1; d <= dashPointsPerEdge; d++) {
-                            const dp = new Point(x0, y0, z0 + d * dashSpacing);
-                            dp._localX = dp.x;
-                            dp._localY = dp.y;
-                            dp._localZ = dp.z;
-                            dp.isAttractable = false;
-                            dp.tag = 'LOCAL_GRID_DASH';
-                            points.push(dp);
-                        }
+                    if (edgeCount >= 2) {
+                        // 【规格 B】棱上或角上的点：作为 Control Point
+                        // - 直接作为 controlPoints 传入
+                        // - 行为规则：EDIT 态永远显示，永远可吸附，不可编辑
+                        p.tag = 'CONTROL';
+                        p.isEditable = false;
+                        p.isAttractable = true; // 规格要求永远可吸附
+                        controlPoints.push(p);
+                    } else {
+                        // 【规格 B】普通格点：作为 Display Point
+                        // - 行为规则：只有靠近屏幕平面才显示/吸附
+                        p.tag = 'LOCAL_GRID';
+                        p.isAttractable = true;
+                        // light 初始值，会被 updateLocalGrid 动态更新
+                        p.light = 0.8;
+                        points.push(p);
                     }
                 }
             }
         }
-        */
 
-        console.log(`局部格网生成: 格点 ${Math.pow(2 * count + 1, 3)}个, 虚线点 ${points.length - Math.pow(2 * count + 1, 3)}个`);
+        console.log(`局部格网生成: 格点(Display)=${points.length}, 棱点(Control)=${controlPoints.length}`);
 
         // 阶段3修复：正确初始化 transform
-        // targetObj.center 和 quaternion 实际上引用了 transform.position 和 rotation
-        // 我们需要传递值的副本
         const gridObj = new Object(points, {
             center: {
                 x: targetObj.center.x,
@@ -497,7 +461,9 @@ export class ObjectFactoryImpl {
                 x: targetObj.quaternion.x,
                 y: targetObj.quaternion.y,
                 z: targetObj.quaternion.z
-            } : { w: 1, x: 0, y: 0, z: 0 }
+            } : { w: 1, x: 0, y: 0, z: 0 },
+            // 【规格 B】显式传入 Control Points
+            controlPoints: controlPoints
         });
 
         gridObj.isLocalGrid = true;

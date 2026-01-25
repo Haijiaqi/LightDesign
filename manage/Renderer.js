@@ -128,6 +128,9 @@ export const Renderer = {
             for (let gridY = 0; gridY < gridCol.length; gridY++) {
                 const pointsInGrid = gridCol[gridY];
                 for (const p of pointsInGrid) {
+                    // [FIX] 跳过 light=0 的点（不可见的局部格网点）
+                    if (p.light <= 0) continue;
+
                     const hasDisparity = Math.abs((p.xL || 0) - (p.xR || 0)) > 0;
                     const style = StyleImpl.resolvePointStyle({
                         tag: p.tag,

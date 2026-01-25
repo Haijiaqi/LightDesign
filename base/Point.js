@@ -1,33 +1,50 @@
 export class Point {
   constructor(x, y, z) {
+    // ========== 基础坐标 ==========
     this.x = x;
     this.y = y;
     this.z = z;
-    // ========== 阶段3新增：局部坐标 (Local Space) ==========
+
+    // ========== 局部坐标 (Local Space) ==========
     this.lx = x; // 局部 X
     this.ly = y; // 局部 Y
     this.lz = z; // 局部 Z
-    // =======================================================
+
+    // ========== 法向量 ==========
     this.nx = 0;
     this.ny = 0;
     this.nz = 0;
-    this.dis = 0;
-    this.dir = 0;
-    this.xM = 0;
-    this.yM = 0;
-    this.xL = 0;
-    this.yL = 0;
-    this.xR = 0;
-    this.yR = 0;
+
+    // ========== 距离/方向 ==========
+    this.dis = 0;  // 到观察者的距离
+    this.dir = 0;  // 方向角
+
+    // ========== 屏幕坐标 ==========
+    this.xM = 0;  // 屏幕 X (中点/单眼)
+    this.yM = 0;  // 屏幕 Y (中点/单眼)
+    this.xL = 0;  // 屏幕 X (左眼)
+    this.yL = 0;  // 屏幕 Y (左眼)
+    this.xR = 0;  // 屏幕 X (右眼)
+    this.yR = 0;  // 屏幕 Y (右眼)
+
+    // ========== 反射向量 ==========
     this.rx = 0;
     this.ry = 0;
     this.rz = 0;
-    this.light = 0.6;
-    // ========== 阶段2新增 ==========
-    this.space = 'world';       // 坐标空间：'world'(世界坐标) | 'screen'(屏幕坐标)
-    this.tag = null;            // 样式标签：null 表示使用默认样式
-    this.isAttractable = false; // 是否可被吸附（FOCUS态使用）
-    // ===============================
+
+    // ========== 渲染属性 ==========
+    this.light = 0.6;           // 亮度 (0 = 不渲染)
+    this.space = 'world';       // 坐标空间：'world' | 'screen'
+    this.tag = null;            // 样式标签：SURFACE, CONTROL, LOCAL_GRID, etc.
+
+    // ========== 交互属性 ==========
+    this.isAttractable = false; // 是否可被虚拟鼠标吸附
+    this.isEditable = true;     // 是否可被拖拽编辑 (控制点专用)
+
+    // ========== 点类型标记 ==========
+    this.isObjectCenter = false;  // 是否是物体中心点
+    this.isGridPoint = false;     // 是否是格网交点 (世界格网)
+    this.isIntersection = false;  // 是否是屏幕辅助格网交点
   }
 
   getD(p) {

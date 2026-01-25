@@ -241,9 +241,14 @@ class OverlaySystemImpl {
                 centerYR = snapped.yR;
                 centerX = snapped.xM;
                 centerY = snapped.yM;
-                const pointDis = snapped.dis || 40;
-                const baseDis = CONFIG.screenDistance - CONFIG.userDistanceFromOrigin;
-                perspectiveScale = Math.max(0.3, Math.min(3.0, baseDis / pointDis));
+                // [FIX] 屏幕辅助交点是 2D 点，使用固定 perspectiveScale
+                if (snapped.isIntersection) {
+                    perspectiveScale = 1;
+                } else {
+                    const pointDis = snapped.dis || 40;
+                    const baseDis = CONFIG.screenDistance - CONFIG.userDistanceFromOrigin;
+                    perspectiveScale = Math.max(0.3, Math.min(3.0, baseDis / pointDis));
+                }
             }
 
             const worldRadiusCm = 0.5;
@@ -354,7 +359,7 @@ class OverlaySystemImpl {
                     spacingX: baseSpacing * scaleX,
                     spacingY: baseSpacing * scaleY,
                     phaseX, phaseY,
-                    dashPattern: [0.3, 0.2]
+                    dashPattern: [0.15, 0.35]  // 更轻量的虚线样式 (实0.15cm, 虚0.35cm)
                 });
                 _staticCache.pool.set(cacheKey, cloud);
             }
@@ -488,6 +493,33 @@ class OverlaySystemImpl {
      */
     getEditGridIntersections() {
         return _staticCache.currentIntersectionsTransformed || [];
+    }
+
+    /**
+     * 在屏幕辅助格网交点中查找最近的可吸附点（全局搜索）
+     * @param {number} mouseX - 鼠标屏幕 X 坐标
+     * @param {number} mouseY - 鼠标屏幕 Y 坐标
+     * @returns {{ point: object, distSq: number } | null}
+     */
+    findNearestAttractable(mouseX, mouseY) {
+        const points = _staticCache.currentIntersectionsTransformed;
+        if (!points || points.length === 0) return null;
+
+        let nearest = null;
+        let minDistSq = Infinity;
+
+        for (const p of points) {
+            if (!p.isAttractable) continue;
+            const dx = p.xM - mouseX;
+            const dy = p.yM - mouseY;
+            const distSq = dx * dx + dy * dy;
+            if (distSq < minDistSq) {
+                minDistSq = distSq;
+                nearest = p;
+            }
+        }
+
+        return nearest ? { point: nearest, distSq: minDistSq } : null;
     }
 }
 

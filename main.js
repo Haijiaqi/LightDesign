@@ -497,7 +497,8 @@ function processIntent(intent) {
         case 'EDIT_MOUSE_DOWN':
             {
                 const cp = findControlPointAt(intent.x, intent.y);
-                if (cp) {
+                // [FIX] 检查 isEditable，防止拖拽局部格网的棱点
+                if (cp && cp.isEditable !== false) {
                     SystemState.draggedControlPoint = cp;
                     // [HISTORY] Save Start Position
                     SystemState.dragStartControlPointPos = { x: cp.lx, y: cp.ly, z: cp.lz };
@@ -551,6 +552,13 @@ function processIntent(intent) {
                 const targetZ = obj.center.z + dir.z * delta;
                 // 更新切片深度状态
                 SystemState.focusSliceDepth = targetDepth;
+                // [FIX] 清除旧吸附，强制更新格网，然后立即重新计算吸附
+                SystemState.virtualMouse.snappedTo = null;
+                updateLocalGrid(true);
+                // 立即重新计算吸附，防止虚拟鼠标圈短暂漂浮
+                if (SystemState.virtualMouse.enabled) {
+                    updateVirtualMouse(SystemState.lastMouseX, SystemState.lastMouseY);
+                }
                 animateSliceTransition(obj, targetX, targetY, targetZ, 150);
             }
             break;
@@ -803,6 +811,8 @@ function render() {
     const ctx = SystemState.ctx;
     const { screenWidthPx: width, screenHeightPx: height } = SystemState;
     updateCamera();
+    // [FIX] 必须在 updateCamera 之后调用，确保 light 设置在点被添加到 grid 之后生效
+    updateLocalGrid();
     // [PERF] updateVisibleReflection 已在 gameLoop 中按需调用，此处移除重复调用
     const imageData = Renderer.render(ctx, width, height); // NOTE: Renderer.render now handles point drawing logic
     const pixelData = imageData.data;
@@ -863,6 +873,9 @@ function updateVirtualMouse(mouseX, mouseY) {
     );
     const win = SystemState.mainWindow;
     let snapped = null;
+    let snappedDistSq = Infinity;
+
+    // 1. 搜索 3D 格网 (Window.grid)
     if (win && win.findNearestPoint) {
         snapped = win.findNearestPoint(mouseX, mouseY, 0, (p) => {
             // [Fix] 拖拽时忽略物体自身的可吸附点（主要是中心点）
@@ -873,8 +886,17 @@ function updateVirtualMouse(mouseX, mouseY) {
             }
 
             if (SystemState.interactionState === 'EDIT') {
-                // EDIT 态：只吸附局部格网的活动层格点（由 updateLocalGrid 控制 isAttractable）
-                if (p.tag !== 'LOCAL_GRID') return false;
+                // EDIT 态：只吸附局部格网的活动层格点（LOCAL_GRID）或控制点（CONTROL）
+                // 且必须在屏幕平面附近
+                if (p.tag !== 'LOCAL_GRID' && p.tag !== 'CONTROL') return false;
+
+                // [FIX] 严格检查点到屏幕平面的距离
+                const dir = win.direction;
+                const planePt = dir.start;
+                // 注意：这里使用 p.x (世界坐标)，因为 isAttractable 过滤是在 updateLocalGrid 做的，
+                // 但对于 CONTROL 点（或其他 Object 的点），我们需要在这里做额外检查。
+                const dist = (p.x - planePt.x) * dir.x + (p.y - planePt.y) * dir.y + (p.z - planePt.z) * dir.z;
+                if (Math.abs(dist) > 0.2) return false;
             }
             if (SystemState.draggingObject && p.isGridPoint) {
                 if (isGridPointOccupied(p.gx, p.gy, p, SystemState.draggingObject)) {
@@ -884,8 +906,21 @@ function updateVirtualMouse(mouseX, mouseY) {
             return true;
         });
 
-        // 注意：屏幕辅助格网交点不再参与吸附（问题2），只作为视觉辅助
+        if (snapped) {
+            const dx = snapped.xM - mouseX;
+            const dy = snapped.yM - mouseY;
+            snappedDistSq = dx * dx + dy * dy;
+        }
     }
+
+    // 2. [DISABLED] 屏幕辅助格网吸附暂时关闭
+    // if (SystemState.interactionState === 'EDIT') {
+    //     const overlayResult = OverlaySystem.findNearestAttractable(mouseX, mouseY);
+    //     if (overlayResult && overlayResult.distSq < snappedDistSq) {
+    //         snapped = overlayResult.point;
+    //         snappedDistSq = overlayResult.distSq;
+    //     }
+    // }
     if (win && win.virtualCursor) {
         win.virtualCursor.setSnappedPoint(snapped);
     }
@@ -919,9 +954,17 @@ function updateVirtualMouse(mouseX, mouseY) {
         centerYR = snapped.yR;
         centerX = snapped.xM;
         centerY = snapped.yM;
-        const pointDis = snapped.dis || 40;
-        const baseDis = CONFIG.screenDistance - CONFIG.userDistanceFromOrigin;
-        perspectiveScale = Math.max(0.3, Math.min(3.0, baseDis / pointDis));
+
+        // [FIX] 屏幕辅助交点是 2D 点，没有 dis 属性，使用固定 perspectiveScale
+        if (snapped.isIntersection) {
+            // 屏幕辅助格网交点：固定缩放
+            perspectiveScale = 1;
+        } else {
+            // 3D 点：基于深度计算缩放
+            const pointDis = snapped.dis || 40;
+            const baseDis = CONFIG.screenDistance - CONFIG.userDistanceFromOrigin;
+            perspectiveScale = Math.max(0.3, Math.min(3.0, baseDis / pointDis));
+        }
         vm.snappedTo = snapped;
     } else {
         // 无吸附点时：跟随鼠标（屏幕平面）
@@ -1354,19 +1397,17 @@ function finishEnterEditState(obj) {
 
     // 关键：初始化切片深度为 0（物体已对齐到屏幕平面）
     SystemState.focusSliceDepth = 0;
-    // const localGrid = ObjectFactoryImpl.createLocalGridObject(obj);
-    // SystemState.localGrid = localGrid;
-    // SystemState.objects.push(localGrid);
+    // [FIX] 同时重置虚拟鼠标深度，确保 FOCUS/EDIT 切换时基准对齐
+    SystemState.focusVirtualMouseDepth = 0;
 
-    // // 调试日志：确认局部格网创建成功
-    // console.log(`[DEBUG] LocalGrid created: displayPoints=${localGrid.displayPoints?.length}, isLocalGrid=${localGrid.isLocalGrid}`);
-    // if (localGrid.displayPoints?.length > 0) {
-    //     const p0 = localGrid.displayPoints[0];
-    //     console.log(`[DEBUG] First point: tag=${p0.tag}, light=${p0.light}, lx=${p0.lx?.toFixed(2)}, x=${p0.x?.toFixed(2)}`);
-    // }
+    // [ENABLED] 创建局部格网
+    const localGrid = ObjectFactoryImpl.createLocalGridObject(obj);
+    SystemState.localGrid = localGrid;
+    SystemState.objects.push(localGrid);
+    console.log(`[DEBUG] LocalGrid created: displayPoints=${localGrid.displayPoints?.length}`);
 
-    // 立即调用一次 updateLocalGrid 确保初始亮度设置
-    // updateLocalGrid();
+    // 立即调用一次 updateLocalGrid 确保初始状态
+    updateLocalGrid(true); // force=true 强制首次更新
 
     showControlPoints(obj);
     SystemState.ifControl = true;
@@ -1384,6 +1425,13 @@ function exitEditState() {
         SystemState.objects.push(SystemState.worldGrid);
     }
     SystemState.interactionState = 'FOCUS';
+
+    // [FIX] 退出 EDIT 态时重置切片深度，确保 FOCUS 态的扫描范围对称
+    // 因为物体即将通过动画回到屏幕中心，所以切片和虚拟鼠标也应重置归零
+    SystemState.focusSliceDepth = 0;
+    SystemState.focusVirtualMouseDepth = 0;
+    SystemState.virtualMouse.snappedTo = null;
+
     const objExit = SystemState.focusedObject;
     if (objExit) {
         // 阶段3修复：使用动画平滑回到屏幕中心（保持姿态 D 不变）
@@ -1545,7 +1593,7 @@ function addControlPointAt(screenX, screenY) {
     updateControlPointsDisplay();
 }
 
-function updateLocalGrid() {
+function updateLocalGrid(force = false) {
     // 性能优化：只在 EDIT 态时更新
     if (SystemState.interactionState !== 'EDIT') return;
 
@@ -1556,7 +1604,7 @@ function updateLocalGrid() {
         return;
     }
 
-    // [PERF] 只在姿态变化时更新世界坐标
+    // [PERF] 只在姿态变化时更新世界坐标（除非 force=true）
     const posChanged = (
         grid.transform.position.x !== target.transform.position.x ||
         grid.transform.position.y !== target.transform.position.y ||
@@ -1569,39 +1617,46 @@ function updateLocalGrid() {
         grid.transform.rotation.z !== target.transform.rotation.z
     );
 
-    if (!posChanged && !rotChanged) {
-        return; // 姿态未变化，跳过更新
+    // [PERF] 1. 姿态同步与世界坐标更新（仅在姿态变化或强制更新时执行）
+    if (force || posChanged || rotChanged) {
+        // 同步 Transform (Pose) - 确保 Grid 的位置和旋转与 Target 完全一致
+        grid.transform.position.x = target.transform.position.x;
+        grid.transform.position.y = target.transform.position.y;
+        grid.transform.position.z = target.transform.position.z;
+
+        grid.transform.rotation.w = target.transform.rotation.w;
+        grid.transform.rotation.x = target.transform.rotation.x;
+        grid.transform.rotation.y = target.transform.rotation.y;
+        grid.transform.rotation.z = target.transform.rotation.z;
+
+        // 更新世界坐标
+        grid._dirty = true;
+        grid.updateWorldPoints();
     }
 
-    // 1. 同步 Transform (Pose) - 确保 Grid 的位置和旋转与 Target 完全一致
-    grid.transform.position.x = target.transform.position.x;
-    grid.transform.position.y = target.transform.position.y;
-    grid.transform.position.z = target.transform.position.z;
-
-    grid.transform.rotation.w = target.transform.rotation.w;
-    grid.transform.rotation.x = target.transform.rotation.x;
-    grid.transform.rotation.y = target.transform.rotation.y;
-    grid.transform.rotation.z = target.transform.rotation.z;
-
-    // 2. 更新世界坐标
-    grid._dirty = true;
-    grid.updateWorldPoints();
-
-    // 3. 切片吸附逻辑：只有屏幕平面附近的格点才能吸附虚拟鼠标
+    // 3. 双阈值逻辑：显示阈值 vs 吸附阈值
     const dir = win.direction;
     const planePt = dir.start;
-    const orientationType = target._currentOrientationState?.type || 'FACE';
-    const layerSpacing = ObjectFactoryImpl.LocalGridConfig.getLayerSpacingForOrientation(orientationType);
-    const SLICE_THRESHOLD = layerSpacing * 0.6;
 
+    // 显示阈值：严格裁剪，只保留屏幕平面附近的点（与吸附阈值一致）
+    const DISPLAY_THRESHOLD = 0.1;
+    // 吸附阈值：只有极近屏幕平面的点可吸附（0.1cm）
+    const SNAP_THRESHOLD = 0.1;
+
+    // 【规格 B】只处理 displayPoints
+    // controlPoints 由 Window.calculate 统一处理（EDIT 态始终可见）
     for (const p of grid.displayPoints) {
+        // 计算点到屏幕平面的距离
+        const dist = (p.x - planePt.x) * dir.x + (p.y - planePt.y) * dir.y + (p.z - planePt.z) * dir.z;
+        const absDist = Math.abs(dist);
+
         if (p.tag === 'LOCAL_GRID') {
-            // 计算点到屏幕平面的距离
-            const dist = (p.x - planePt.x) * dir.x + (p.y - planePt.y) * dir.y + (p.z - planePt.z) * dir.z;
-            const absDist = Math.abs(dist);
-            // 只有活动层（屏幕平面附近）的格点可吸附
-            p.isAttractable = (absDist <= SLICE_THRESHOLD);
+            // 控制可见性：通过 light 属性（0 = 不可见）
+            p.light = (absDist <= DISPLAY_THRESHOLD) ? 0.8 : 0;
+            // 控制吸附：只有屏幕平面上的点可吸附
+            p.isAttractable = (absDist <= SNAP_THRESHOLD);
         } else if (p.tag === 'LOCAL_GRID_DASH') {
+            p.light = (absDist <= DISPLAY_THRESHOLD) ? 0.4 : 0;
             p.isAttractable = false;
         }
     }
@@ -1623,7 +1678,13 @@ function animateSliceTransition(obj, targetX, targetY, targetZ, duration = 150) 
         const newY = startY + (targetY - startY) * eased;
         const newZ = startZ + (targetZ - startZ) * eased;
         moveObjectTo(obj, newX, newY, newZ);
-        updateLocalGrid();
+        // updateLocalGrid 已移动到 render() 中
+
+        // [FIX] 动画过程中持续更新吸附状态，防止虚拟鼠标漂浮
+        if (SystemState.virtualMouse.enabled) {
+            updateVirtualMouse(SystemState.lastMouseX, SystemState.lastMouseY);
+        }
+
         SystemState.ifControl = true;
         if (t < 1) requestAnimationFrame(animate);
     }
@@ -1766,7 +1827,7 @@ async function gameLoop(timestamp = 0) {
         }
     }
     physicsStep(dt);
-    updateLocalGrid();
+    // [FIX] updateLocalGrid 已移动到 render() -> updateCamera() 之后
 
     // Draw camera feed
     CameraSystem.drawCameraFeedOnMainCanvas(SystemState.ctx);
@@ -1774,14 +1835,14 @@ async function gameLoop(timestamp = 0) {
     // 只要有控制输入、场景变动、光照变动或动画，就重绘
     const hasAnimation = SystemState.taskQueues.current.length > 0 || SystemState.taskQueues.next.length > 0;
     if (SystemState.ifControl || SystemState.sceneDirty || SystemState.lightDirty || hasAnimation) {
-        // [OPTIMIZATION B] 按需更新光照
-        // 只有当场景改变(物体移动) 或 光照改变 时才更新光照/反射
-        // 首次运行或脏标记为真时更新
-        if (SystemState.sceneDirty || SystemState.lightDirty) {
+        // [OPTIMIZATION] 按需更新光照/反射
+        // 首帧或脏标记时更新
+        if (SystemState.sceneDirty || SystemState.lightDirty || !SystemState._reflectionInitialized) {
             updateLight();
             updateVisibleReflection();
             SystemState.sceneDirty = false;
             SystemState.lightDirty = false;
+            SystemState._reflectionInitialized = true;
         }
 
         render();
