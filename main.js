@@ -803,7 +803,7 @@ function render() {
     const ctx = SystemState.ctx;
     const { screenWidthPx: width, screenHeightPx: height } = SystemState;
     updateCamera();
-    updateVisibleReflection(); // Ensure reflection vectors are updated before rendering
+    // [PERF] updateVisibleReflection 已在 gameLoop 中按需调用，此处移除重复调用
     const imageData = Renderer.render(ctx, width, height); // NOTE: Renderer.render now handles point drawing logic
     const pixelData = imageData.data;
 
@@ -826,11 +826,8 @@ function render() {
     //    Renderer.renderScreenPointsHelper(pixelData, width, height);
     // }
 
-    // NOTE: updateVirtualMouse must still run for snapping logic, 
-    // even though circle drawing is now handled by OverlaySystem
-    if (SystemState.virtualMouse.enabled) {
-        updateVirtualMouse(SystemState.lastMouseX, SystemState.lastMouseY);
-    }
+    // [PERF] updateVirtualMouse 已在 mousemove 事件中调用，吸附逻辑不需要每帧重复
+    // 注意：虚拟鼠标的绘制由 OverlaySystem 处理
     // renderScreenOverlay(pixelData, width, height); // Replaced by renderOverlayPoints
 
     ctx.putImageData(imageData, 0, 0);
@@ -1069,6 +1066,9 @@ function updateVisibleReflection() {
 function resizeCanvas() {
     SystemState.canvas.width = window.innerWidth;
     SystemState.canvas.height = window.innerHeight;
+    // [FIX] 同步 SystemState 尺寸，防止全屏退出后 Y 偏移
+    SystemState.screenWidthPx = window.innerWidth;
+    SystemState.screenHeightPx = window.innerHeight;
     SystemState.imageData = null; // [OPTIMIZATION A] Reset cache
     if (SystemState.mainWindow) {
         SystemState.mainWindow.windowObjects.length = 0;
@@ -1354,19 +1354,19 @@ function finishEnterEditState(obj) {
 
     // 关键：初始化切片深度为 0（物体已对齐到屏幕平面）
     SystemState.focusSliceDepth = 0;
-    const localGrid = ObjectFactoryImpl.createLocalGridObject(obj);
-    SystemState.localGrid = localGrid;
-    SystemState.objects.push(localGrid);
+    // const localGrid = ObjectFactoryImpl.createLocalGridObject(obj);
+    // SystemState.localGrid = localGrid;
+    // SystemState.objects.push(localGrid);
 
-    // 调试日志：确认局部格网创建成功
-    console.log(`[DEBUG] LocalGrid created: displayPoints=${localGrid.displayPoints?.length}, isLocalGrid=${localGrid.isLocalGrid}`);
-    if (localGrid.displayPoints?.length > 0) {
-        const p0 = localGrid.displayPoints[0];
-        console.log(`[DEBUG] First point: tag=${p0.tag}, light=${p0.light}, lx=${p0.lx?.toFixed(2)}, x=${p0.x?.toFixed(2)}`);
-    }
+    // // 调试日志：确认局部格网创建成功
+    // console.log(`[DEBUG] LocalGrid created: displayPoints=${localGrid.displayPoints?.length}, isLocalGrid=${localGrid.isLocalGrid}`);
+    // if (localGrid.displayPoints?.length > 0) {
+    //     const p0 = localGrid.displayPoints[0];
+    //     console.log(`[DEBUG] First point: tag=${p0.tag}, light=${p0.light}, lx=${p0.lx?.toFixed(2)}, x=${p0.x?.toFixed(2)}`);
+    // }
 
     // 立即调用一次 updateLocalGrid 确保初始亮度设置
-    updateLocalGrid();
+    // updateLocalGrid();
 
     showControlPoints(obj);
     SystemState.ifControl = true;
@@ -1556,6 +1556,23 @@ function updateLocalGrid() {
         return;
     }
 
+    // [PERF] 只在姿态变化时更新世界坐标
+    const posChanged = (
+        grid.transform.position.x !== target.transform.position.x ||
+        grid.transform.position.y !== target.transform.position.y ||
+        grid.transform.position.z !== target.transform.position.z
+    );
+    const rotChanged = (
+        grid.transform.rotation.w !== target.transform.rotation.w ||
+        grid.transform.rotation.x !== target.transform.rotation.x ||
+        grid.transform.rotation.y !== target.transform.rotation.y ||
+        grid.transform.rotation.z !== target.transform.rotation.z
+    );
+
+    if (!posChanged && !rotChanged) {
+        return; // 姿态未变化，跳过更新
+    }
+
     // 1. 同步 Transform (Pose) - 确保 Grid 的位置和旋转与 Target 完全一致
     grid.transform.position.x = target.transform.position.x;
     grid.transform.position.y = target.transform.position.y;
@@ -1589,7 +1606,7 @@ function updateLocalGrid() {
         }
     }
 
-    // 确保触发重新渲染
+    // [PERF] 只在姿态真正变化时触发重新渲染
     SystemState.ifControl = true;
 }
 
