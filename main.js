@@ -102,36 +102,30 @@ async function init() {
     SystemState.lightObject.tag = 'LIGHT_SOURCE';
     SystemState.objects.push(SystemState.lightObject);
 
-    // [New] Integration: Find existing IntegerGridObject and apply fit
-    console.log("[Integration] Looking for existing IntegerGridObject...");
-    const integerGrid = SystemState.objects.find(obj => obj.metadata?.name === 'IntegerGrid');
+    // [New] Integration: Initialize CrossIntegerGrid (already created by createTestScene)
+    const crossGrid = SystemState.objects.find(obj => obj.metadata?.name === 'CrossIntegerGrid');
 
-    if (integerGrid) {
-        console.log("[Integration] Found IntegerGridObject, applying fit...");
+    if (crossGrid) {
+        console.log(`[Main] CrossGrid found. Starting auto-fit...`);
 
-        // Move to (0, 35, 0)
-        integerGrid.transform.position.x = 0;
-        integerGrid.transform.position.y = 35;
-        integerGrid.transform.position.z = 0;
-        integerGrid._dirty = true;
-        integerGrid.updateWorldPoints({ force: true });
+        // Perform fit with adaptive order determination
+        const sh = new SphericalHarmonics(15);
 
-        const sh = new SphericalHarmonics(15); // Max allowed order
+        // Enable verbose logging to see SH order determination process
+        crossGrid.verbose = true;
 
-        // Perform fit with explicit low order (cubes are ill-conditioned for high SH orders)
-        integerGrid.fitSphericalHarmonics({
+        crossGrid.fitSphericalHarmonics({
             fitter: FittingCalculator,
             Matrix: Matrix,
-            sphericalHarmonics: sh,
-            order: 4  // 显式指定低阶数，立方体不适合高阶球谐拟合
+            sphericalHarmonics: sh
         });
 
-        // Generate display points with lower density
-        integerGrid.generateDisplayPoints({ density: 0.3 });
+        // Generate display points with very low density for performance
+        crossGrid.generateDisplayPoints({ density: 0.05 });
 
-        console.log(`[Integration] IntegerGrid fitted, displayPoints: ${integerGrid.displayPoints?.length}`);
+        console.log(`[Main] CrossGrid ready. Display points: ${crossGrid.displayPoints?.length}`);
     } else {
-        console.warn("[Integration] IntegerGridObject not found in scene.");
+        console.warn("[Main] CrossIntegerGrid not found.");
     }
 
     document.body.appendChild(SystemState.canvas);

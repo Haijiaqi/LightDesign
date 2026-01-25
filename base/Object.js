@@ -642,12 +642,44 @@ export class Object {
 
     // 重新定义 order 逻辑
     let targetOrder = options.order;
+    let structureRange = null;
+
     if (targetOrder === undefined) {
-      targetOrder = ParametricImpl.computeMaxOrder(positions.length);
-    }
-    // 限制最大阶数不超过球谐实例支持的阶数
-    if (sphericalHarmonics.maxOrder && targetOrder > sphericalHarmonics.maxOrder) {
-      targetOrder = sphericalHarmonics.maxOrder;
+      // 确保 fitter 已初始化
+      if (!this._fitterInstance) {
+        this._fitterInstance = new FitterClass({ Matrix, verbose: this.verbose });
+        this._matrixClass = Matrix;
+      }
+
+      // 使用 v2.4 两阶段自适应阶数确定
+      const orderResult = ParametricImpl.determineOptimalOrder(
+        positions,
+        sphericalHarmonics,
+        this._fitterInstance,
+        Matrix,
+        {
+          maxOrder: sphericalHarmonics.maxOrder ?? 15,
+          verbose: this.verbose
+        }
+      );
+
+      targetOrder = orderResult.bestOrder;
+      structureRange = orderResult.structureRange;
+
+      // 允许 bestOrder = 0，但 fallback 到 1
+      if (targetOrder === 0) {
+        console.warn('[Object] No valid SH order found, using order=1 as fallback');
+        targetOrder = 1;
+      }
+
+      if (this.verbose) {
+        console.log(`[Object] Auto-determined order: ${targetOrder}, structure range: [${structureRange?.min}, ${structureRange?.max}]`);
+      }
+    } else {
+      // 限制最大阶数不超过球谐实例支持的阶数
+      if (sphericalHarmonics.maxOrder && targetOrder > sphericalHarmonics.maxOrder) {
+        targetOrder = sphericalHarmonics.maxOrder;
+      }
     }
 
     if (!this._fitterInstance) {
@@ -655,6 +687,7 @@ export class Object {
       this._matrixClass = Matrix;
     }
 
+    // 最终拟合：使用增量拟合 + 逐点缓存机制
     let result;
     try {
       result = ParametricImpl.fitSpherical(
@@ -665,7 +698,7 @@ export class Object {
         this._fitterInstance,
         Matrix,
         sphericalHarmonics,
-        useIncremental,
+        useIncremental,  // 最终拟合时启用增量拟合
         this.verbose
       );
     } catch (err) {
@@ -690,16 +723,14 @@ export class Object {
 
     this._fitStack = result.fitStack;
 
-    // center 不需要更新，因为拟合是在局部空间进行的，中心始终是 (0,0,0)
-    // 但为了兼容性，this.center 仍然保持为物体的世界坐标中心
-    // 这里不需要 centerVersion++，因为拟合不改变物体世界位置，只改变形状系数
-
     this.representation.type = 'sphericalHarmonics';
     this.representation.isClosed = true;
     this.representation.data = {
       coefficients: result.coefficients,
       sphericalHarmonics: sphericalHarmonics,
-      coordinateSystem: 'local' // 标记使用局部坐标系
+      coordinateSystem: 'local',
+      fittedOrder: targetOrder,
+      structureRange: structureRange  // v2.4: 保存结构区间
     };
 
     this.mode = 'parametric';

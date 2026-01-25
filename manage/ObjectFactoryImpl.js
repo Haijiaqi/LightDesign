@@ -363,8 +363,8 @@ export class ObjectFactoryImpl {
             // 参数顺序: size, pointsPerFace, x, y, z, alpha, ifEntity
             ObjectFactoryImpl.createCube(4, 300, 10, 50, 0, 0, false),
 
-            // 整格点对象: 7点边长(6cm)，间距1cm，位于 (0, 50, 0)
-            ObjectFactoryImpl.createIntegerGridObject(0, 50, 0, 7, 1),
+            // 高阶测试对象: 十字星 (长16cm, 宽3cm), 位于 (0, 35, 0)
+            ObjectFactoryImpl.createCrossIntegerGrid(0, 35, 0, 8, 1),
         ];
     }
 
@@ -476,5 +476,93 @@ export class ObjectFactoryImpl {
         }
 
         return gridObj;
+    }
+    /**
+     * 创建"十字星"整坐标格网对象（用于测试高阶球谐拟合）
+     * 由三个正交的长方体组成
+     * 
+     * @param {number} cx - 中心 X
+     * @param {number} cy - 中心 Y
+     * @param {number} cz - 中心 Z
+     * @param {number} armLength - 手臂长度（从中心向外的延伸距离，单位cm）
+     * @param {number} thickness - 手臂粗细（从中心向外的半径，单位cm）
+     * @returns {Object}
+     */
+    static createCrossIntegerGrid(cx, cy, cz, armLength = 5, thickness = 1) {
+        const points = [];
+        const addedPoints = new Set(); // 用于去重
+
+        const addPoint = (x, y, z) => {
+            const key = `${x},${y},${z}`;
+            if (!addedPoints.has(key)) {
+                // 检查是否是表面点
+                // 表面点定义的再确认：
+                // 对于这种组合体，简单的 "==min || ==max" 不够，因为相交处内部会被暴露
+                // 这里我们简单起见，只添加所有整数点，后期拟合算法只用外壳点也行，
+                // 或者我们只生成真正的“控制点”（表面）
+
+                // 简化逻辑：生成所有体素点，然后 SystemState.objects.push 会将它们作为 controlPoints
+                // Object 构造函数如果不区分 display/control，所有点都会参与拟合。
+
+                // 但为了高阶特征，我们需要点尽可能密集且准确。
+                // 我们生成所有点，但标记 isAttractable=false
+
+                // 更好的策略：只生成表面点。
+                // 一个点是表面的，如果它的 6 个邻居中至少有一个不在集合内。
+                // 这是一个两步过程：生成所有体素 -> 过滤表面。
+                // 这里为了性能，我们直接生成三个长方体的表面并求并集（虽然内部会有重叠点，但无伤大雅）
+
+                const p = new Point(x, y, z);
+                p.isAttractable = false;
+                points.push(p);
+                addedPoints.add(key);
+            }
+        };
+
+        // 辅助函数：生成长方体范围内的所有整数点
+        const generateBox = (minX, maxX, minY, maxY, minZ, maxZ) => {
+            for (let x = minX; x <= maxX; x++) {
+                for (let y = minY; y <= maxY; y++) {
+                    for (let z = minZ; z <= maxZ; z++) {
+                        // 只生表面点检查太复杂，先生成所有点。
+                        // 由于是整数格网，内部点对球谐拟合的影响不大（如果作为体积拟合），
+                        // 或者我们的拟合算法把所有点都当做样本。
+                        // 我们的 fitSphericalHarmonics 接受 controlPoints，把它们都当做表面/样本点。
+                        // 如果包含内部点，拟合结果会试图穿过内部，导致半径变小。
+                        // ⚠️ 必须只生成表面点！
+
+                        const onSurface = (
+                            x === minX || x === maxX ||
+                            y === minY || y === maxY ||
+                            z === minZ || z === maxZ
+                        );
+
+                        if (onSurface) {
+                            addPoint(x, y, z);
+                        }
+                    }
+                }
+            }
+        };
+
+        // 1. X轴手臂: [-L, L] x [-T, T] x [-T, T]
+        generateBox(-armLength, armLength, -thickness, thickness, -thickness, thickness);
+
+        // 2. Y轴手臂: [-T, T] x [-L, L] x [-T, T]
+        generateBox(-thickness, thickness, -armLength, armLength, -thickness, thickness);
+
+        // 3. Z轴手臂: [-T, T] x [-T, T] x [-L, L]
+        generateBox(-thickness, thickness, -thickness, thickness, -armLength, armLength);
+
+        // 注意：交叉处的点被多次生成，addPoint 会去重。
+        // 交叉处内部的点（原来是表面，现在变成内部）会被保留。
+        // 这对于这个测试来说是可以接受的，“几乎”是空心的。
+
+        return new Object(points, {
+            center: { x: cx, y: cy, z: cz },
+            frontDirection: { x: 0, y: -1, z: 0 },
+            upDirection: { x: 0, y: 0, z: 1 },
+            name: 'CrossIntegerGrid'
+        });
     }
 }

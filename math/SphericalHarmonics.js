@@ -1297,6 +1297,28 @@ class SphericalHarmonics {
       density: 1.0
     };
   }
+
+  /**
+   * 计算指定阶的球谐能量
+   * E_l = Σ_{m=-l}^{l} c_{lm}²
+   * 
+   * @param {Array<number>} coeffs - 完整系数数组
+   * @param {number} l - 要计算的阶
+   * @returns {number} 该阶的能量
+   */
+  computeLevelEnergy(coeffs, l) {
+    // 阶 l 的系数索引范围: [l², (l+1)²)
+    const startIdx = l * l;
+    const endIdx = (l + 1) * (l + 1);
+
+    if (!coeffs || endIdx > coeffs.length) return 0;
+
+    let energy = 0;
+    for (let i = startIdx; i < endIdx; i++) {
+      energy += coeffs[i] * coeffs[i];
+    }
+    return energy;
+  }
 }
 
 // 导出

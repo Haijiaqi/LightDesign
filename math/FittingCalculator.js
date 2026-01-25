@@ -822,6 +822,138 @@ class FittingCalculator {
 
     return Math.sqrt(sumSq / m);
   }
+
+  // ====================================================
+  // 自适应阶数确定辅助方法
+  // ====================================================
+
+  /**
+   * 带 Tikhonov 正则化的最小二乘拟合
+   * 
+   * 求解：min |Ac - b|² + λ|c|²
+   * 使用 normal equation + Cholesky 分解
+   * 
+   * @param {Array<Array<number>>} A - 设计矩阵（行数组）
+   * @param {Array<number>} b - 目标向量
+   * @param {number} lambda - 正则化系数，默认 1e-6
+   * @param {object} options
+   * @returns {object}
+   *   - coefficients: 系数数组
+   *   - condition: (A^T A + λI) 的条件数（正则后）
+   *   - conditionUnregularized: A^T A 的条件数（用于判阶）
+   *     ⚠️ conditionUnregularized 仅用于"是否继续升阶"的判定，
+   *        不得用于数值求解，也不得被 condition（正则后）替代。
+   */
+  fitWithRegularization(A, b, lambda = 1e-6, options = {}) {
+    const m = A.length;
+    const n = A[0].length;
+
+    // 构建 A^T A
+    const ATA = [];
+    for (let i = 0; i < n; i++) {
+      ATA[i] = new Array(n).fill(0);
+    }
+    for (let i = 0; i < n; i++) {
+      for (let j = 0; j < n; j++) {
+        let sum = 0;
+        for (let k = 0; k < m; k++) {
+          sum += A[k][i] * A[k][j];
+        }
+        ATA[i][j] = sum;
+      }
+    }
+
+    // 未正则化的条件数（对角元素比）
+    let maxDiagUnreg = 0, minDiagUnreg = Infinity;
+    for (let i = 0; i < n; i++) {
+      const d = Math.abs(ATA[i][i]);
+      if (d > maxDiagUnreg) maxDiagUnreg = d;
+      if (d < minDiagUnreg && d > 1e-15) minDiagUnreg = d;
+    }
+    const conditionUnregularized = minDiagUnreg > 0 ? maxDiagUnreg / minDiagUnreg : Infinity;
+
+    // 添加正则项
+    for (let i = 0; i < n; i++) {
+      ATA[i][i] += lambda;
+    }
+
+    // 正则化后的条件数
+    let maxDiag = 0, minDiag = Infinity;
+    for (let i = 0; i < n; i++) {
+      const d = Math.abs(ATA[i][i]);
+      if (d > maxDiag) maxDiag = d;
+      if (d < minDiag && d > 1e-15) minDiag = d;
+    }
+    const condition = minDiag > 0 ? maxDiag / minDiag : Infinity;
+
+    // 构建 A^T b
+    const ATb = new Array(n).fill(0);
+    for (let i = 0; i < n; i++) {
+      for (let k = 0; k < m; k++) {
+        ATb[i] += A[k][i] * b[k];
+      }
+    }
+
+    // Cholesky 分解求解
+    const coefficients = this._choleskySolve(ATA, ATb, n);
+
+    return {
+      coefficients,
+      condition,
+      conditionUnregularized
+    };
+  }
+
+  /**
+   * Cholesky 分解求解正定系统 Ax = b
+   * @private
+   */
+  _choleskySolve(ATA, ATb, n) {
+    // L L^T 分解
+    const L = [];
+    for (let i = 0; i < n; i++) {
+      L[i] = new Array(n).fill(0);
+    }
+
+    for (let i = 0; i < n; i++) {
+      for (let j = 0; j <= i; j++) {
+        let sum = ATA[i][j];
+        for (let k = 0; k < j; k++) {
+          sum -= L[i][k] * L[j][k];
+        }
+        if (i === j) {
+          if (sum <= 0) {
+            throw new Error(`Matrix not positive definite at [${i},${i}]`);
+          }
+          L[i][j] = Math.sqrt(sum);
+        } else {
+          L[i][j] = sum / L[j][j];
+        }
+      }
+    }
+
+    // 前代: L y = ATb
+    const y = new Array(n);
+    for (let i = 0; i < n; i++) {
+      let sum = ATb[i];
+      for (let j = 0; j < i; j++) {
+        sum -= L[i][j] * y[j];
+      }
+      y[i] = sum / L[i][i];
+    }
+
+    // 回代: L^T x = y
+    const x = new Array(n);
+    for (let i = n - 1; i >= 0; i--) {
+      let sum = y[i];
+      for (let j = i + 1; j < n; j++) {
+        sum -= L[j][i] * x[j];
+      }
+      x[i] = sum / L[i][i];
+    }
+
+    return x;
+  }
 }
 
 // 导出

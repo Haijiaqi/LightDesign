@@ -739,4 +739,443 @@ export class ParametricImpl {
 
     return augmented.map(row => row[n]);
   }
+
+  // ==========================================================================
+  // 自适应阶数确定 (v2.4 两阶段版)
+  // ==========================================================================
+
+  /**
+   * 两阶段自适应确定最优球谐阶数 (v2.4)
+   * 
+   * 阶段A：结构判阶 - 高阶分阶正则拟合，确定结构区间
+   * 阶段B：稳定拟合 - 在结构区间内找到条件数稳定的最终阶数
+   * 
+   * @param {Array<{x,y,z}>} positions - 控制点位置（局部坐标）
+   * @param {object} shInstance - SphericalHarmonics 实例
+   * @param {object} fitterInstance - FittingCalculator 实例
+   * @param {class} Matrix - Matrix 类
+   * @param {object} options
+   * @returns {object}
+   *   - structureRange: { min, max } 结构阶数区间
+   *   - bestOrder: 最终使用阶数 (= L_final，兼容旧接口)
+   *   - diagnostics: { stageA, stageB }
+   */
+  static determineOptimalOrder(positions, shInstance, fitterInstance, Matrix, options = {}) {
+    const verbose = options.verbose ?? false;
+    const N = positions.length;
+    const center = { x: 0, y: 0, z: 0 };
+
+    // 阈值配置
+    const threshold_energy = options.energyRatioThreshold ?? 1e-4;
+    const threshold_variation = options.variationThreshold ?? 1e-4;
+    const threshold_nonaxial = options.nonaxialThreshold ?? 1e-5;
+    const threshold_zeroCrossing = options.zeroCrossingThreshold ?? 0.05;
+    const condThreshold = options.conditionThreshold ?? 1e7;
+    const minConsecutive = options.minConsecutive ?? 2;
+
+    // 正则配置
+    const lambda_base = options.lambda_base ?? 1e-7;
+    const alpha = options.alpha ?? 0.01;
+    const lambda_final = options.lambda_final ?? 1e-7;
+
+    // 计算 L_max: (L_max + 1)² ≤ 0.5 * N
+    const theoreticalMax = Math.floor(Math.sqrt(0.5 * N)) - 1;
+    const L_max = Math.min(shInstance.maxOrder ?? 15, Math.max(1, theoreticalMax));
+
+    if (verbose) console.log(`[SH-Auto] Analysis started | N=${N} | L_max=${L_max}`);
+
+    const diagnostics = { stageA: [], stageB: [] };
+
+    // ========== 阶段 A：结构判阶 ==========
+
+    // A.1 缓存球坐标
+    const sphericalCache = ParametricImpl._buildSphericalCache(positions, shInstance, center);
+
+    // A.2 分阶正则拟合
+    let coeffs_structure;
+    try {
+      const fitResult = ParametricImpl._fitWithGradedRegularization(
+        positions, shInstance, fitterInstance, L_max, center, lambda_base, alpha
+      );
+      coeffs_structure = fitResult.coefficients;
+    } catch (err) {
+      if (verbose) console.log(`[SH-Auto] High-order fit failed, fallback to conservative.`);
+      return ParametricImpl._fallbackConservative(positions, shInstance, fitterInstance, center, options);
+    }
+
+    // A.3 计算各阶能量谱
+    const energies = [];
+    for (let l = 0; l <= L_max; l++) {
+      energies[l] = shInstance.computeLevelEnergy(coeffs_structure, l);
+      diagnostics.stageA.push({ order: l, energy: energies[l] });
+    }
+
+    // A.4 计算归一化角向变化
+    const normalizedVariations = [0];
+    for (let l = 1; l <= L_max; l++) {
+      normalizedVariations[l] = ParametricImpl._computeNormalizedVariation(
+        coeffs_structure, l, sphericalCache, shInstance
+      );
+    }
+
+    // A.5 综合判据确定结构区间
+    let L_max_struct = 0;
+    let L_min_struct = null;
+    // [FIX] 防止零累积导致所有形状判为同一结果
+    // 初始能量至少设为一个小正数，避免 0/0 情况
+    let cumulativeEnergy = Math.max(energies[0], 1e-12);
+    // 变化量从 0 开始，但在比值计算时特殊处理
+    let cumulativeVariation = 0;
+    let consecutiveBelowThreshold = 0;
+
+    for (let l = 1; l <= L_max; l++) {
+      // 主判据：能量比
+      // [FIX] 当累积能量为 0 时，任何正能量都视为显著（返回 1 而非 0）
+      const R_E = cumulativeEnergy > 1e-15
+        ? energies[l] / cumulativeEnergy
+        : (energies[l] > 1e-15 ? 1.0 : 0);
+
+      // 辅助主判据：归一化变化比
+      // [FIX] 前几阶没有累积变化时，视当前阶变化为显著
+      const R_V = cumulativeVariation > 1e-15
+        ? normalizedVariations[l] / cumulativeVariation
+        : (normalizedVariations[l] > 1e-15 ? 1.0 : 0);
+
+      // 非轴对称能量
+      const E_nonaxial = ParametricImpl._computeNonAxialEnergy(coeffs_structure, l);
+      const R_nonaxial = cumulativeEnergy > 1e-15 ? E_nonaxial / cumulativeEnergy : 0;
+
+      // 结构事件判据（零交叉）
+      const hasEvent = ParametricImpl._hasStructuralEvent(
+        coeffs_structure, l, sphericalCache, shInstance, threshold_zeroCrossing
+      );
+
+      // 主判据结果
+      const primaryBelowThreshold = (R_E < threshold_energy) && (R_V < threshold_variation);
+
+      // 辅助否决
+      const nonAxialVeto = (R_nonaxial >= threshold_nonaxial);
+      const structuralVeto = hasEvent;
+
+      // 记录第一次辅助否决
+      if ((nonAxialVeto || structuralVeto) && L_min_struct === null) {
+        L_min_struct = l;
+      }
+
+      if (verbose) {
+        console.log(`[SH-Auto] L=${l} | R_E=${R_E.toExponential(1)} R_V=${R_V.toExponential(1)} | Veto: NA=${nonAxialVeto ? 'Y' : 'N'} Evt=${hasEvent ? 'Y' : 'N'}`);
+      }
+
+      // 综合判定
+      if (primaryBelowThreshold && !nonAxialVeto && !structuralVeto) {
+        consecutiveBelowThreshold++;
+        if (consecutiveBelowThreshold >= minConsecutive) {
+          L_max_struct = l - minConsecutive;
+          break;
+        }
+      } else {
+        consecutiveBelowThreshold = 0;
+        L_max_struct = l;
+      }
+
+      cumulativeEnergy += energies[l];
+      cumulativeVariation += normalizedVariations[l];
+    }
+
+    // 边界处理
+    L_max_struct = Math.max(1, L_max_struct);
+    L_min_struct = L_min_struct ?? 1;
+    L_min_struct = Math.min(L_min_struct, L_max_struct);
+
+    if (verbose) console.log(`[SH-Auto] Structure Range: [${L_min_struct}, ${L_max_struct}]`);
+
+    // ========== 阶段 B：稳定拟合 ==========
+
+    let L_final = L_min_struct;
+
+    for (let L = L_min_struct; L <= L_max_struct; L++) {
+      const design = shInstance.buildDesignMatrix(positions, center, { order: L });
+      const A = ParametricImpl._designToRowArray(design);
+      const b = Array.from(design.b);
+
+      let fitResult;
+      try {
+        fitResult = fitterInstance.fitWithRegularization(A, b, lambda_final);
+      } catch (err) {
+        if (verbose) console.log(`[SH-Fit] L=${L}: Fit failed`);
+        break;
+      }
+
+      // 主判据：条件数
+      if (fitResult.conditionUnregularized > condThreshold) {
+        if (verbose) console.log(`[SH-Fit] L=${L}: Condition number high (${fitResult.conditionUnregularized.toExponential(1)})`);
+        break;
+      }
+
+      // 诊断记录
+      const err = ParametricImpl._computeReconstructionErrorCached(sphericalCache, fitResult.coefficients, shInstance);
+      diagnostics.stageB.push({ order: L, condition: fitResult.conditionUnregularized, error: err });
+
+      if (verbose) console.log(`[SH-Fit] L=${L} | cond=${fitResult.conditionUnregularized.toExponential(1)} | err=${err.toFixed(4)} ✓`);
+
+      L_final = L;
+    }
+
+    return {
+      structureRange: { min: L_min_struct, max: L_max_struct },
+      bestOrder: L_final,
+      diagnostics
+    };
+  }
+
+  /**
+   * 构建球坐标缓存
+   * @private
+   */
+  static _buildSphericalCache(positions, shInstance, center) {
+    const design = shInstance.buildDesignMatrix(positions, center, { order: 0 });
+    const cache = [];
+    for (let i = 0; i < positions.length; i++) {
+      const p = positions[i];
+      const r = design.b[i];
+      if (r < 1e-10) {
+        cache.push({ theta: 0, phi: 0, r: 0 });
+      } else {
+        const theta = Math.acos(Math.max(-1, Math.min(1, (p.z - center.z) / r)));
+        const phi = Math.atan2(p.y - center.y, p.x - center.x);
+        cache.push({ theta, phi, r });
+      }
+    }
+    return cache;
+  }
+
+  /**
+   * 分阶正则拟合 (v2.4)
+   * λ(l) = λ_base * (1 + α * l²)
+   * @private
+   */
+  static _fitWithGradedRegularization(positions, shInstance, fitterInstance, L_max, center, lambda_base, alpha) {
+    const design = shInstance.buildDesignMatrix(positions, center, { order: L_max });
+    const A = ParametricImpl._designToRowArray(design);
+    const b = Array.from(design.b);
+    const m = A.length;
+    const n = A[0].length;
+
+    // 构建 A^T A
+    const ATA = [];
+    for (let i = 0; i < n; i++) {
+      ATA[i] = new Array(n).fill(0);
+    }
+    for (let i = 0; i < n; i++) {
+      for (let j = 0; j < n; j++) {
+        let sum = 0;
+        for (let k = 0; k < m; k++) {
+          sum += A[k][i] * A[k][j];
+        }
+        ATA[i][j] = sum;
+      }
+    }
+
+    // 分阶添加正则项
+    let coeffIdx = 0;
+    for (let l = 0; l <= L_max; l++) {
+      const lambda_l = lambda_base * (1 + alpha * l * l);
+      const numCoeffsInLevel = 2 * l + 1;
+      for (let mm = 0; mm < numCoeffsInLevel; mm++) {
+        ATA[coeffIdx][coeffIdx] += lambda_l;
+        coeffIdx++;
+      }
+    }
+
+    // 构建 A^T b
+    const ATb = new Array(n).fill(0);
+    for (let i = 0; i < n; i++) {
+      for (let k = 0; k < m; k++) {
+        ATb[i] += A[k][i] * b[k];
+      }
+    }
+
+    // Cholesky 求解
+    const coefficients = fitterInstance._choleskySolve(ATA, ATb, n);
+    return { coefficients };
+  }
+
+  /**
+   * 计算归一化角向变化量 (v2.4)
+   * Ṽ_l = V_l / l(l+1)
+   * @private
+   */
+  static _computeNormalizedVariation(coeffs_full, l, sphericalCache, shInstance) {
+    if (l === 0) return 0;
+
+    // 提取阶 l 的系数
+    const startIdx = l * l;
+    const endIdx = (l + 1) * (l + 1);
+    const coeffs_l = new Array(endIdx).fill(0);
+    for (let i = startIdx; i < endIdx; i++) {
+      coeffs_l[i] = coeffs_full[i];
+    }
+
+    // 计算该阶的重建值
+    const r_l = sphericalCache.map(({ theta, phi }) => shInstance.evaluate(coeffs_l, theta, phi));
+
+    // 自适应 K
+    const N = sphericalCache.length;
+    const K = Math.max(4, Math.min(12, Math.floor(Math.sqrt(N) / Math.max(1, l))));
+
+    // 计算 Total Variation
+    let totalVariation = 0;
+    for (let i = 0; i < N; i++) {
+      const neighbors = ParametricImpl._findKNearestOnSphere(sphericalCache, i, K);
+      for (const j of neighbors) {
+        const diff = r_l[i] - r_l[j];
+        totalVariation += diff * diff;
+      }
+    }
+
+    const V_l = totalVariation / N;
+    return V_l / (l * (l + 1)); // 尺度归一化
+  }
+
+  /**
+   * 计算非轴对称能量 (m≠0)
+   * @private
+   */
+  static _computeNonAxialEnergy(coeffs, l) {
+    const startIdx = l * l;
+    const m0Idx = startIdx + l; // m=0 的索引
+    let energy = 0;
+    for (let i = startIdx; i < (l + 1) * (l + 1); i++) {
+      if (i !== m0Idx && i < coeffs.length) {
+        energy += coeffs[i] * coeffs[i];
+      }
+    }
+    return energy;
+  }
+
+  /**
+   * 结构事件判据（零交叉）
+   * @private
+   */
+  static _hasStructuralEvent(coeffs_full, l, sphericalCache, shInstance, threshold) {
+    if (l === 0) return false;
+
+    // 提取阶 l 的系数
+    const startIdx = l * l;
+    const endIdx = (l + 1) * (l + 1);
+    const coeffs_l = new Array(endIdx).fill(0);
+    for (let i = startIdx; i < endIdx; i++) {
+      if (i < coeffs_full.length) coeffs_l[i] = coeffs_full[i];
+    }
+
+    // 计算重建值
+    const r_l = sphericalCache.map(({ theta, phi }) => shInstance.evaluate(coeffs_l, theta, phi));
+
+    // 统计零交叉
+    const K = 6;
+    let zeroCrossings = 0;
+    const N = sphericalCache.length;
+
+    for (let i = 0; i < N; i++) {
+      const neighbors = ParametricImpl._findKNearestOnSphere(sphericalCache, i, K);
+      const sign_i = Math.sign(r_l[i]);
+      if (sign_i === 0) {
+        zeroCrossings += K;
+      } else {
+        for (const j of neighbors) {
+          if (Math.sign(r_l[j]) !== sign_i) {
+            zeroCrossings++;
+          }
+        }
+      }
+    }
+
+    const zcRate = zeroCrossings / (N * K);
+    return zcRate >= threshold;
+  }
+
+  /**
+   * 球面 K 近邻搜索
+   * @private
+   */
+  static _findKNearestOnSphere(sphericalCache, idx, k) {
+    const p = sphericalCache[idx];
+    const distances = [];
+
+    for (let j = 0; j < sphericalCache.length; j++) {
+      if (j === idx) continue;
+      const q = sphericalCache[j];
+      const cosAngle = Math.sin(p.theta) * Math.sin(q.theta) * Math.cos(p.phi - q.phi)
+        + Math.cos(p.theta) * Math.cos(q.theta);
+      distances.push({ j, dist: 1 - cosAngle });
+    }
+
+    distances.sort((a, b) => a.dist - b.dist);
+    return distances.slice(0, k).map(d => d.j);
+  }
+
+  /**
+   * 保守回退方案
+   * @private
+   */
+  static _fallbackConservative(positions, shInstance, fitterInstance, center, options) {
+    const lambda = options.lambda_final ?? 1e-7;
+    const condThreshold = options.conditionThreshold ?? 1e7;
+    const L_max_fallback = Math.min(shInstance.maxOrder ?? 15, Math.floor(Math.sqrt(positions.length)) - 2);
+
+    let L_final = 1;
+
+    for (let L = 1; L <= L_max_fallback; L++) {
+      try {
+        const design = shInstance.buildDesignMatrix(positions, center, { order: L });
+        const A = ParametricImpl._designToRowArray(design);
+        const b = Array.from(design.b);
+        const fitResult = fitterInstance.fitWithRegularization(A, b, lambda);
+
+        if (fitResult.conditionUnregularized > condThreshold) break;
+        L_final = L;
+      } catch (err) {
+        break;
+      }
+    }
+
+    return {
+      structureRange: { min: 1, max: L_final },
+      bestOrder: L_final,
+      diagnostics: { stageA: [], stageB: [], fallback: true }
+    };
+  }
+
+  /**
+   * 将设计矩阵转换为行数组格式
+   * @private
+   */
+  static _designToRowArray(design) {
+    const m = design.rows;
+    const n = design.cols;
+    const A = [];
+    for (let i = 0; i < m; i++) {
+      const row = [];
+      for (let j = 0; j < n; j++) {
+        row.push(design.data[i * n + j]);
+      }
+      A.push(row);
+    }
+    return A;
+  }
+
+  /**
+   * 计算重建误差（使用缓存的球坐标）
+   * @private
+   */
+  static _computeReconstructionErrorCached(sphericalCache, coeffs, shInstance) {
+    let sumSq = 0;
+    for (const { theta, phi, r } of sphericalCache) {
+      if (r < 1e-10) continue;
+      const rFit = shInstance.evaluate(coeffs, theta, phi);
+      const diff = r - rFit;
+      sumSq += diff * diff;
+    }
+    return sumSq;
+  }
 }
