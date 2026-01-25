@@ -51,7 +51,7 @@ class Matrix {
       // 注意：应该更新所有列 j >= k，但对于 j = k，
       // 我们知道结果应该是 [r_kk; 0; 0; ...] 其中 r_kk = -sign*norm
       // 为了数值稳定性，我们直接设置而不是通过变换计算
-      
+
       // 先直接设置第 k 列的结果
       R.set(k, k, -sign * norm);
       for (let i = k + 1; i < m; i++) R.set(i, k, 0);
@@ -123,7 +123,7 @@ class Matrix {
     const Rp = new Float64Array(state.R);
     const Qtb = state.Qtb ? new Float64Array(state.Qtb) : null;
     const rowVec = new Float64Array(row);
-    
+
     // 应用列阈值截断
     if (options.columnThreshold) {
       for (let i = 0; i < state.cols; i++) {
@@ -132,7 +132,7 @@ class Matrix {
         }
       }
     }
-    
+
     Matrix._givensInsertRow(Rp, rowVec, Qtb, bval, state.cols);
 
     return {
@@ -183,19 +183,19 @@ class Matrix {
       const diagIdx = (j * (j + 1)) / 2 + j; // 对角线元素索引
       const a = Rp[diagIdx];
       const b = row[j];
-      
+
       // ⭐ 改进：使用相对阈值
       const threshold = Math.max(1e-15, 1e-15 * Math.abs(a));
       if (Math.abs(b) < threshold) continue;
-      
+
       // 计算 Givens 旋转
       const r = Math.hypot(a, b);
       const c = a / r;
       const s = b / r;
-      
+
       // 更新对角线元素
       Rp[diagIdx] = r;
-      
+
       // 更新 R 的当前行右侧元素
       for (let k = j + 1; k < n; k++) {
         const idx = (k * (k + 1)) / 2 + j;
@@ -204,7 +204,7 @@ class Matrix {
         Rp[idx] = c * x + s * y;
         row[k] = -s * x + c * y;
       }
-      
+
       // 更新 Qtb 向量
       if (Qtb) {
         const q = Qtb[j];
@@ -238,7 +238,7 @@ class Matrix {
     }
     return p;
   }
-  
+
   static unpackR(Rp, n) {
     const R = new Matrix(n, n);
     let k = 0;
@@ -249,18 +249,18 @@ class Matrix {
     }
     return R;
   }
-  
+
   // =================== 高级工具 ===================
-  
+
   static estimateCondition(state) {
     return Matrix._estimateConditionFromR(state.R, state.cols);
   }
-  
+
   static computeResidual(state, A, b) {
     const x = Matrix.solveFromQR(state);
     const m = A.rows;
     let residual = 0;
-    
+
     for (let i = 0; i < m; i++) {
       let sum = 0;
       for (let j = 0; j < state.cols; j++) {
@@ -269,7 +269,7 @@ class Matrix {
       const diff = sum - b[i];
       residual += diff * diff;
     }
-    
+
     return Math.sqrt(residual);
   }
 }
@@ -279,3 +279,5 @@ if (typeof module !== 'undefined' && module.exports) {
 } else if (typeof window !== 'undefined') {
   window.Matrix = Matrix;
 }
+
+export { Matrix };

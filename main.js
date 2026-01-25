@@ -35,6 +35,11 @@ import { Renderer } from "./manage/Renderer.js";
 import { InputManager } from "./manage/InputManager.js";
 import { HistoryManager, createMoveCommand, createMoveControlPointCommand, createAddControlPointCommand, createDeleteControlPointCommand } from "./manage/HistoryManager.js";
 
+// [新增] 导入数学模块
+import { SphericalHarmonics } from "./math/SphericalHarmonics.js";
+import { Matrix } from "./math/Matrix.js";
+import { FittingCalculator } from "./math/FittingCalculator.js";
+
 
 // ============================================================================
 // CORE LOGIC & HUB
@@ -96,6 +101,38 @@ async function init() {
     SystemState.lightObject = ObjectFactoryImpl.createSphere(CONFIG.lightX, CONFIG.lightY, CONFIG.lightZ, 0.5, 20);
     SystemState.lightObject.tag = 'LIGHT_SOURCE';
     SystemState.objects.push(SystemState.lightObject);
+
+    // [New] Integration: Find existing IntegerGridObject and apply fit
+    console.log("[Integration] Looking for existing IntegerGridObject...");
+    const integerGrid = SystemState.objects.find(obj => obj.metadata?.name === 'IntegerGrid');
+
+    if (integerGrid) {
+        console.log("[Integration] Found IntegerGridObject, applying fit...");
+
+        // Move to (0, 35, 0)
+        integerGrid.transform.position.x = 0;
+        integerGrid.transform.position.y = 35;
+        integerGrid.transform.position.z = 0;
+        integerGrid._dirty = true;
+        integerGrid.updateWorldPoints({ force: true });
+
+        const sh = new SphericalHarmonics(15); // Max allowed order
+
+        // Perform fit with explicit low order (cubes are ill-conditioned for high SH orders)
+        integerGrid.fitSphericalHarmonics({
+            fitter: FittingCalculator,
+            Matrix: Matrix,
+            sphericalHarmonics: sh,
+            order: 4  // 显式指定低阶数，立方体不适合高阶球谐拟合
+        });
+
+        // Generate display points with lower density
+        integerGrid.generateDisplayPoints({ density: 0.3 });
+
+        console.log(`[Integration] IntegerGrid fitted, displayPoints: ${integerGrid.displayPoints?.length}`);
+    } else {
+        console.warn("[Integration] IntegerGridObject not found in scene.");
+    }
 
     document.body.appendChild(SystemState.canvas);
     setupEventListeners();

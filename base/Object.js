@@ -627,8 +627,28 @@ export class Object {
       if (cached) return cached;
     }
 
-    const positions = this._extractPositions(this.controlPoints);
-    const centerPos = GeometryImpl.computeCenter(positions);
+    // [修改] 使用局部坐标进行拟合
+    // 局部中心始终为 (0,0,0)
+    const positions = this.controlPoints.map(p => ({ x: p.lx, y: p.ly, z: p.lz }));
+    const centerPos = { x: 0, y: 0, z: 0 };
+
+    // [新增] 自动计算阶数（如果没有手动指定）
+    if (options.order === undefined) {
+      // 不留冗余，使用最大可能阶数
+      const maxOrder = ParametricImpl.computeMaxOrder(positions.length);
+      // options.order 是 const 不能修改，使用局部变量覆盖
+      // 注意：上面的 const order = ... 已经定义了，这里需要处理一下逻辑流
+    }
+
+    // 重新定义 order 逻辑
+    let targetOrder = options.order;
+    if (targetOrder === undefined) {
+      targetOrder = ParametricImpl.computeMaxOrder(positions.length);
+    }
+    // 限制最大阶数不超过球谐实例支持的阶数
+    if (sphericalHarmonics.maxOrder && targetOrder > sphericalHarmonics.maxOrder) {
+      targetOrder = sphericalHarmonics.maxOrder;
+    }
 
     if (!this._fitterInstance) {
       this._fitterInstance = new FitterClass({ Matrix, verbose: this.verbose });
@@ -639,8 +659,8 @@ export class Object {
     try {
       result = ParametricImpl.fitSpherical(
         positions,
-        centerPos.x, centerPos.y, centerPos.z,
-        order,
+        centerPos.x, centerPos.y, centerPos.z, // (0,0,0)
+        targetOrder,
         this._fitStack,
         this._fitterInstance,
         Matrix,
@@ -655,7 +675,7 @@ export class Object {
         result = ParametricImpl.fitSpherical(
           positions,
           centerPos.x, centerPos.y, centerPos.z,
-          order,
+          targetOrder,
           this._fitStack,
           this._fitterInstance,
           Matrix,
@@ -670,19 +690,16 @@ export class Object {
 
     this._fitStack = result.fitStack;
 
-    if (!this.center ||
-      this.center.x !== centerPos.x ||
-      this.center.y !== centerPos.y ||
-      this.center.z !== centerPos.z) {
-      this._centerVersion++;
-    }
-    this.center = { x: centerPos.x, y: centerPos.y, z: centerPos.z };
+    // center 不需要更新，因为拟合是在局部空间进行的，中心始终是 (0,0,0)
+    // 但为了兼容性，this.center 仍然保持为物体的世界坐标中心
+    // 这里不需要 centerVersion++，因为拟合不改变物体世界位置，只改变形状系数
 
     this.representation.type = 'sphericalHarmonics';
     this.representation.isClosed = true;
     this.representation.data = {
       coefficients: result.coefficients,
-      sphericalHarmonics: sphericalHarmonics
+      sphericalHarmonics: sphericalHarmonics,
+      coordinateSystem: 'local' // 标记使用局部坐标系
     };
 
     this.mode = 'parametric';
@@ -1016,43 +1033,60 @@ export class Object {
       return sphericalHarmonics.evaluate(coefficients, theta, phi);
     };
 
+    // [修改] 在局部坐标系进行采样 (中心 0,0,0)
     const sampledPositions = GeometryImpl.goldenSpiralSampling(
       count,
-      this.center.x, this.center.y, this.center.z,
+      0, 0, 0, // 局部中心
       radiusCallback
     );
 
     // 创建显示点
-    this.displayPoints = sampledPositions.map(p => new Point(p.x, p.y, p.z));
+    this.displayPoints = sampledPositions.map(p => {
+      const pt = new Point(0, 0, 0); // 世界坐标稍后计算
+      // 设置局部坐标
+      pt.lx = p.x;
+      pt.ly = p.y;
+      pt.lz = p.z;
+      return pt;
+    });
     this._displayPointVersion++;
 
-    // 计算法向量
+    // 计算法向量 (局部坐标系)
+    const centerZero = { x: 0, y: 0, z: 0 };
     for (let i = 0; i < this.displayPoints.length; i++) {
       const p = this.displayPoints[i];
       const pos = sampledPositions[i];
 
       // 使用球谐函数的梯度计算法向量
       const normal = sphericalHarmonics.computeSurfaceNormal?.(
-        coefficients, pos.theta, pos.phi, this.center
+        coefficients, pos.theta, pos.phi, centerZero
       );
 
       if (normal) {
+        // 设置世界法向量初始值 (将被 updateWorldPoints 旋转)
         p.nx = normal.x;
         p.ny = normal.y;
         p.nz = normal.z;
+        // 保存局部法向量，确保 updateWorldPoints 能正确旋转它
+        p._lnx = normal.x;
+        p._lny = normal.y;
+        p._lnz = normal.z;
       } else {
         // 后备：径向法向量
-        const dx = p.x - this.center.x;
-        const dy = p.y - this.center.y;
-        const dz = p.z - this.center.z;
-        const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        const len = Math.sqrt(p.lx * p.lx + p.ly * p.ly + p.lz * p.lz);
         if (len > 1e-10) {
-          p.nx = dx / len;
-          p.ny = dy / len;
-          p.nz = dz / len;
+          const nx = p.lx / len;
+          const ny = p.ly / len;
+          const nz = p.lz / len;
+          p.nx = nx; p.ny = ny; p.nz = nz;
+          p._lnx = nx; p._lny = ny; p._lnz = nz;
         }
       }
     }
+
+    // [新增] 立即更新世界坐标
+    this._dirty = true;
+    this.updateWorldPoints({ force: true });
 
     if (this.verbose) {
       console.log(`[Object] Display points generated: ${this.displayPoints.length}`);

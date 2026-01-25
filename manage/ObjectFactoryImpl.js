@@ -363,8 +363,8 @@ export class ObjectFactoryImpl {
             // 参数顺序: size, pointsPerFace, x, y, z, alpha, ifEntity
             ObjectFactoryImpl.createCube(4, 300, 10, 50, 0, 0, false),
 
-            // 整格点对象: 6点边长，间距1cm，位于 (0, 60, 0)
-            ObjectFactoryImpl.createIntegerGridObject(0, 50, 0, 3, 1),
+            // 整格点对象: 7点边长(6cm)，间距1cm，位于 (0, 50, 0)
+            ObjectFactoryImpl.createIntegerGridObject(0, 50, 0, 7, 1),
         ];
     }
 

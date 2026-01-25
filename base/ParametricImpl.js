@@ -30,6 +30,20 @@ export class ParametricImpl {
   static EPSILON = 1e-10;
   static SURFACE_THRESHOLD = 0.92;  // distanceRatio >= 0.92 为表面层
 
+  /**
+   * 计算最大可能的球谐阶数
+   * 公式：(L+1)² ≤ N  =>  L ≤ sqrt(N) - 1
+   * 为数值稳定性，返回最高阶 - 1
+   * @param {number} numControlPoints
+   * @returns {number} 安全阶数 (>= 1)
+   */
+  static computeMaxOrder(numControlPoints) {
+    // 理论最大阶: floor(sqrt(N)) - 1
+    // 安全阶数: 最高阶 - 1 = floor(sqrt(N)) - 2
+    const safeL = Math.floor(Math.sqrt(numControlPoints)) - 2;
+    return Math.max(1, safeL);
+  }
+
   // ==========================================================================
   // 2.1 球谐拟合
   // 【照抄原始逻辑】从 Object.js fitSphericalHarmonics (第566-715行)
@@ -104,7 +118,7 @@ export class ParametricImpl {
 
     // 1. 构建设计矩阵
     const design = shInstance.buildDesignMatrix(positions, center, { order });
-    
+
     // 2. 转换为行数组格式（FittingCalculator 期望的格式）
     //    SphericalHarmonics 返回行主序：data[row * cols + col]
     const m = design.rows;
@@ -123,11 +137,11 @@ export class ParametricImpl {
     let result;
     if (useIncremental) {
       result = fitterInstance.fitIncremental1D(A, b, fitStack, { verbose });
-      
+
       // 更新元数据
       fitStack.meta.center = { ...center };
       fitStack.meta.cols = cols;
-      
+
       if (verbose) {
         console.log(`[ParametricImpl] Incremental fit complete, stack size: ${fitStack.length}`);
       }
@@ -220,7 +234,7 @@ export class ParametricImpl {
 
       // 2. 评估球谐函数得到理想半径
       const rSH = shInstance.evaluate(coefficients, theta, phi);
-      
+
       // 【修复】验证 rSH 有效性
       if (!Number.isFinite(rSH) || rSH <= 0) {
         // 返回默认值：假设在外部
@@ -289,7 +303,7 @@ export class ParametricImpl {
       const theta = Math.acos(Math.max(-1, Math.min(1, dz / rCart)));
       const phi = Math.atan2(dy, dx);
       const rSH = shInstance.evaluate(coefficients, theta, phi);
-      
+
       // 【修复】验证 rSH 有效性
       if (!Number.isFinite(rSH) || rSH <= 0) {
         return false;  // 无效值，不遮挡
@@ -352,7 +366,7 @@ export class ParametricImpl {
         const theta = Math.acos(Math.max(-1, Math.min(1, dz / rCart)));
         const phi = Math.atan2(dy, dx);
         const rSH = shInstance.evaluate(coefficients, theta, phi);
-        
+
         // 【修复】验证 rSH 有效性
         if (!Number.isFinite(rSH) || rSH <= 0) return false;
 
@@ -419,7 +433,7 @@ export class ParametricImpl {
         const theta = Math.acos(Math.max(-1, Math.min(1, dz / rCart)));
         const phi = Math.atan2(dy, dx);
         const rSH = shInstance.evaluate(coefficients, theta, phi);
-        
+
         // 【修复】验证 rSH 有效性
         if (!Number.isFinite(rSH) || rSH <= 0) {
           return { x, y, z };  // 返回原点
@@ -536,8 +550,8 @@ export class ParametricImpl {
         let predX = coeffsX[0], predY = coeffsY[0];
         const t = tParams[i];
         for (let k = 1; k <= order; k++) {
-          predX += coeffsX[2*k-1] * Math.cos(k*t) + coeffsX[2*k] * Math.sin(k*t);
-          predY += coeffsY[2*k-1] * Math.cos(k*t) + coeffsY[2*k] * Math.sin(k*t);
+          predX += coeffsX[2 * k - 1] * Math.cos(k * t) + coeffsX[2 * k] * Math.sin(k * t);
+          predY += coeffsY[2 * k - 1] * Math.cos(k * t) + coeffsY[2 * k] * Math.sin(k * t);
         }
         residualX += (predX - bX[i]) ** 2;
         residualY += (predY - bY[i]) ** 2;
@@ -576,8 +590,8 @@ export class ParametricImpl {
     for (let k = 1; k <= order; k++) {
       const cos_kt = Math.cos(k * t);
       const sin_kt = Math.sin(k * t);
-      x += coeffsX[2*k-1] * cos_kt + coeffsX[2*k] * sin_kt;
-      y += coeffsY[2*k-1] * cos_kt + coeffsY[2*k] * sin_kt;
+      x += coeffsX[2 * k - 1] * cos_kt + coeffsX[2 * k] * sin_kt;
+      y += coeffsY[2 * k - 1] * cos_kt + coeffsY[2 * k] * sin_kt;
     }
 
     return { x, y };

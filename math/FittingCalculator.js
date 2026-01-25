@@ -11,7 +11,7 @@ class FittingCalculator {
     this.criterionType = options.criterionType ?? 'extrema'; // 'extrema', 'aic', 'bic', 'cv'
     this.smoothness = options.smoothness ?? 0.1; // 平滑度权重
     this.verbose = options.verbose ?? false;
-    
+
     // 依赖注入：Matrix 类
     this.Matrix = options.Matrix;
     if (!this.Matrix) {
@@ -125,24 +125,24 @@ class FittingCalculator {
 
   _detectFitType(points) {
     const first = points[0];
-    
+
     // 检测是否为 3D 点
     if (first.z !== undefined && first.z !== null) {
       return '3d';
     }
-    
+
     // 检测是否为时间序列（K线等）
     if (first.value !== undefined || first.close !== undefined) {
       return 'timeseries';
     }
-    
+
     // 默认为 2D 点
     return '2d';
   }
 
   _prepareData(points, fitType, options) {
     let x = [], y = [];
-    
+
     // 根据类型提取数据
     if (fitType === '3d') {
       // 3D: 沿某个方向投影（默认沿第一主成分）
@@ -169,10 +169,10 @@ class FittingCalculator {
     const xMax = Math.max(...x);
     const yMin = Math.min(...y);
     const yMax = Math.max(...y);
-    
+
     const xRange = xMax - xMin;
     const yRange = yMax - yMin;
-    
+
     // 避免除零
     const xScale = xRange > 1e-10 ? xRange : 1;
     const yScale = yRange > 1e-10 ? yRange : 1;
@@ -213,14 +213,14 @@ class FittingCalculator {
         y: points.map(p => Math.sqrt(p.x * p.x + p.y * p.y))
       };
     }
-    
+
     throw new Error(`Unknown projection type: ${projection}`);
   }
 
   _pcaProject(points) {
     // 简化版 PCA：找到最大方差方向
     const n = points.length;
-    
+
     // 计算中心
     let cx = 0, cy = 0, cz = 0;
     for (const p of points) {
@@ -235,7 +235,7 @@ class FittingCalculator {
     // 计算协方差矩阵（简化：只找主方向）
     let cxx = 0, cxy = 0, cxz = 0;
     let cyy = 0, cyz = 0, czz = 0;
-    
+
     for (const p of points) {
       const dx = p.x - cx;
       const dy = p.y - cy;
@@ -251,7 +251,7 @@ class FittingCalculator {
     // 简化：使用最大对角元素对应的轴
     const maxVar = Math.max(cxx, cyy, czz);
     let mainAxis, perpDist;
-    
+
     if (maxVar === cxx) {
       mainAxis = points.map(p => p.x);
       perpDist = points.map(p => Math.sqrt((p.y - cy) ** 2 + (p.z - cz) ** 2));
@@ -364,31 +364,31 @@ class FittingCalculator {
     // 根据极值点数量确定阶数
     // 多项式的极值点数 ≤ degree - 1
     // 我们希望拟合曲线的极值点数与真实趋势相符
-    
+
     const extremaCount = this._countExtrema(coeffs);
-    
+
     // 启发式规则：
     // 1. 如果没有极值点，可能是单调的，低阶拟合
     // 2. 如果极值点太多，可能过拟合，降低阶数
     // 3. 目标：extremaCount ≈ order / 2
-    
+
     const currentOrder = coeffs.length - 1;
-    
+
     if (extremaCount === 0) {
       // 单调，使用低阶
       return Math.max(this.minOrder, Math.min(3, currentOrder));
     }
-    
+
     // 经验公式：最佳阶数约为 2 * extremaCount + 1
     const suggestedOrder = Math.min(
       currentOrder,
       Math.max(this.minOrder, 2 * extremaCount + 1)
     );
-    
+
     if (this.verbose) {
       console.log(`Extrema count: ${extremaCount}, suggested order: ${suggestedOrder}`);
     }
-    
+
     return suggestedOrder;
   }
 
@@ -409,7 +409,7 @@ class FittingCalculator {
     for (let i = 1; i <= samples; i++) {
       const t = i / samples;
       const deriv = this._polyEval(derivCoeffs, t);
-      
+
       // 检测符号变化（极值点）
       if (prevDeriv * deriv < 0) {
         extrema++;
@@ -430,10 +430,10 @@ class FittingCalculator {
       const n = x.length;
       const k = order + 1;
       const rss = result.residual * result.residual * n;
-      
+
       // AIC = 2k + n*ln(RSS/n)
       const aic = 2 * k + n * Math.log(rss / n);
-      
+
       if (aic < bestAIC) {
         bestAIC = aic;
         bestOrder = order;
@@ -453,10 +453,10 @@ class FittingCalculator {
       const n = x.length;
       const k = order + 1;
       const rss = result.residual * result.residual * n;
-      
+
       // BIC = k*ln(n) + n*ln(RSS/n)
       const bic = k * Math.log(n) + n * Math.log(rss / n);
-      
+
       if (bic < bestBIC) {
         bestBIC = bic;
         bestOrder = order;
@@ -469,7 +469,7 @@ class FittingCalculator {
   _orderByCV(x, y, options) {
     // Cross-Validation (简化版：留一法)
     const folds = options.cvFolds ?? Math.min(10, Math.floor(x.length / 5));
-    
+
     let bestOrder = this.minOrder;
     let bestError = Infinity;
 
@@ -480,7 +480,7 @@ class FittingCalculator {
       for (let f = 0; f < folds; f++) {
         const testStart = f * foldSize;
         const testEnd = f === folds - 1 ? x.length : (f + 1) * foldSize;
-        
+
         // 分割训练/测试集
         const xTrain = [...x.slice(0, testStart), ...x.slice(testEnd)];
         const yTrain = [...y.slice(0, testStart), ...y.slice(testEnd)];
@@ -489,7 +489,7 @@ class FittingCalculator {
 
         // 训练
         const result = this._fitPolynomial(xTrain, yTrain, order, {});
-        
+
         // 测试
         for (let i = 0; i < xTest.length; i++) {
           const pred = this._polyEval(result.coefficients, xTest[i]);
@@ -514,13 +514,13 @@ class FittingCalculator {
   _evaluatePolynomial(coeffs, xInput, prepared) {
     // 反归一化输入
     const xNorm = (xInput - prepared.xMin) / prepared.xScale;
-    
+
     // 计算归一化输出
     const yNorm = this._polyEval(coeffs, xNorm);
-    
+
     // 反归一化输出
     const y = yNorm * prepared.yScale + prepared.yMin;
-    
+
     return y;
   }
 
@@ -550,7 +550,7 @@ class FittingCalculator {
   static derivative(fitResult, x) {
     const coeffs = fitResult.coefficients;
     const prepared = fitResult._prepared;
-    
+
     // 导数系数
     const derivCoeffs = [];
     for (let i = 1; i < coeffs.length; i++) {
@@ -560,7 +560,7 @@ class FittingCalculator {
     // 归一化
     const xNorm = (x - prepared.xMin) / prepared.xScale;
     const dyNorm = this.prototype._polyEval(derivCoeffs, xNorm);
-    
+
     // 考虑归一化的链式法则
     return dyNorm * prepared.yScale / prepared.xScale;
   }
@@ -581,7 +581,7 @@ class FittingCalculator {
     for (let i = 1; i <= samples; i++) {
       const x = prepared.xMin + (prepared.xMax - prepared.xMin) * i / samples;
       const deriv = FittingCalculator.derivative(fitResult, x);
-      
+
       // 检测符号变化
       if (prevDeriv * deriv < 0) {
         const y = fitResult.evaluate(x);
@@ -591,7 +591,7 @@ class FittingCalculator {
           type: prevDeriv > 0 ? 'max' : 'min'
         });
       }
-      
+
       prevDeriv = deriv;
     }
 
@@ -830,3 +830,5 @@ if (typeof module !== 'undefined' && module.exports) {
 } else if (typeof window !== 'undefined') {
   window.FittingCalculator = FittingCalculator;
 }
+
+export { FittingCalculator };

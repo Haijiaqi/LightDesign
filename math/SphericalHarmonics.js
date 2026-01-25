@@ -79,12 +79,12 @@ class SphericalHarmonics {
     if (!coeffs || coeffs.length === 0) {
       throw new Error('Coefficients array is empty');
     }
-    
+
     const order = Math.round(Math.sqrt(coeffs.length)) - 1;
     if ((order + 1) * (order + 1) !== coeffs.length) {
       throw new Error('Invalid coefficient array length');
     }
-    
+
     const cosT = Math.cos(theta);
     const sinT = Math.sin(theta);
     this._computeLegendre(cosT, sinT, order, this._legendreBuffer);
@@ -134,7 +134,7 @@ class SphericalHarmonics {
 
     // 三重积分：V = ∫∫∫ r² sin(θ) dr dθ dφ
     // 简化为：V = (1/3) ∫∫ r³(θ,φ) sin(θ) dθ dφ
-    
+
     let volume = 0;
 
     for (let i = 0; i < thetaSteps; i++) {
@@ -150,7 +150,7 @@ class SphericalHarmonics {
         const dPhi = phi2 - phi;
 
         const r = this.evaluate(coeffs, thetaMid, phiMid);
-        
+
         // dV = (r³/3) * sin(θ) * dθ * dφ
         volume += (r * r * r / 3) * Math.sin(thetaMid) * dTheta * dPhi;
       }
@@ -189,10 +189,10 @@ class SphericalHarmonics {
 
         // 中心点
         const r = this.evaluate(coeffs, theta, phi);
-        
+
         // ⭐ 数值稳定性改进：在极点附近使用简化公式
         const sinTheta = Math.sin(theta);
-        
+
         if (sinTheta < 1e-6) {
           // θ ≈ 0 或 θ ≈ π（极点附近）
           // 使用简化公式：dS ≈ r² sin(θ) dθ dφ
@@ -206,12 +206,12 @@ class SphericalHarmonics {
         const thetaMinus = Math.max(theta - eps, 0);
         const phiPlus = phi + eps;
         const phiMinus = phi - eps;
-        
+
         const r_theta_plus = this.evaluate(coeffs, thetaPlus, phi);
         const r_theta_minus = this.evaluate(coeffs, thetaMinus, phi);
         const r_phi_plus = this.evaluate(coeffs, theta, phiPlus);
         const r_phi_minus = this.evaluate(coeffs, theta, phiMinus);
-        
+
         const dr_dtheta = (r_theta_plus - r_theta_minus) / (thetaPlus - thetaMinus);
         const dr_dphi = (r_phi_plus - r_phi_minus) / (phiPlus - phiMinus);
 
@@ -236,7 +236,7 @@ class SphericalHarmonics {
 
         // 面积元：||叉乘||
         const dS = Math.sqrt(cross_x * cross_x + cross_y * cross_y + cross_z * cross_z);
-        
+
         area += dS * dTheta * dPhi;
       }
     }
@@ -267,10 +267,10 @@ class SphericalHarmonics {
 
     for (let i = 0; i < numSamples; i++) {
       const angle = (2 * Math.PI * i) / numSamples;
-      
+
       // 在平面上构建射线
       const ray = this._constructRayInPlane(plane, angle);
-      
+
       // 求交点（改进的算法）
       const intersection = this._intersectRayWithSurface_Bisection(
         ray,
@@ -279,7 +279,7 @@ class SphericalHarmonics {
         maxRadius,
         tolerance
       );
-      
+
       if (intersection) {
         sectionPoints.push(intersection);
       }
@@ -303,11 +303,11 @@ class SphericalHarmonics {
     // 3. 计算面积（多边形分解为三角形）
     let area = 0;
     const centroid = this._computeCentroid(sectionPoints);
-    
+
     for (let i = 0; i < sectionPoints.length; i++) {
       const p1 = sectionPoints[i];
       const p2 = sectionPoints[(i + 1) % sectionPoints.length];
-      
+
       // 三角形面积
       const v1 = [p1.x - centroid.x, p1.y - centroid.y, p1.z - centroid.z];
       const v2 = [p2.x - centroid.x, p2.y - centroid.y, p2.z - centroid.z];
@@ -359,7 +359,7 @@ class SphericalHarmonics {
         const intersection = this._bisectionRoot(
           ray, coeffs, center, t_prev, t, tolerance
         );
-        
+
         if (intersection) {
           return intersection;
         }
@@ -520,11 +520,11 @@ class SphericalHarmonics {
 
     // ⭐ 归一化方向向量
     const mag = Math.sqrt(
-      direction.x * direction.x + 
-      direction.y * direction.y + 
+      direction.x * direction.x +
+      direction.y * direction.y +
       direction.z * direction.z
     );
-    
+
     if (mag > 1e-10) {
       direction.x /= mag;
       direction.y /= mag;
@@ -621,7 +621,7 @@ class SphericalHarmonics {
     for (let l = 2; l <= order; l++) {
       for (let m = 0; m <= l; m++) {
         const pIdx = SphericalHarmonics.getLegendreIndex(l, m);
-        
+
         if (m === l) {
           const prevIdx = SphericalHarmonics.getLegendreIndex(l - 1, l - 1);
           buffer[pIdx] = sinTheta * buffer[prevIdx];
@@ -673,9 +673,9 @@ class SphericalHarmonics {
     const dx = x - center.x;
     const dy = y - center.y;
     const dz = z - center.z;
-    
+
     out.r = Math.sqrt(dx * dx + dy * dy + dz * dz);
-    
+
     if (out.r < 1e-10) {
       out.theta = 0;
       out.phi = 0;
@@ -730,15 +730,15 @@ class SphericalHarmonics {
     if (!coeffs || coeffs.length === 0) {
       throw new Error('Coefficients array is empty');
     }
-    
+
     const order = Math.round(Math.sqrt(coeffs.length)) - 1;
     if ((order + 1) * (order + 1) !== coeffs.length) {
       throw new Error('Invalid coefficient array length');
     }
-    
+
     const cosT = Math.cos(theta);
     const sinT = Math.sin(theta);
-    
+
     // ⭐ 修正：极点处理（θ ≈ 0 或 π）
     const POLE_THRESHOLD = 1e-8;
     if (Math.abs(sinT) < POLE_THRESHOLD) {
@@ -746,15 +746,15 @@ class SphericalHarmonics {
       // 返回近似值，避免数值不稳定
       return { dr_dtheta: 0, dr_dphi: 0 };
     }
-    
+
     // 计算 Legendre 多项式
     this._computeLegendre(cosT, sinT, order, this._legendreBuffer);
-    
+
     // 计算 Legendre 导数
     const legendreDerivatives = this._computeLegendreDerivatives(
       cosT, sinT, order
     );
-    
+
     // 预计算三角函数
     const cos_m = new Float64Array(order + 1);
     const sin_m = new Float64Array(order + 1);
@@ -762,20 +762,20 @@ class SphericalHarmonics {
       cos_m[m] = Math.cos(m * phi);
       sin_m[m] = Math.sin(m * phi);
     }
-    
+
     let dr_dtheta = 0;
     let dr_dphi = 0;
     let idx = 0;
-    
+
     for (let l = 0; l <= order; l++) {
       for (let m = -l; m <= l; m++) {
         const absM = Math.abs(m);
-        
+
         // ⭐ 修正：统一使用 SphericalHarmonics.getLegendreIndex
         const pIdx = SphericalHarmonics.getLegendreIndex(l, absM);
         const P_lm = this._legendreBuffer[pIdx];
         const dP_lm_dtheta = legendreDerivatives[pIdx];
-        
+
         if (m === 0) {
           // m = 0: 只有 cos(0*φ) = 1 项
           dr_dtheta += coeffs[idx] * dP_lm_dtheta;
@@ -789,11 +789,11 @@ class SphericalHarmonics {
           dr_dtheta += coeffs[idx] * dP_lm_dtheta * sin_m[absM];
           dr_dphi += coeffs[idx] * P_lm * (absM * cos_m[absM]);
         }
-        
+
         idx++;
       }
     }
-    
+
     return { dr_dtheta, dr_dphi };
   }
 
@@ -815,7 +815,7 @@ class SphericalHarmonics {
   _computeLegendreDerivatives(cosT, sinT, order) {
     const size = (order + 1) * (order + 2) / 2;
     const derivatives = new Float64Array(size);
-    
+
     // ⭐ 修正：极点处理（θ ≈ 0 或 π）
     const POLE_THRESHOLD = 1e-8;
     if (Math.abs(sinT) < POLE_THRESHOLD) {
@@ -825,7 +825,7 @@ class SphericalHarmonics {
         // ∂P_l(x)/∂x 在 x=±1 处: ±l(l+1)/2
         const sign = cosT > 0 ? 1 : (l % 2 === 0 ? 1 : -1);
         derivatives[idx] = 0.5 * l * (l + 1) * sign * (-sinT);
-        
+
         // m > 0 的项在极点处导数为 0
         for (let m = 1; m <= l; m++) {
           const idxM = SphericalHarmonics.getLegendreIndex(l, m);
@@ -834,7 +834,7 @@ class SphericalHarmonics {
       }
       return derivatives;
     }
-    
+
     // 使用递推关系
     // ∂P_l^m / ∂θ = -sin(θ) * ∂P_l^m / ∂x
     // 
@@ -843,12 +843,12 @@ class SphericalHarmonics {
     // 
     // 求导：
     // (l - m) ∂P_l^m/∂x = (2l - 1)[P_{l-1}^m + x ∂P_{l-1}^m/∂x] - (l + m - 1) ∂P_{l-2}^m/∂x
-    
+
     for (let l = 0; l <= order; l++) {
       for (let m = 0; m <= l; m++) {
         // ⭐ 修正：统一使用 SphericalHarmonics.getLegendreIndex
         const idx = SphericalHarmonics.getLegendreIndex(l, m);
-        
+
         if (l === 0) {
           // P_0^0 = 常数，导数 = 0
           derivatives[idx] = 0;
@@ -869,23 +869,23 @@ class SphericalHarmonics {
           // 一般递推
           const idx_l1 = SphericalHarmonics.getLegendreIndex(l - 1, m);
           const idx_l2 = SphericalHarmonics.getLegendreIndex(l - 2, m);
-          
+
           const a = (2 * l - 1) / (l - m);
           const b = (l + m - 1) / (l - m);
-          
+
           derivatives[idx] = a * (
             this._legendreBuffer[idx_l1] + cosT * derivatives[idx_l1]
           ) - b * derivatives[idx_l2];
         }
       }
     }
-    
+
     // 转换：∂/∂x → ∂/∂θ
     // ∂/∂θ = ∂x/∂θ * ∂/∂x = -sin(θ) * ∂/∂x
     for (let i = 0; i < size; i++) {
       derivatives[i] *= -sinT;
     }
-    
+
     return derivatives;
   }
 
@@ -909,7 +909,7 @@ class SphericalHarmonics {
     const cosT = Math.cos(theta);
     const sinP = Math.sin(phi);
     const cosP = Math.cos(phi);
-    
+
     // ⭐ 修正：极点处理（θ ≈ 0 或 π）
     const POLE_THRESHOLD = 1e-8;
     if (Math.abs(sinT) < POLE_THRESHOLD) {
@@ -920,32 +920,32 @@ class SphericalHarmonics {
         z: cosT
       };
     }
-    
+
     // 计算半径和梯度
     const r = this.evaluate(coeffs, theta, phi);
     const { dr_dtheta, dr_dphi } = this.evaluateGradient(coeffs, theta, phi);
-    
+
     // 表面参数化：
     // r⃗(θ, φ) = [r sin(θ) cos(φ), r sin(θ) sin(φ), r cos(θ)]
-    
+
     // 切向量 ∂r⃗/∂θ
     const drdt_x = dr_dtheta * sinT * cosP + r * cosT * cosP;
     const drdt_y = dr_dtheta * sinT * sinP + r * cosT * sinP;
     const drdt_z = dr_dtheta * cosT - r * sinT;
-    
+
     // 切向量 ∂r⃗/∂φ
     const drdp_x = -r * sinT * sinP + dr_dphi * sinT * cosP;
     const drdp_y = r * sinT * cosP + dr_dphi * sinT * sinP;
     const drdp_z = dr_dphi * cosT;
-    
+
     // 外法线：n⃗ = ∂r⃗/∂θ × ∂r⃗/∂φ
     let nx = drdt_y * drdp_z - drdt_z * drdp_y;
     let ny = drdt_z * drdp_x - drdt_x * drdp_z;
     let nz = drdt_x * drdp_y - drdt_y * drdp_x;
-    
+
     // 归一化
     const mag = Math.sqrt(nx * nx + ny * ny + nz * nz);
-    
+
     if (mag < 1e-10) {
       // 退化情况：返回径向法线
       return {
@@ -954,11 +954,11 @@ class SphericalHarmonics {
         z: cosT
       };
     }
-    
+
     nx /= mag;
     ny /= mag;
     nz /= mag;
-    
+
     return { x: nx, y: ny, z: nz };
   }
 
@@ -982,20 +982,20 @@ class SphericalHarmonics {
     const dy = y - center.y;
     const dz = z - center.z;
     const rCart = Math.sqrt(dx * dx + dy * dy + dz * dz);
-    
+
     if (rCart < 1e-10) {
       // 点在中心：必定在内部
       const r0 = this.evaluate(coeffs, 0, 0);
       return -r0;
     }
-    
+
     // 计算球坐标
     const theta = Math.acos(Math.max(-1, Math.min(1, dz / rCart)));
     const phi = Math.atan2(dy, dx);
-    
+
     // 球谐半径
     const rSH = this.evaluate(coeffs, theta, phi);
-    
+
     // ⭐ 简化符号距离：r_point - r_surface
     // 注意：这是近似值，非真实最短距离（但速度快）
     return rCart - rSH;
@@ -1027,13 +1027,13 @@ class SphericalHarmonics {
   projectToSurface(coeffs, x, y, z, center = { x: 0, y: 0, z: 0 }, options = {}) {
     const maxIter = options.maxIter ?? 20;
     const tolerance = options.tolerance ?? 1e-6;
-    
+
     // 转换到相对坐标
     const dx = x - center.x;
     const dy = y - center.y;
     const dz = z - center.z;
     const rCart = Math.sqrt(dx * dx + dy * dy + dz * dz);
-    
+
     // 特殊情况：点在中心
     if (rCart < 1e-10) {
       const r0 = this.evaluate(coeffs, 0, 0);
@@ -1046,18 +1046,18 @@ class SphericalHarmonics {
         phi: Math.PI / 2
       };
     }
-    
+
     // 初始猜测：径向投影
     let theta = Math.acos(Math.max(-1, Math.min(1, dz / rCart)));
     let phi = Math.atan2(dy, dx);
-    
+
     // ⭐ 修正：极点附近避免优化（直接返回径向投影）
     const POLE_THRESHOLD = 1e-6;
     const sinTheta = Math.sin(theta);
     if (Math.abs(sinTheta) < POLE_THRESHOLD) {
       const r = this.evaluate(coeffs, theta, phi);
       const sign = Math.cos(theta) > 0 ? 1 : -1;
-      
+
       return {
         point: { x: center.x, y: center.y, z: center.z + sign * r },
         normal: { x: 0, y: 0, z: sign },
@@ -1067,43 +1067,43 @@ class SphericalHarmonics {
         phi: 0
       };
     }
-    
+
     // 梯度下降优化
     let bestDist = Infinity;
     let bestTheta = theta;
     let bestPhi = phi;
-    
+
     for (let iter = 0; iter < maxIter; iter++) {
       // 当前表面点
       const r = this.evaluate(coeffs, theta, phi);
-      
+
       const sinT = Math.sin(theta);
       const cosT = Math.cos(theta);
       const sinP = Math.sin(phi);
       const cosP = Math.cos(phi);
-      
+
       const sx = center.x + r * sinT * cosP;
       const sy = center.y + r * sinT * sinP;
       const sz = center.z + r * cosT;
-      
+
       // 距离向量
       const vx = x - sx;
       const vy = y - sy;
       const vz = z - sz;
       const dist = Math.sqrt(vx * vx + vy * vy + vz * vz);
-      
+
       // 记录最佳点
       if (dist < bestDist) {
         bestDist = dist;
         bestTheta = theta;
         bestPhi = phi;
       }
-      
+
       // 检查收敛
       if (dist < tolerance) {
         const normal = this.computeSurfaceNormal(coeffs, theta, phi, center);
         const penetration = (rCart < r) ? -(r - rCart) : (rCart - r);
-        
+
         return {
           point: { x: sx, y: sy, z: sz },
           normal,
@@ -1113,57 +1113,57 @@ class SphericalHarmonics {
           phi
         };
       }
-      
+
       // ⭐ 修正：检查极点附近（停止优化）
       if (Math.abs(Math.sin(theta)) < POLE_THRESHOLD) {
         break;
       }
-      
+
       // 计算梯度
       const { dr_dtheta, dr_dphi } = this.evaluateGradient(coeffs, theta, phi);
-      
+
       // 表面点关于 (θ, φ) 的导数
       const ds_dtheta_x = dr_dtheta * sinT * cosP + r * cosT * cosP;
       const ds_dtheta_y = dr_dtheta * sinT * sinP + r * cosT * sinP;
       const ds_dtheta_z = dr_dtheta * cosT - r * sinT;
-      
+
       const ds_dphi_x = -r * sinT * sinP + dr_dphi * sinT * cosP;
       const ds_dphi_y = r * sinT * cosP + dr_dphi * sinT * sinP;
       const ds_dphi_z = dr_dphi * cosT;
-      
+
       // 距离平方的梯度：∂(||v||²)/∂θ = -2 v · ∂s/∂θ
       const grad_theta = -2 * (vx * ds_dtheta_x + vy * ds_dtheta_y + vz * ds_dtheta_z);
       const grad_phi = -2 * (vx * ds_dphi_x + vy * ds_dphi_y + vz * ds_dphi_z);
-      
+
       // ⭐ 修正：自适应步长（更激进的衰减）
       const stepSize = 0.1 / (1 + iter * 0.2);
-      
+
       theta -= stepSize * grad_theta;
       phi -= stepSize * grad_phi;
-      
+
       // ⭐ 修正：边界约束（避免极点）
       theta = Math.max(POLE_THRESHOLD, Math.min(Math.PI - POLE_THRESHOLD, theta));
       phi = phi % (2 * Math.PI);
       if (phi < 0) phi += 2 * Math.PI;
     }
-    
+
     // 未收敛：返回最佳估计
     theta = bestTheta;
     phi = bestPhi;
-    
+
     const r = this.evaluate(coeffs, theta, phi);
     const sinT = Math.sin(theta);
     const cosT = Math.cos(theta);
     const sinP = Math.sin(phi);
     const cosP = Math.cos(phi);
-    
+
     const sx = center.x + r * sinT * cosP;
     const sy = center.y + r * sinT * sinP;
     const sz = center.z + r * cosT;
-    
+
     const normal = this.computeSurfaceNormal(coeffs, theta, phi, center);
     const penetration = (rCart < r) ? -(r - rCart) : (rCart - r);
-    
+
     return {
       point: { x: sx, y: sy, z: sz },
       normal,
@@ -1196,33 +1196,33 @@ class SphericalHarmonics {
     const thetaSteps = options.thetaSteps ?? 20;
     const phiSteps = options.phiSteps ?? 40;
     const includeNormals = options.includeNormals ?? false;
-    
+
     const points = [];
     const normals = [];
     const topology = {
       triangles: [],
       edges: []
     };
-    
+
     // 采样网格
     for (let i = 0; i <= thetaSteps; i++) {
       for (let j = 0; j < phiSteps; j++) {
         const theta = (i / thetaSteps) * Math.PI;
         const phi = (j / phiSteps) * 2 * Math.PI;
-        
+
         // 计算表面点
         const r = this.evaluate(coeffs, theta, phi);
         const sinT = Math.sin(theta);
         const cosT = Math.cos(theta);
         const sinP = Math.sin(phi);
         const cosP = Math.cos(phi);
-        
+
         points.push({
           x: center.x + r * sinT * cosP,
           y: center.y + r * sinT * sinP,
           z: center.z + r * cosT
         });
-        
+
         // 可选：计算法线
         if (includeNormals) {
           const normal = this.computeSurfaceNormal(coeffs, theta, phi, center);
@@ -1230,7 +1230,7 @@ class SphericalHarmonics {
         }
       }
     }
-    
+
     // 生成拓扑（三角化）
     for (let i = 0; i < thetaSteps; i++) {
       for (let j = 0; j < phiSteps; j++) {
@@ -1238,17 +1238,17 @@ class SphericalHarmonics {
         const idx1 = i * phiSteps + ((j + 1) % phiSteps);
         const idx2 = (i + 1) * phiSteps + ((j + 1) % phiSteps);
         const idx3 = (i + 1) * phiSteps + j;
-        
+
         // 两个三角形
         topology.triangles.push([idx0, idx1, idx2]);
         topology.triangles.push([idx0, idx2, idx3]);
-        
+
         // 边（去重）
         topology.edges.push([idx0, idx1]);
         topology.edges.push([idx0, idx3]);
       }
     }
-    
+
     return {
       points,
       normals: includeNormals ? normals : null,
@@ -1268,7 +1268,7 @@ class SphericalHarmonics {
    */
   getMaterialAtPosition(coeffs, position, center = { x: 0, y: 0, z: 0 }) {
     let theta, phi;
-    
+
     if (position.theta !== undefined && position.phi !== undefined) {
       // 直接提供球坐标
       theta = position.theta;
@@ -1279,7 +1279,7 @@ class SphericalHarmonics {
       const dy = position.y - center.y;
       const dz = position.z - center.z;
       const r = Math.sqrt(dx * dx + dy * dy + dz * dz);
-      
+
       if (r < 1e-10) {
         theta = 0;
         phi = 0;
@@ -1288,7 +1288,7 @@ class SphericalHarmonics {
         phi = Math.atan2(dy, dx);
       }
     }
-    
+
     // 默认材料属性（均匀）
     // 实际应用中可根据 (theta, phi) 返回不同属性
     return {
@@ -1302,4 +1302,8 @@ class SphericalHarmonics {
 // 导出
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = SphericalHarmonics;
+} else if (typeof window !== 'undefined') {
+  window.SphericalHarmonics = SphericalHarmonics;
 }
+
+export { SphericalHarmonics };
