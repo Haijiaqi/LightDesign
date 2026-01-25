@@ -447,7 +447,7 @@ export class Window {
     // 局部格网点与普通点一样处理，不做特殊跳过
 
     // 基础亮度（所有情况的保底值）- 提升到 0.5 确保暗部清晰可见
-    const BASE_AMBIENT = 0.8;
+    const BASE_AMBIENT = 0.7;
 
     // 初始亮度
     point.light = 0.4;

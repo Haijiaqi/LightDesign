@@ -300,6 +300,49 @@ class OverlaySystemImpl {
                     }
                 }
             }
+
+            // ===== C. [新增] 屏幕平面近点高亮 (PLANE_NEAR) =====
+            // 独立于 SLICE_CONTOUR，使用更小的阈值，表示"几乎在屏幕平面上"的点
+            {
+                const dir = win.direction;
+                const planePt = dir.start;
+                const threshold = EditConfig.planeHighlightThreshold;
+
+                // 处理 displayPoints（视觉渲染点）
+                const points = (obj.displayPoints && obj.displayPoints.length > 0)
+                    ? obj.displayPoints
+                    : obj.constructionPoints;
+
+                if (points && points.length > 0) {
+                    // 性能保护：如果是非常大的点云，可能需要降采样或优化，但通常 displayPoints 数量可控
+                    const maxPoints = Math.min(points.length, 5000);
+
+                    for (let i = 0; i < maxPoints; i++) {
+                        const p = points[i];
+
+                        // 跳过无效屏幕坐标的点 (未被投影或在屏幕外太远)
+                        if (!p.xM || !p.yM) continue;
+
+                        // 计算点到屏幕平面的垂直距离
+                        const dist = (p.x - planePt.x) * dir.x +
+                            (p.y - planePt.y) * dir.y +
+                            (p.z - planePt.z) * dir.z;
+
+                        if (Math.abs(dist) < threshold) {
+                            // 复制为屏幕辅助元素
+                            // tag = null 使用默认紫色渲染 (main.js renderOverlayPoints)
+                            const light = 0.95; // 高亮度
+                            me.addPoint(
+                                p.xM, p.yM,
+                                p.xL || p.xM, p.xR || p.xM,  // 保留视差
+                                p.yL || p.yM, p.yR || p.yM,
+                                null,
+                                light
+                            );
+                        }
+                    }
+                }
+            }
         });
 
         // 核心优化：直接渲染到 Buffer
