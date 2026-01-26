@@ -1,42 +1,40 @@
-# 球谐拟合自适应阶数确定方案 (v2.4)
+# 球谐拟合自适应阶数确定方案 (v3.0 结构计数版)
 
 > **状态**: 待评审  
 > **日期**: 2026-01-26  
-> **版本**: v2.4 (正则分阶衰减、判据角色调整、结构事件判据)
+> **版本**: v3.0 (全局结构计数主导)
 
 ---
 
-## 〇、版本演进记录
+## 〇、核心思想（用户原话复述）
 
-| 版本 | 核心变化 |
-|------|---------|
-| v2.0 | 两阶段框架 |
-| v2.1 | 整改：非轴对称、回退策略 |
-| v2.2 | 补充：角向变化、局部性、覆盖度 |
-| v2.3 | 优化：尺度归一化、阶间差异、区间输出 |
-| **v2.4** | 调整：正则分阶、判据角色、结构事件判据 |
-
----
-
-## 〇、v2.4 调整摘要
-
-| # | 调整内容 | 说明 |
-|---|---------|------|
-| 1 | λ_structure 分阶衰减 | 高 l 强正则，低 l 弱正则 |
-| 2 | Ṽ_l 降级为辅助主判据 | 不得单独否决，必须与 R_E 联合 |
-| 3 | Δr_l 联合零交叉判据 | 拓扑复杂度指标 |
-| 4 | **新增结构事件判据** | "这一阶有没有引入新的角向事件？" |
+> **多项式类比**：
+> 1. 先拟合到最高阶
+> 2. 计算拟合多项式的导数
+> 3. 数"导数为零（且二阶导不为零）"的点 = 拐点数
+> 4. 拐点数 + 1 = 最合适的阶数
+>
+> **直觉**：如果四次函数也只拐一个弯，还不如用二次函数拟合。
 
 ---
 
-## 一、必须保留（不可删除）
+## 〇、v3.0 与之前版本的核心区别
 
-- ✅ 两阶段结构（A 判阶 + B 稳定拟合）
-- ✅ 一次性高阶拟合
-- ✅ 能量谱 E_l
-- ✅ 结构区间 `{ min, max }` 而非单值
-- ✅ Stage B 条件数主导
-- ✅ 非轴对称能量判据
+| 方面 | v2.4 (旧) | v3.0 (新) |
+|------|----------|----------|
+| **判阶方式** | 从 L=1 开始，逐阶检查能量/变化是否"低于阈值" | 先拟合 L_max，从完整结果**反推"拐弯次数"** |
+| **主判据** | 能量比 R_E < 阈值 | **全局结构计数 S_total → L_direct** |
+| **计算顺序** | 低阶 → 高阶（逐阶累积） | **高阶先行，一步到位** |
+| **能量/变化判据** | 主判据 | **降级为辅助约束** |
+
+---
+
+## 一、总体原则
+
+1. **先拟合最高阶，再从结果反推阶数**（核心改动）
+2. 阶数判定与最终拟合必须分离
+3. 最终拟合阶段必须数值稳定
+4. 阶段 B（条件数控制）完全不变
 
 ---
 
@@ -44,364 +42,261 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    阶段 A：结构判阶                          │
+│                    阶段 A：结构判阶（v3.0）                  │
 │                                                             │
-│  A.0 计算角向覆盖度 → effectiveN                            │
 │  A.1 计算候选最高阶 L_max                                   │
-│  A.2 [v2.4] 分阶正则拟合（λ 随 l 衰减）                     │
-│  A.3 计算各阶能量谱 E_l                                     │
-│  A.4 计算归一化角向变化 Ṽ_l                                 │
-│  A.5 计算阶间结构差异 Δr_l                                  │
-│  A.6 [v2.4 新增] 计算结构事件判据                           │
-│  A.7 综合判据 → { L_min, L_max }                            │
+│  A.2 一次性拟合到 L_max（分阶正则）                         │
+│  A.3 [核心] 全局角向结构计数 → S_total                      │
+│  A.4 [核心] 结构计数 → 阶数映射 → L_direct                  │
+│  A.5 [辅助] 能量/变化停阶（降级为约束）                     │
+│  A.6 综合 → [L_min_struct, L_max_struct]                    │
 └─────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────┐
 │                    阶段 B：稳定拟合（不变）                  │
+│                                                             │
+│  B.1 在 [L_min_struct, L_max_struct] 逐阶拟合               │
+│  B.2 主判据：条件数                                         │
+│  B.3 → L_final                                              │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 三、阶段 A：结构判阶
+## 三、阶段 A：结构判阶（v3.0 详细设计）
 
-### A.2 [v2.4 修正] 分阶正则拟合
+### A.1~A.2 不变
 
-#### 问题
-
-v2.3 使用固定 λ_structure = 1e-5：
-- 低阶被过度正则 → 能量被压缩
-- 高阶正则不够 → 数值不稳定
-
-#### 修正：分阶衰减正则
-
-**核心思想**：让正则强度随阶数调整，低阶弱正则（保留真实能量），高阶强正则（抑制数值爆炸）。
-
-**公式**：
-
-$$\lambda(l) = \lambda_{base} \cdot \left(1 + \alpha \cdot l^2\right)$$
-
-其中：
-- `λ_base = 1e-7`（基础正则）
-- `α = 0.01`（增长系数）
-
-**效果**：
-| l | λ(l) |
-|---|------|
-| 0 | 1e-7 |
-| 5 | 3.5e-7 |
-| 10 | 1.1e-6 |
-| 15 | 3.2e-6 |
-
-**实现**：
-
-```javascript
-/**
- * 分阶正则拟合
- * 对每一阶使用不同的 λ，然后合并系数
- */
-function fitWithGradedRegularization(positions, shInstance, fitterInstance, L_max, options = {}) {
-    const lambda_base = options.lambda_base ?? 1e-7;
-    const alpha = options.alpha ?? 0.01;
-    const center = { x: 0, y: 0, z: 0 };
-    
-    // 仍然一次性拟合，但使用分阶权重矩阵
-    // 实现方式：对 A^T A 的对角块施加不同的 λ
-    
-    const design = shInstance.buildDesignMatrix(positions, center, { order: L_max });
-    const A = ParametricImpl._designToRowArray(design);
-    const b = Array.from(design.b);
-    const m = A.length;
-    const n = A[0].length;
-    
-    // 构建 A^T A
-    const ATA = [];
-    for (let i = 0; i < n; i++) {
-        ATA[i] = new Array(n).fill(0);
-    }
-    for (let i = 0; i < n; i++) {
-        for (let j = 0; j < n; j++) {
-            let sum = 0;
-            for (let k = 0; k < m; k++) {
-                sum += A[k][i] * A[k][j];
-            }
-            ATA[i][j] = sum;
-        }
-    }
-    
-    // 分阶添加正则项
-    let coeffIdx = 0;
-    for (let l = 0; l <= L_max; l++) {
-        const lambda_l = lambda_base * (1 + alpha * l * l);
-        const numCoeffsInLevel = 2 * l + 1;
-        
-        for (let m = 0; m < numCoeffsInLevel; m++) {
-            ATA[coeffIdx][coeffIdx] += lambda_l;
-            coeffIdx++;
-        }
-    }
-    
-    // 构建 A^T b 并求解
-    const ATb = new Array(n).fill(0);
-    for (let i = 0; i < n; i++) {
-        for (let k = 0; k < m; k++) {
-            ATb[i] += A[k][i] * b[k];
-        }
-    }
-    
-    const coefficients = fitterInstance._choleskySolve(ATA, ATb, n);
-    
-    return { coefficients };
-}
-```
+（候选 L_max、分阶正则拟合，与 v2.4 相同）
 
 ---
 
-### A.4/A.5 判据角色调整
+### A.3 [核心] 全局角向结构计数
 
-#### [v2.4] 判据分类
+#### 目的
 
-| 判据 | 角色 | v2.3 | v2.4 |
-|------|------|------|------|
-| 能量比 R_E | **主判据** | ✓ | ✓ |
-| 归一化变化比 R_V | 主判据 | ✓ | **辅助主判据** |
-| 非轴对称比 | 辅助否决 | ✓ | ✓ |
-| 阶间结构差异 | 辅助否决 | ✓ | **联合零交叉** |
-| **结构事件判据** | — | — | **新增** |
+不问"这一阶能量多不多"，而是直接问：
+> **"这个函数在球面上到底发生了多少次独立的起伏/弯折？"**
 
-#### R_V 降级说明
-
-v2.3 中 R_V 与 R_E 并列为主判据，存在问题：
-- V_l 仍有采样依赖（即使归一化）
-- 单独使用可能误判
-
-**v2.4 调整**：
-- R_V **不得单独否决**
-- 必须与 R_E 联合判断
-- 逻辑：`(R_E < threshold) AND (R_V < threshold)` → 可能停阶
-
----
-
-### A.6 [v2.4 新增] 结构事件判据
-
-#### 设计目标
-
-明确回答：**"这一阶有没有引入新的角向事件？"**
-
-#### "角向事件"定义
-
-| 事件类型 | 数学定义 | 物理意义 |
-|---------|---------|---------|
-| 零交叉 | r_l(θ,φ) = 0 的次数 | 正负交替次数 |
-| 极值点 | ∇r_l = 0 的点数 | 凸起/凹陷数量 |
-| 拓扑变化 | 等高线拓扑复杂度 | 形状复杂度 |
-
-#### 工程实现：零交叉计数
+#### 方法：角向符号变化计数
 
 ```javascript
 /**
- * 计算阶 l 在球面采样点上的零交叉次数
+ * 计算球面函数的全局角向起伏次数
  * 
- * "零交叉"：相邻采样点的 r_l 符号改变
+ * 思想：在球面上生成规则角网格，沿 θ 和 φ 方向统计符号变化
  * 
- * @returns {number} 零交叉次数（归一化到采样点数）
+ * @param {Float64Array} coeffs_full - 完整系数（到 L_max）
+ * @param {object} shInstance - SphericalHarmonics 实例
+ * @param {object} options
+ *   - thetaSteps: θ方向采样数，默认 64
+ *   - phiSteps: φ方向采样数，默认 128
+ * @returns {number} S_total - 平均角向起伏次数
  */
-function computeZeroCrossings(coeffs_full, l, sphericalCache, shInstance) {
-    if (l === 0) return 0;
+function computeGlobalStructureCount(coeffs_full, shInstance, options = {}) {
+    const thetaSteps = options.thetaSteps ?? 64;
+    const phiSteps = options.phiSteps ?? 128;
     
-    // 1. 提取阶 l 的系数
-    const startIdx = l * l;
-    const endIdx = (l + 1) * (l + 1);
-    const coeffs_l = new Array(endIdx).fill(0);
-    for (let i = startIdx; i < endIdx; i++) {
-        coeffs_l[i] = coeffs_full[i];
+    // 1. 在规则网格上计算函数值
+    const grid = []; // grid[i][j] = r(θ_i, φ_j)
+    for (let i = 0; i < thetaSteps; i++) {
+        const theta = (i + 0.5) / thetaSteps * Math.PI; // 避免极点
+        grid[i] = [];
+        for (let j = 0; j < phiSteps; j++) {
+            const phi = j / phiSteps * 2 * Math.PI;
+            grid[i][j] = shInstance.evaluate(coeffs_full, theta, phi);
+        }
     }
     
-    // 2. 在采样点上计算该阶的重建值
-    const r_l = sphericalCache.map(({ theta, phi }) => 
-        shInstance.evaluate(coeffs_l, theta, phi)
-    );
-    
-    // 3. 统计相邻点的符号变化
-    const K = 6; // 每个点检查 K 个邻居
-    let zeroCrossings = 0;
-    
-    for (let i = 0; i < sphericalCache.length; i++) {
-        const neighbors = findKNearestOnSphere(sphericalCache, i, K);
-        const sign_i = Math.sign(r_l[i]);
-        
-        if (sign_i === 0) {
-            zeroCrossings += K; // 恰好为零，算作多次交叉
-        } else {
-            for (const j of neighbors) {
-                if (Math.sign(r_l[j]) !== sign_i) {
-                    zeroCrossings++;
+    // 2. 沿 φ 方向统计符号变化（固定 θ）
+    let signChanges_phi = 0;
+    for (let i = 0; i < thetaSteps; i++) {
+        for (let j = 0; j < phiSteps; j++) {
+            const curr = grid[i][j];
+            const next = grid[i][(j + 1) % phiSteps]; // φ 周期性
+            if (Math.sign(curr) !== 0 && Math.sign(next) !== 0) {
+                if (Math.sign(curr) !== Math.sign(next)) {
+                    signChanges_phi++;
                 }
             }
         }
     }
     
-    // 归一化：除以总邻居对数
-    return zeroCrossings / (sphericalCache.length * K);
-}
-
-/**
- * 结构事件判据
- * 
- * @returns {boolean} true = 该阶引入了新的角向事件
- */
-function hasStructuralEvent(coeffs_full, l, sphericalCache, shInstance, options = {}) {
-    const threshold_zc = options.threshold_zeroCrossing ?? 0.05;
-    
-    // 计算零交叉率
-    const zc_l = computeZeroCrossings(coeffs_full, l, sphericalCache, shInstance);
-    
-    // 计算累积零交叉（前 l-1 阶）
-    let zc_cumulative = 0;
-    for (let k = 1; k < l; k++) {
-        zc_cumulative += computeZeroCrossings(coeffs_full, k, sphericalCache, shInstance);
+    // 3. 沿 θ 方向统计符号变化（固定 φ）
+    let signChanges_theta = 0;
+    for (let j = 0; j < phiSteps; j++) {
+        for (let i = 0; i < thetaSteps - 1; i++) {
+            const curr = grid[i][j];
+            const next = grid[i + 1][j];
+            if (Math.sign(curr) !== 0 && Math.sign(next) !== 0) {
+                if (Math.sign(curr) !== Math.sign(next)) {
+                    signChanges_theta++;
+                }
+            }
+        }
     }
     
-    // 判断：该阶是否显著增加了零交叉
-    const zc_ratio = zc_cumulative > 1e-10 ? zc_l / zc_cumulative : (zc_l > 0 ? 1 : 0);
+    // 4. 归一化：平均每圈的符号变化次数
+    const avgChanges_phi = signChanges_phi / thetaSteps;  // 每条 θ 线的平均
+    const avgChanges_theta = signChanges_theta / phiSteps; // 每条 φ 线的平均
     
-    return zc_ratio >= threshold_zc;
+    // 5. 合并两个方向（取平均）
+    const S_total = (avgChanges_phi + avgChanges_theta) / 2;
+    
+    return S_total;
 }
+```
+
+#### 与多项式类比
+
+| 多项式 | 球谐 |
+|-------|------|
+| 拟合一次 | 拟合到 L_max |
+| 求导 | 角向差分 |
+| 数拐点（导数=0） | 数符号变化（函数过零） |
+| 拐点数 + 1 | **S_total → L_direct** |
+
+---
+
+### A.4 [核心] 结构计数 → 阶数映射
+
+#### 经验规则
+
+球谐阶数 $l$ 大约能表示 $\sim l$ 次角向振荡。
+
+因此：
+
+$$L_{direct} = \lceil S_{total} / c \rceil$$
+
+其中 $c \approx 2 \sim 3$（经验系数，球面双方向平均）。
+
+```javascript
+const c = 2.5; // 经验系数
+const L_direct = Math.ceil(S_total / c);
+```
+
+#### 边界保护
+
+```javascript
+L_direct = Math.max(1, Math.min(L_max, L_direct));
 ```
 
 ---
 
-### A.7 综合判据逻辑（v2.4 最终版）
+### A.5 [辅助] 能量/变化停阶（降级为约束）
+
+**保留但降级**以下判据：
+
+- 能量谱 E_l
+- 归一化变化 Ṽ_l
+- 非轴对称能量
+- 阶间结构差异
+
+它们的新角色是：**对 L_direct 的合理性约束**，而不是阶数来源。
 
 ```javascript
-// 阈值
-const threshold_energy = 1e-4;
-const threshold_variation = 1e-4;
-const threshold_nonaxial = 1e-5;
-const threshold_zeroCrossing = 0.05;
-const minConsecutive = 2;
-
-// 初始化
-let L_max_struct = 0;
-let L_min_struct = null;
-let cumulativeEnergy = energies[0];
-let cumulativeVariation = normalizedVariations[0];
-let consecutiveBelowThreshold = 0;
+// 从能量判据得到的停阶点（作为参考）
+let L_energy_stop = L_max;
+let cumulativeEnergy = Math.max(energies[0], 1e-12);
 
 for (let l = 1; l <= L_max; l++) {
-    // ========== 主判据（必须联合满足）==========
-    
-    // 能量比
-    const R_E = cumulativeEnergy > 1e-15 ? energies[l] / cumulativeEnergy : 0;
-    
-    // 归一化变化比（辅助主判据，不得单独否决）
-    const R_V = cumulativeVariation > 1e-15 ? normalizedVariations[l] / cumulativeVariation : 0;
-    
-    // 主判据结果：能量 AND 变化 都低于阈值
-    // 注意：R_V 不得单独否决，但可以阻止停阶
-    const primaryBelowThreshold = (R_E < threshold_energy) && (R_V < threshold_variation);
-    
-    // ========== 辅助判据（任一触发则延迟停阶）==========
-    
-    // 非轴对称能量
-    const E_nonaxial = computeNonAxialEnergy(coeffs_structure, l);
-    const R_nonaxial = cumulativeEnergy > 1e-15 ? E_nonaxial / cumulativeEnergy : 0;
-    const nonAxialVeto = (R_nonaxial >= threshold_nonaxial);
-    
-    // 阶间结构差异 + 零交叉联合判据
-    const { hasStructure: interOrderStructure } = computeInterOrderDelta(coeffs_structure, l, sphericalCache, shInstance);
-    const hasEvent = hasStructuralEvent(coeffs_structure, l, sphericalCache, shInstance, { threshold_zeroCrossing });
-    const structuralVeto = interOrderStructure || hasEvent;
-    
-    // ========== 综合判定 ==========
-    
-    // 记录第一次辅助否决触发的位置
-    if ((nonAxialVeto || structuralVeto) && L_min_struct === null) {
-        L_min_struct = l;
-    }
-    
-    // 是否停阶
-    if (primaryBelowThreshold && !nonAxialVeto && !structuralVeto) {
-        consecutiveBelowThreshold++;
-        if (consecutiveBelowThreshold >= minConsecutive) {
-            L_max_struct = l - minConsecutive;
+    const R_E = energies[l] / cumulativeEnergy;
+    if (R_E < threshold_energy) {
+        // 连续两次低于阈值
+        if (++consecutiveCount >= 2) {
+            L_energy_stop = l - 2;
             break;
         }
     } else {
-        consecutiveBelowThreshold = 0;
-        L_max_struct = l;
+        consecutiveCount = 0;
     }
-    
     cumulativeEnergy += energies[l];
-    cumulativeVariation += normalizedVariations[l];
 }
 
-// 边界处理
-L_max_struct = Math.max(1, L_max_struct);
-L_min_struct = L_min_struct ?? 1;
-L_min_struct = Math.min(L_min_struct, L_max_struct);
-
-return { min: L_min_struct, max: L_max_struct };
+// 从变化判据得到的停阶点
+// (类似逻辑)
+let L_variation_stop = ...;
 ```
 
 ---
 
-## 四、判据角色总结（v2.4 最终）
+### A.6 综合判定
 
-```
-主判据（必须联合满足才可能停阶）
-├── 能量比 R_E < 1e-4                    [主]
-└── 归一化变化比 R_V < 1e-4              [辅助主，不得单独否决]
+```javascript
+// 主判据：结构计数
+const L_direct = Math.ceil(S_total / c);
 
-辅助否决（任一触发则延迟停阶）
-├── 非轴对称能量比 R_nonaxial ≥ 1e-5
-└── 结构性判据（联合）
-    ├── 阶间结构差异 hasStructure
-    └── 结构事件判据 hasEvent (零交叉)    [v2.4新增]
+// 辅助约束
+const L_energy_stop = ...; // 能量停阶点
+const L_variation_stop = ...; // 变化停阶点
 
-输出
-└── structureRange = { min, max }
+// 结构区间
+const L_min_struct = Math.min(L_direct, Math.min(L_energy_stop, L_variation_stop));
+const L_max_struct = Math.max(L_direct, Math.max(L_energy_stop, L_variation_stop));
+
+// 边界保护
+L_min_struct = Math.max(1, L_min_struct);
+L_max_struct = Math.min(L_max, L_max_struct);
 ```
 
 ---
 
-## 五、新增/修改方法清单
+## 四、阶段 B：稳定拟合（完全不变）
 
-| 方法 | 位置 | 变化 |
+与 v2.4 完全相同：
+
+1. 在 `[L_min_struct, L_max_struct]` 区间逐阶拟合
+2. 主判据：条件数 < 阈值
+3. 选择满足条件的最大阶数 → L_final
+
+**一行都不改。**
+
+---
+
+## 五、输出
+
+```javascript
+{
+    L_direct,      // 来自"全局结构计数"（主判据）
+    L_energy_stop, // 能量停阶点（辅助）
+    L_variation_stop, // 变化停阶点（辅助）
+    structureRange: { min: L_min_struct, max: L_max_struct },
+    bestOrder: L_final,
+    S_total,       // 全局起伏次数（诊断用）
+    diagnostics
+}
+```
+
+---
+
+## 六、预期效果
+
+| 形状 | S_total | L_direct | 说明 |
+|------|---------|----------|------|
+| 完美球体 | ~0 | 1 | 几乎无角向振荡 |
+| 椭球 | ~2 | 1~2 | 一次起伏 |
+| 立方体 | ~8 | 3~4 | 多次棱角 |
+| 十字星 | ~12 | 5~6 | 6 个分支 |
+| 类圆柱 | ~4 | 2~3 | 两端起伏 |
+
+---
+
+## 七、与 v2.4 的对比
+
+| 方面 | v2.4 | v3.0 |
 |------|------|------|
-| `fitWithGradedRegularization()` | `ParametricImpl` | **v2.4新增** |
-| `computeZeroCrossings()` | `ParametricImpl` | **v2.4新增** |
-| `hasStructuralEvent()` | `ParametricImpl` | **v2.4新增** |
-| 其他 v2.3 方法 | - | 保持不变 |
-
----
-
-## 六、预期效果（v2.4）
-
-| 形状 | 问题场景 | v2.3 结果 | v2.4 修正 |
-|------|---------|----------|----------|
-| 类圆柱 | 端部有零交叉 | 可能漏判 | **结构事件捕捉** |
-| 香肠 | 两头高频 | [2, 8] | **更准确的区间** |
-| 局部凸起 | 单侧凸起=符号变化 | 可能漏判 | **零交叉检测** |
-| 球体 | 无事件 | [1, 1] | [1, 1] |
-
----
-
-## 七、禁止事项
-
-- ❌ R_V 不得单独否决（必须与 R_E 联合）
-- ❌ 不得使用固定 λ（必须分阶衰减）
-- ❌ 不得仅用 Δr_l（必须联合零交叉）
-- ❌ 阶段A失败时不得直接返回 L=1
-- ❌ 阶数确定过程中禁止使用增量拟合
+| 计算顺序 | L=1 → L_max | **L_max 先行** |
+| 主判据 | 能量比 < 阈值 | **结构计数 → L_direct** |
+| 能量/变化 | 主判据 | 辅助约束 |
+| 阶段 B | 不变 | 不变 |
 
 ---
 
 ## 八、待确认事项
 
-1. `α = 0.01` 正则增长系数是否合适？
-2. `threshold_zeroCrossing = 0.05` 是否过于敏感？
-3. 是否需要缓存各阶的零交叉计算结果？
+1. 经验系数 `c = 2.5` 是否合适？
+2. 网格分辨率 `64×128` 是否足够？
+3. 是否需要在极点附近加权？
 
 ---
 

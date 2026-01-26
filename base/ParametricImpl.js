@@ -756,8 +756,10 @@ export class ParametricImpl {
    * @param {class} Matrix - Matrix 类
    * @param {object} options
    * @returns {object}
+   *   - L_direct: 来自全局结构计数的阶数（主判据）
+   *   - S_total: 全局起伏次数
    *   - structureRange: { min, max } 结构阶数区间
-   *   - bestOrder: 最终使用阶数 (= L_final，兼容旧接口)
+   *   - bestOrder: 最终使用阶数 (= L_final)
    *   - diagnostics: { stageA, stageB }
    */
   static determineOptimalOrder(positions, shInstance, fitterInstance, Matrix, options = {}) {
@@ -765,135 +767,62 @@ export class ParametricImpl {
     const N = positions.length;
     const center = { x: 0, y: 0, z: 0 };
 
-    // 阈值配置
-    const threshold_energy = options.energyRatioThreshold ?? 1e-4;
-    const threshold_variation = options.variationThreshold ?? 1e-4;
-    const threshold_nonaxial = options.nonaxialThreshold ?? 1e-5;
-    const threshold_zeroCrossing = options.zeroCrossingThreshold ?? 0.05;
+    // 配置
     const condThreshold = options.conditionThreshold ?? 1e7;
-    const minConsecutive = options.minConsecutive ?? 2;
-
-    // 正则配置
     const lambda_base = options.lambda_base ?? 1e-7;
     const alpha = options.alpha ?? 0.01;
     const lambda_final = options.lambda_final ?? 1e-7;
+    const structureCoeff = options.structureCoeff ?? 1.5; // 结构计数→阶数系数
 
-    // 计算 L_max: (L_max + 1)² ≤ 0.5 * N
-    const theoreticalMax = Math.floor(Math.sqrt(0.5 * N)) - 1;
+    // 计算 L_max: (L_max + 1)² ≤ 0.8 * N （正则化可保证不爆）
+    const theoreticalMax = Math.floor(Math.sqrt(1 * N)) - 1;
     const L_max = Math.min(shInstance.maxOrder ?? 15, Math.max(1, theoreticalMax));
 
-    if (verbose) console.log(`[SH-Auto] Analysis started | N=${N} | L_max=${L_max}`);
+    if (verbose) console.log(`[SH-v3] N=${N} | L_max=${L_max}`);
 
     const diagnostics = { stageA: [], stageB: [] };
 
-    // ========== 阶段 A：结构判阶 ==========
+    // ========== 阶段 A：结构判阶（v3.0 核心） ==========
 
     // A.1 缓存球坐标
     const sphericalCache = ParametricImpl._buildSphericalCache(positions, shInstance, center);
 
-    // A.2 分阶正则拟合
-    let coeffs_structure;
+    // A.2 一次性拟合到 L_max（分阶正则）
+    let coeffs_full;
     try {
       const fitResult = ParametricImpl._fitWithGradedRegularization(
         positions, shInstance, fitterInstance, L_max, center, lambda_base, alpha
       );
-      coeffs_structure = fitResult.coefficients;
+      coeffs_full = fitResult.coefficients;
     } catch (err) {
-      if (verbose) console.log(`[SH-Auto] High-order fit failed, fallback to conservative.`);
+      if (verbose) console.log(`[SH-v3] High-order fit failed, fallback`);
       return ParametricImpl._fallbackConservative(positions, shInstance, fitterInstance, center, options);
     }
 
-    // A.3 计算各阶能量谱
-    const energies = [];
+    // A.3 [核心] 全局角向结构计数（数拐点，非零点）
+    const S_total = ParametricImpl._computeGlobalTurningPoints(coeffs_full, shInstance);
+
+    if (verbose) console.log(`[SH-v3] S_total (turning points) = ${S_total.toFixed(2)}`);
+
+    // A.4 [核心] 结构计数 → 阶数映射
+    // L_struct = ceil(S_total / c)，其中 c ≈ 2~3
+    let L_struct = Math.ceil(S_total / structureCoeff);
+    L_struct = Math.max(1, Math.min(L_max, L_struct));
+
+    if (verbose) console.log(`[SH-v3] L_struct = ceil(${S_total.toFixed(2)} / ${structureCoeff}) = ${L_struct}`);
+
+    // A.5 记录能量谱（仅诊断用）
     for (let l = 0; l <= L_max; l++) {
-      energies[l] = shInstance.computeLevelEnergy(coeffs_structure, l);
-      diagnostics.stageA.push({ order: l, energy: energies[l] });
+      const energy = shInstance.computeLevelEnergy(coeffs_full, l);
+      diagnostics.stageA.push({ order: l, energy });
     }
 
-    // A.4 计算归一化角向变化
-    const normalizedVariations = [0];
-    for (let l = 1; l <= L_max; l++) {
-      normalizedVariations[l] = ParametricImpl._computeNormalizedVariation(
-        coeffs_structure, l, sphericalCache, shInstance
-      );
-    }
+    // ========== 阶段 B：直接拟合 L_struct（简化） ==========
 
-    // A.5 综合判据确定结构区间
-    let L_max_struct = 0;
-    let L_min_struct = null;
-    // [FIX] 防止零累积导致所有形状判为同一结果
-    // 初始能量至少设为一个小正数，避免 0/0 情况
-    let cumulativeEnergy = Math.max(energies[0], 1e-12);
-    // 变化量从 0 开始，但在比值计算时特殊处理
-    let cumulativeVariation = 0;
-    let consecutiveBelowThreshold = 0;
+    let L_final = L_struct;
 
-    for (let l = 1; l <= L_max; l++) {
-      // 主判据：能量比
-      // [FIX] 当累积能量为 0 时，任何正能量都视为显著（返回 1 而非 0）
-      const R_E = cumulativeEnergy > 1e-15
-        ? energies[l] / cumulativeEnergy
-        : (energies[l] > 1e-15 ? 1.0 : 0);
-
-      // 辅助主判据：归一化变化比
-      // [FIX] 前几阶没有累积变化时，视当前阶变化为显著
-      const R_V = cumulativeVariation > 1e-15
-        ? normalizedVariations[l] / cumulativeVariation
-        : (normalizedVariations[l] > 1e-15 ? 1.0 : 0);
-
-      // 非轴对称能量
-      const E_nonaxial = ParametricImpl._computeNonAxialEnergy(coeffs_structure, l);
-      const R_nonaxial = cumulativeEnergy > 1e-15 ? E_nonaxial / cumulativeEnergy : 0;
-
-      // 结构事件判据（零交叉）
-      const hasEvent = ParametricImpl._hasStructuralEvent(
-        coeffs_structure, l, sphericalCache, shInstance, threshold_zeroCrossing
-      );
-
-      // 主判据结果
-      const primaryBelowThreshold = (R_E < threshold_energy) && (R_V < threshold_variation);
-
-      // 辅助否决
-      const nonAxialVeto = (R_nonaxial >= threshold_nonaxial);
-      const structuralVeto = hasEvent;
-
-      // 记录第一次辅助否决
-      if ((nonAxialVeto || structuralVeto) && L_min_struct === null) {
-        L_min_struct = l;
-      }
-
-      if (verbose) {
-        console.log(`[SH-Auto] L=${l} | R_E=${R_E.toExponential(1)} R_V=${R_V.toExponential(1)} | Veto: NA=${nonAxialVeto ? 'Y' : 'N'} Evt=${hasEvent ? 'Y' : 'N'}`);
-      }
-
-      // 综合判定
-      if (primaryBelowThreshold && !nonAxialVeto && !structuralVeto) {
-        consecutiveBelowThreshold++;
-        if (consecutiveBelowThreshold >= minConsecutive) {
-          L_max_struct = l - minConsecutive;
-          break;
-        }
-      } else {
-        consecutiveBelowThreshold = 0;
-        L_max_struct = l;
-      }
-
-      cumulativeEnergy += energies[l];
-      cumulativeVariation += normalizedVariations[l];
-    }
-
-    // 边界处理
-    L_max_struct = Math.max(1, L_max_struct);
-    L_min_struct = L_min_struct ?? 1;
-    L_min_struct = Math.min(L_min_struct, L_max_struct);
-
-    if (verbose) console.log(`[SH-Auto] Structure Range: [${L_min_struct}, ${L_max_struct}]`);
-
-    // ========== 阶段 B：稳定拟合 ==========
-
-    let L_final = L_min_struct;
-
-    for (let L = L_min_struct; L <= L_max_struct; L++) {
+    // 尝试用 L_struct 拟合，如果条件数过大则降阶
+    for (let L = L_struct; L >= 1; L--) {
       const design = shInstance.buildDesignMatrix(positions, center, { order: L });
       const A = ParametricImpl._designToRowArray(design);
       const b = Array.from(design.b);
@@ -902,30 +831,165 @@ export class ParametricImpl {
       try {
         fitResult = fitterInstance.fitWithRegularization(A, b, lambda_final);
       } catch (err) {
-        if (verbose) console.log(`[SH-Fit] L=${L}: Fit failed`);
-        break;
+        if (verbose) console.log(`[SH-Fit] L=${L}: Fit failed, try lower`);
+        continue;
       }
 
-      // 主判据：条件数
       if (fitResult.conditionUnregularized > condThreshold) {
-        if (verbose) console.log(`[SH-Fit] L=${L}: Condition number high (${fitResult.conditionUnregularized.toExponential(1)})`);
-        break;
+        if (verbose) console.log(`[SH-Fit] L=${L}: cond=${fitResult.conditionUnregularized.toExponential(1)} too high, try lower`);
+        continue;
       }
 
-      // 诊断记录
       const err = ParametricImpl._computeReconstructionErrorCached(sphericalCache, fitResult.coefficients, shInstance);
       diagnostics.stageB.push({ order: L, condition: fitResult.conditionUnregularized, error: err });
 
-      if (verbose) console.log(`[SH-Fit] L=${L} | cond=${fitResult.conditionUnregularized.toExponential(1)} | err=${err.toFixed(4)} ✓`);
+      if (verbose) console.log(`[SH-Fit] L=${L} | cond=${fitResult.conditionUnregularized.toExponential(1)} ✓`);
 
       L_final = L;
+      break; // 找到第一个稳定的阶数就停止
     }
 
     return {
-      structureRange: { min: L_min_struct, max: L_max_struct },
+      L_struct,      // 结构计数推导的阶数
+      S_total,       // 全局拐点数
       bestOrder: L_final,
       diagnostics
     };
+  }
+
+  /**
+   * [v3.0 核心] 计算球面函数的全局拐点数（差分符号变化）
+   * 
+   * 思想：r(θ,φ) 对于 star-shaped 始终为正，所以不能数零点
+   * 改为数"一阶差分的符号变化" = 极值点 = 拐点
+   * 
+   * 这对应多项式的"导数为零"判据
+   * 
+   * @private
+   */
+  static _computeGlobalTurningPoints(coeffs_full, shInstance, options = {}) {
+    const thetaSteps = options.thetaSteps ?? 32;
+    const phiSteps = options.phiSteps ?? 64;
+
+    // 1. 在规则网格上计算函数值
+    const grid = [];
+    for (let i = 0; i < thetaSteps; i++) {
+      const theta = (i + 0.5) / thetaSteps * Math.PI;
+      grid[i] = [];
+      for (let j = 0; j < phiSteps; j++) {
+        const phi = j / phiSteps * 2 * Math.PI;
+        grid[i][j] = shInstance.evaluate(coeffs_full, theta, phi);
+      }
+    }
+
+    // 2. 沿 φ 方向统计一阶差分符号变化（固定 θ）
+    // 差分符号变化 = 极值点 = 拐点
+    let turningPoints_phi = 0;
+    for (let i = 0; i < thetaSteps; i++) {
+      for (let j = 0; j < phiSteps; j++) {
+        const prev = grid[i][(j - 1 + phiSteps) % phiSteps];
+        const curr = grid[i][j];
+        const next = grid[i][(j + 1) % phiSteps];
+
+        const diff1 = curr - prev; // 左差分
+        const diff2 = next - curr; // 右差分
+
+        // 如果差分符号变化，说明有极值点
+        if (Math.sign(diff1) !== 0 && Math.sign(diff2) !== 0) {
+          if (Math.sign(diff1) !== Math.sign(diff2)) {
+            turningPoints_phi++;
+          }
+        }
+      }
+    }
+
+    // 3. 沿 θ 方向统计一阶差分符号变化（固定 φ）
+    let turningPoints_theta = 0;
+    for (let j = 0; j < phiSteps; j++) {
+      for (let i = 1; i < thetaSteps - 1; i++) {
+        const prev = grid[i - 1][j];
+        const curr = grid[i][j];
+        const next = grid[i + 1][j];
+
+        const diff1 = curr - prev;
+        const diff2 = next - curr;
+
+        if (Math.sign(diff1) !== 0 && Math.sign(diff2) !== 0) {
+          if (Math.sign(diff1) !== Math.sign(diff2)) {
+            turningPoints_theta++;
+          }
+        }
+      }
+    }
+
+    // 4. 归一化：平均每圈的拐点数
+    const avgTurning_phi = turningPoints_phi / thetaSteps;
+    const avgTurning_theta = turningPoints_theta / phiSteps;
+
+    // 5. 取两个方向的平均
+    const S_total = (avgTurning_phi + avgTurning_theta) / 2;
+
+    return S_total;
+  }
+
+  /**
+   * [v3.0 核心] 计算球面函数的全局角向起伏次数
+   * 
+   * 思想：在球面规则网格上沿 θ 和 φ 方向统计符号变化
+   * 
+   * @private
+   */
+  static _computeGlobalStructureCount(coeffs_full, shInstance, options = {}) {
+    const thetaSteps = options.thetaSteps ?? 32;
+    const phiSteps = options.phiSteps ?? 64;
+
+    // 1. 在规则网格上计算函数值
+    const grid = [];
+    for (let i = 0; i < thetaSteps; i++) {
+      const theta = (i + 0.5) / thetaSteps * Math.PI; // 避免极点
+      grid[i] = [];
+      for (let j = 0; j < phiSteps; j++) {
+        const phi = j / phiSteps * 2 * Math.PI;
+        grid[i][j] = shInstance.evaluate(coeffs_full, theta, phi);
+      }
+    }
+
+    // 2. 沿 φ 方向统计符号变化（固定 θ）
+    let signChanges_phi = 0;
+    for (let i = 0; i < thetaSteps; i++) {
+      for (let j = 0; j < phiSteps; j++) {
+        const curr = grid[i][j];
+        const next = grid[i][(j + 1) % phiSteps];
+        if (Math.sign(curr) !== 0 && Math.sign(next) !== 0) {
+          if (Math.sign(curr) !== Math.sign(next)) {
+            signChanges_phi++;
+          }
+        }
+      }
+    }
+
+    // 3. 沿 θ 方向统计符号变化（固定 φ）
+    let signChanges_theta = 0;
+    for (let j = 0; j < phiSteps; j++) {
+      for (let i = 0; i < thetaSteps - 1; i++) {
+        const curr = grid[i][j];
+        const next = grid[i + 1][j];
+        if (Math.sign(curr) !== 0 && Math.sign(next) !== 0) {
+          if (Math.sign(curr) !== Math.sign(next)) {
+            signChanges_theta++;
+          }
+        }
+      }
+    }
+
+    // 4. 归一化：平均每圈的符号变化次数
+    const avgChanges_phi = signChanges_phi / thetaSteps;
+    const avgChanges_theta = signChanges_theta / phiSteps;
+
+    // 5. 合并两个方向
+    const S_total = (avgChanges_phi + avgChanges_theta) / 2;
+
+    return S_total;
   }
 
   /**
