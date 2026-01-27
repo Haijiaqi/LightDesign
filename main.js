@@ -40,6 +40,9 @@ import { SphericalHarmonics } from "./math/SphericalHarmonics.js";
 import { Matrix } from "./math/Matrix.js";
 import { FittingCalculator } from "./math/FittingCalculator.js";
 
+// [新增] 导入参数化实现（用于动态阶数计算）
+import { ParametricImpl } from "./base/ParametricImpl.js";
+
 
 // ============================================================================
 // CORE LOGIC & HUB
@@ -102,30 +105,30 @@ async function init() {
     SystemState.lightObject.tag = 'LIGHT_SOURCE';
     SystemState.objects.push(SystemState.lightObject);
 
-    // [New] Integration: Initialize CrossIntegerGrid (already created by createTestScene)
-    const crossGrid = SystemState.objects.find(obj => obj.metadata?.name === 'CrossIntegerGrid');
+    // [New] Integration: Initialize SphericalBasis (parametric sphere for SH fitting)
+    const sphereBasis = SystemState.objects.find(obj => obj.metadata?.name === 'SphericalBasis');
 
-    if (crossGrid) {
-        console.log(`[Main] CrossGrid found. Starting auto-fit...`);
+    if (sphereBasis) {
+        console.log(`[Main] SphericalBasis found. Control points: ${sphereBasis.controlPoints?.length}. Starting auto-fit...`);
 
         // Perform fit with adaptive order determination
         const sh = new SphericalHarmonics(15);
 
         // Enable verbose logging to see SH order determination process
-        crossGrid.verbose = true;
+        sphereBasis.verbose = true;
 
-        crossGrid.fitSphericalHarmonics({
+        sphereBasis.fitSphericalHarmonics({
             fitter: FittingCalculator,
             Matrix: Matrix,
             sphericalHarmonics: sh
         });
 
-        // Generate display points with very low density for performance
-        crossGrid.generateDisplayPoints({ density: 0.05 });
+        // Generate display points with low density for performance
+        sphereBasis.generateDisplayPoints({ density: 50.0 });
 
-        console.log(`[Main] CrossGrid ready. Display points: ${crossGrid.displayPoints?.length}`);
+        console.log(`[Main] SphericalBasis ready. Display points: ${sphereBasis.displayPoints?.length}`);
     } else {
-        console.warn("[Main] CrossIntegerGrid not found.");
+        console.warn("[Main] SphericalBasis not found.");
     }
 
     document.body.appendChild(SystemState.canvas);
@@ -608,15 +611,24 @@ function processIntent(intent) {
                 obj._dirty = true;
                 obj.updateWorldPoints();
 
-                // 关键：标记需要重拟合，触发实时形状更新
-                obj._needsRefit = true;
+                // 获取控制点索引，用于精确截断增量拟合缓存
+                const cpIndex = obj.controlPoints?.indexOf(cp) ?? -1;
+
+                // 关键：通知控制点已改变，使拟合缓存失效
+                // 传入索引以实现精确截断（只清除该点之后的缓存）
+                if (obj._onControlPointsChanged) {
+                    obj._onControlPointsChanged(cpIndex);
+                } else {
+                    // fallback: 手动设置标记
+                    obj._needsRefit = true;
+                }
 
                 SystemState.lastMouseX = intent.mouseX;
                 SystemState.lastMouseY = intent.mouseY;
                 SystemState.sceneDirty = true;
                 SystemState.ifControl = true;
 
-                console.log(`[EDIT] 控制点吸附到格点: (${gp.lx.toFixed(2)}, ${gp.ly.toFixed(2)}, ${gp.lz.toFixed(2)})`);
+                console.log(`[EDIT] 控制点移动: index=${cpIndex}, 新坐标=(${cp.lx.toFixed(2)}, ${cp.ly.toFixed(2)}, ${cp.lz.toFixed(2)}), _needsRefit=${obj._needsRefit}`);
             }
             break;
         case 'CHANGE_DEPTH_LAYER':
@@ -2009,25 +2021,33 @@ async function gameLoop(timestamp = 0) {
         if (obj._needsRefit) {
             obj._needsRefit = false;
 
+            console.log(`[Refit] 检测到 _needsRefit, obj=${obj.metadata?.name}, representation.type=${obj.representation?.type}, hasSH=${!!obj.representation?.data?.sphericalHarmonics}`);
+
             // 检查是否有球谐表示
             if (obj.representation?.type === 'sphericalHarmonics' &&
                 obj.representation.data?.sphericalHarmonics) {
 
                 const sh = obj.representation.data.sphericalHarmonics;
                 const currentOrder = obj.representation.data.fittedOrder ?? 3;
+                const N = obj.controlPoints?.length ?? 0;
 
-                // 重新拟合（使用固定阶数，避免每次都重新判阶）
+                // 使用区间判定动态升降阶
+                const newOrder = ParametricImpl.computeEditOrderWithBoundary(N, currentOrder);
+
+                // 重新拟合
                 obj.fitSphericalHarmonics({
-                    order: currentOrder,
+                    order: newOrder,
                     fitter: FittingCalculator,
                     Matrix: Matrix,
                     sphericalHarmonics: sh
                 });
 
-                // 重新生成显示点
-                obj.generateDisplayPoints({ density: 0.05 });
+                // 重新生成显示点（密度与初始化保持一致）
+                obj.generateDisplayPoints({ density: 50.0 });
 
-                console.log(`[Refit] 控制点改变，重拟合完成 L=${currentOrder}`);
+                // 调试：显示阶数变化信息
+                const orderChanged = newOrder !== currentOrder;
+                console.log(`[Refit] 重拟合完成: N=${N}, L=${currentOrder}→${newOrder}${orderChanged ? ' (阶数变化)' : ''}, displayPoints=${obj.displayPoints?.length}`);
             }
 
             SystemState.sceneDirty = true;

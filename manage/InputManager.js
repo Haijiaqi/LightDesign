@@ -327,6 +327,12 @@ export const InputManager = {
                 };
             }
             // 未吸附到有效格点时，不移动控制点
+            // 调试：显示 snapped 状态
+            if (snapped) {
+                console.log(`[InputManager] 拖拽中但格点 tag=${snapped.tag} 不是 LOCAL_GRID`);
+            } else {
+                console.log(`[InputManager] 拖拽中但无吸附点`);
+            }
         }
         return null;
     },

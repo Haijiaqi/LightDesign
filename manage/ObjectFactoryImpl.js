@@ -363,8 +363,8 @@ export class ObjectFactoryImpl {
             // 参数顺序: size, pointsPerFace, x, y, z, alpha, ifEntity
             ObjectFactoryImpl.createCube(4, 300, 10, 50, 0, 0, false),
 
-            // 高阶测试对象: 十字星 (长16cm, 宽3cm), 位于 (0, 35, 0)
-            ObjectFactoryImpl.createCrossIntegerGrid(0, 35, 0, 8, 1),
+            // 高阶测试对象: 类球体 (参数化生成), 位于 (0, 35, 0)
+            ObjectFactoryImpl.createSphericalBasis(0, 35, 0),
         ];
     }
 
@@ -434,10 +434,11 @@ export class ObjectFactoryImpl {
                         // 【规格 B】棱上或角上的点：作为 Control Point
                         // - 直接作为 controlPoints 传入
                         // - 行为规则：EDIT 态永远显示，永远可吸附，不可编辑
-                        p.tag = 'CONTROL';
+                        p.tag = 'LOCAL_GRID_CONTROL';
                         p.isEditable = false;
                         p.isAttractable = true; // 规格要求永远可吸附
                         controlPoints.push(p);
+                        points.push(p); // [FIX] 同时加入显示点以确保被渲染
                     } else {
                         // 【规格 B】普通格点：作为 Display Point
                         // - 行为规则：只有靠近屏幕平面才显示/吸附
@@ -582,12 +583,13 @@ export class ObjectFactoryImpl {
      * @param {number} cy - 球心 Y（世界坐标）
      * @param {number} cz - 球心 Z（世界坐标）
      * @param {object} [options] - 可选配置
-     * @param {number} [options.radius] - 球半径（默认使用 EditConfig.localGridHalfSize）
+     * @param {number} [options.radius] - 球半径（默认使用 EditConfig.localGridHalfSize / 2）
      * @param {number} [options.tolerance=0.6] - 表面厚度容差（格点到球面的最大距离）
      * @returns {Object}
      */
     static createSphericalBasis(cx, cy, cz, options = {}) {
-        const radius = options.radius ?? EditConfig.localGridHalfSize;
+        // 修复：半径默认为局部格网尺寸的一半（直径 = 局部格网边长的一半）
+        const radius = options.radius ?? (EditConfig.localGridHalfSize / 2);
         const tolerance = options.tolerance ?? 0.6;  // 允许 ±0.6 的误差
         const points = [];
 
@@ -622,16 +624,20 @@ export class ObjectFactoryImpl {
                 new Point(0, 0, -radius)
             ];
             fallbackPoints.forEach(p => p.isAttractable = false);
+            // 修复：将球面整点直接作为控制点传入
             return new Object(fallbackPoints, {
                 center: { x: cx, y: cy, z: cz },
+                controlPoints: fallbackPoints,  // 直接指定控制点
                 frontDirection: { x: 0, y: -1, z: 0 },
                 upDirection: { x: 0, y: 0, z: 1 },
                 name: 'SphericalBasis'
             });
         }
 
+        // 修复：将球面整点直接作为控制点传入，触发自动拟合
         return new Object(points, {
             center: { x: cx, y: cy, z: cz },
+            controlPoints: points,  // 直接指定控制点
             frontDirection: { x: 0, y: -1, z: 0 },
             upDirection: { x: 0, y: 0, z: 1 },
             name: 'SphericalBasis'

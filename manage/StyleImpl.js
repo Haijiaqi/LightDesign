@@ -153,7 +153,7 @@ export class StyleImpl {
             lightAffected: false,
             fixedLight: 1.0,
             neighborRule: 'glow',
-            glowRadius: 3
+            glowRadius: 5
         },
         // 光源：超亮显示，不受光照影响
         LIGHT_SOURCE: {
@@ -161,7 +161,7 @@ export class StyleImpl {
             lightAffected: false,
             fixedLight: 3.0, // 更亮以确保光源显眼
             neighborRule: 'glow',
-            glowRadius: 3
+            glowRadius: 5
         },
         // 局部格网格点：立体渲染，使用动态设置的 light 值
         LOCAL_GRID: {
@@ -174,6 +174,14 @@ export class StyleImpl {
             colorMode: 'stereo',
             lightAffected: true,  // 使用点的 light 属性
             neighborRule: 'none'
+        },
+        // 局部格网控制点（差异化显示，强度较低）
+        LOCAL_GRID_CONTROL: {
+            colorMode: 'stereo',
+            lightAffected: false,
+            fixedLight: 1.0,
+            neighborRule: 'glow',
+            glowRadius: 3
         }
     };
 

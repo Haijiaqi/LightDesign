@@ -8,30 +8,59 @@ export const Renderer = {
         // 阈值检查：如果亮度太低，不绘制邻接点
         if (light <= 0.3) return;
 
+        // 预计算半径平方（圆形裁剪）
+        // radius + 0.5 是为了让边缘平滑，容纳像素中心
+        const radiusSq = (radius + 0.5) ** 2;
+
         // 遍历 [-radius, +radius] 范围
         for (let dy = -radius; dy <= radius; dy++) {
             for (let dx = -radius; dx <= radius; dx++) {
                 if (dx === 0 && dy === 0) continue;
 
-                // 计算距离
-                const dist = Math.sqrt(dx * dx + dy * dy);
+                // 距离检查
+                const distSq = dx * dx + dy * dy;
+                if (distSq > radiusSq) continue;
 
-                // 圆形裁剪：允许半径范围内的所有点（包括四角）
-                if (dist > radius + 0.5) continue;
-
-                // 亮度权重：中心1.0，正方向0.7，四角0.4
-                // 正方向邻居 (距离=1): (0,1), (0,-1), (1,0), (-1,0)
-                // 斜邻居 (距离=1.414): (1,1), (1,-1), (-1,1), (-1,-1)
+                const dist = Math.sqrt(distSq);
                 let ratio;
-                if (dist <= 1.1) {
-                    ratio = 0.7;  // 正方向邻接
-                } else if (dist <= 1.5) {
-                    ratio = 0.4;  // 斜向邻接（四角）
-                } else if (dist <= 2.1) {
-                    ratio = 0.3;  // 次外层（仅大半径时生效）
+
+                // [动态衰减策略]
+                // 根据 radius 大小选择不同的亮度分布曲线
+
+                if (radius < 4) {
+                    // === 策略 A: 经典模式 (Radius 1~3) ===
+                    // 严格保持用户定义的经典衰减，确保原有视觉一致性
+                    // 中心: 100%
+                    // 正向(1.0): 70% | 对角(1.4): 40%
+                    // 次外(2.0): 30% | 最外(>2.0): 15%
+                    if (dist <= 1.1) {
+                        ratio = 0.7;
+                    } else if (dist <= 1.5) {
+                        ratio = 0.4;
+                    } else if (dist <= 2.1) {
+                        ratio = 0.3;
+                    } else {
+                        ratio = 0.15;
+                    }
                 } else {
-                    ratio = 0.15; // 最外层
+                    // === 策略 C: 饱和光斑 (Radius >= 4) ===
+                    // 适用于控制点/强光源
+                    // 核心区域饱和，形成明显的实心亮点
+                    if (dist <= 1.5) {
+                        ratio = 1.0;  // 3x3 核心区域全亮
+                    } else if (dist <= 2.5) {
+                        ratio = 0.8;  // 5x5 区域高亮
+                    } else {
+                        // 外围衰减: dist 2.5 -> radius，亮度 0.6 -> 0.05
+                        const range = Math.max(0.1, radius - 2.5);
+                        const norm = (dist - 2.5) / range;
+                        // 使用平滑衰减
+                        ratio = 0.6 * (1 - norm * norm);
+                    }
                 }
+
+                // 钳制最小值，避免负数或无效绘制
+                ratio = Math.max(0.05, ratio);
 
                 const nx = x + dx;
                 const ny = y + dy;

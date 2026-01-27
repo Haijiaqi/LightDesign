@@ -575,16 +575,34 @@ export class Object {
     this.metadata.modified = Date.now();
   }
 
-  _onControlPointsChanged() {
+  /**
+   * 控制点改变时的回调
+   * @param {number} [editedIndex] - 被编辑的控制点索引（可选）
+   *   - 如果提供，只截断该索引之后的增量拟合缓存
+   *   - 如果未提供，清除所有缓存（保守策略，用于删除/添加点等场景）
+   */
+  _onControlPointsChanged(editedIndex) {
     this._controlPointVersion++;
     this._fitCache.clear();
     this._boundingBoxDirty = true;
     this.metadata.modified = Date.now();
 
+    // 根据 editedIndex 决定缓存清理策略
+    if (typeof editedIndex === 'number' && editedIndex >= 0) {
+      // 精确截断：只清除被编辑点及之后的缓存
+      this._truncateAllFitStacks(editedIndex);
+    } else {
+      // 保守策略：清除所有缓存
+      this._clearAllFitStacks();
+    }
+
     if (!this._isVolumetric) {
       this._surfacePointVersion++;
       this._clearTopologyAndCache();
     }
+
+    // 触发重拟合标记
+    this._needsRefit = true;
   }
 
   _clearTopologyAndCache() {
@@ -1122,9 +1140,10 @@ export class Object {
     if (count === undefined) {
       const surfaceArea = this.getSurfaceArea();
       if (surfaceArea && surfaceArea > 0) {
-        // 表面积单位假设为 m²，转换为 cm²
-        count = Math.round(surfaceArea * 10000 * density);
-        count = Math.max(100, Math.min(count, 10000));
+        // 表面积单位为 cm²，直接乘以密度
+        count = Math.round(surfaceArea * density);
+        // 允许更低的点数下限，以便于调试稀疏采样
+        count = Math.max(10, Math.min(count, 10000));
       } else {
         count = 500;  // 默认值
       }
@@ -1149,6 +1168,9 @@ export class Object {
       pt.lx = p.x;
       pt.ly = p.y;
       pt.lz = p.z;
+      // [FIX] 设置默认渲染属性，确保新生成的点能被渲染
+      pt.tag = 'SURFACE';
+      pt.light = 0.8;
       return pt;
     });
     this._displayPointVersion++;
