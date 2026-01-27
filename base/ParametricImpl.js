@@ -30,6 +30,220 @@ export class ParametricImpl {
   static EPSILON = 1e-10;
   static SURFACE_THRESHOLD = 0.92;  // distanceRatio >= 0.92 为表面层
 
+  // ==========================================================================
+  // 编辑态动态阶数映射
+  // 用于实时编辑场景，根据控制点数量快速确定合适的 SH 阶数
+  // ==========================================================================
+
+  /**
+   * 阶数区间计算参数
+   * 区间公式：对于 L 阶，N 的范围为 (2 * (L+1)^α, 2 * (L+1)^β]
+   */
+  static ORDER_ALPHA = 1.8696;  // 下界指数
+  static ORDER_BETA = 2.0705;   // 上界指数
+  static ORDER_COEFF = 2;       // 系数
+  static ORDER_MIN = 1;         // 最小阶数
+  static ORDER_MAX = 25;        // 最大阶数
+
+  /**
+   * 预计算的阶数区间表（静态初始化）
+   * 数组索引直接对应阶数 L，索引 0,1 为空或占位
+   * @type {Array<{lower: number, upper: number, mid: number, thresholds: {upgrade: number, downgrade: number}}>}
+   */
+  static _orderCache = [];
+
+  // 静态初始化块，预计算所有阶数的阈值
+  static {
+    ParametricImpl._initializeOrderCache();
+  }
+
+  /**
+   * 初始化阶数缓存表
+   * 计算从 ORDER_MIN 到 ORDER_MAX 的所有区间参数
+   * @private
+   */
+  static _initializeOrderCache() {
+    ParametricImpl._orderCache = new Array(ParametricImpl.ORDER_MAX + 2); // 多留一点余量
+
+    for (let L = 0; L <= ParametricImpl.ORDER_MAX + 1; L++) {
+      if (L < ParametricImpl.ORDER_MIN) {
+        ParametricImpl._orderCache[L] = null;
+        continue;
+      }
+
+      // 1. 计算当前阶的基本区间
+      const base = L + 1;
+      const lower = ParametricImpl.ORDER_COEFF * Math.pow(base, ParametricImpl.ORDER_ALPHA);
+      const upper = ParametricImpl.ORDER_COEFF * Math.pow(base, ParametricImpl.ORDER_BETA);
+      const mid = (lower + upper) / 2;
+
+      // 2. 存储基本信息
+      ParametricImpl._orderCache[L] = {
+        L,
+        lower,
+        upper,
+        mid,
+        sqrtMid: Math.sqrt(mid),
+        thresholds: {
+          upgrade: Infinity,   // 默认为无穷（最高阶）
+          downgrade: -Infinity // 默认为负无穷（最低阶）
+        }
+      };
+    }
+
+    // 3. 第二次遍历，填充相邻阶的阈值（滞后判定关键）
+    for (let L = ParametricImpl.ORDER_MIN; L <= ParametricImpl.ORDER_MAX; L++) {
+      const current = ParametricImpl._orderCache[L];
+
+      // 升阶阈值 = 下一阶的 Lower
+      // 只有 N >= nextLower 时，才允许升入下一阶
+      if (L < ParametricImpl.ORDER_MAX) {
+        const next = ParametricImpl._orderCache[L + 1];
+        if (next) {
+          current.thresholds.upgrade = next.lower;
+        }
+      }
+
+      // 降阶阈值 = 上一阶的 Upper
+      // 只有 N <= prevUpper 时，才允许降回上一阶
+      if (L > ParametricImpl.ORDER_MIN) {
+        const prev = ParametricImpl._orderCache[L - 1];
+        if (prev) {
+          current.thresholds.downgrade = prev.upper;
+        }
+      }
+    }
+  }
+
+  /**
+   * 获取指定阶数的点数区间（直接查表）
+   * @param {number} L - SH 阶数
+   * @returns {{lower: number, upper: number, mid: number}} 点数区间
+   */
+  static getOrderBounds(L) {
+    if (L < ParametricImpl.ORDER_MIN || L > ParametricImpl.ORDER_MAX) {
+      // 越界时的临时计算fallback
+      const base = L + 1;
+      const lower = ParametricImpl.ORDER_COEFF * Math.pow(base, ParametricImpl.ORDER_ALPHA);
+      const upper = ParametricImpl.ORDER_COEFF * Math.pow(base, ParametricImpl.ORDER_BETA);
+      const mid = (lower + upper) / 2;
+      return { lower, upper, mid };
+    }
+    return ParametricImpl._orderCache[L];
+  }
+
+  /**
+   * 编辑态快速阶数计算（初始确定）
+   * 找到 N 离哪个阶数的中点最近，返回该阶数
+   * 
+   * @param {number} N - 控制点数量
+   * @param {object} [options] - 可选配置
+   * @param {number} [options.currentOrder] - 当前阶数（用于边界判断模式）
+   * @returns {number} 推荐的 SH 阶数
+   */
+  static computeEditOrder(N, options = {}) {
+    // 1. 边界判断模式（纯查表，O(1)）
+    if (options.currentOrder !== undefined) {
+      return ParametricImpl.computeEditOrderWithBoundary(N, options.currentOrder);
+    }
+
+    // 2. 初始模式：遍历查表找到离中点最近的阶数
+    // 优化：在 sqrt 空间比较距离，消除二次增长带来的非线性偏差
+    let bestOrder = ParametricImpl.ORDER_MIN;
+    let minDistance = Infinity;
+    const sqrtN = Math.sqrt(N);
+
+    // 遍历有效缓存区间
+    for (let L = ParametricImpl.ORDER_MIN; L <= ParametricImpl.ORDER_MAX; L++) {
+      const entry = ParametricImpl._orderCache[L];
+      // 比较 sqrt(N) 与 sqrt(mid) 的距离
+      // mid 和 sqrtMid 在 _initializeOrderCache 中已计算好，直接使用
+      const distance = Math.abs(sqrtN - entry.sqrtMid);
+
+      if (distance < minDistance) {
+        minDistance = distance;
+        bestOrder = L;
+      }
+    }
+
+    // 边界保护：确保点数至少满足最低阶的下限
+    const bounds = ParametricImpl._orderCache[bestOrder];
+    if (bounds && N < bounds.lower && bestOrder > ParametricImpl.ORDER_MIN) {
+      bestOrder--;
+    }
+
+    return bestOrder;
+  }
+
+  /**
+   * 编辑态阶数计算（带双阈值滞后判定）
+   * 使用预计算的相邻阈值，实现震荡抑制
+   * 
+   * 逻辑：
+   * - 升阶：只有 N >= target.lower 时才升到 target
+   * - 降阶：只有 N <= target.upper 时才降到 target
+   * 
+   * @param {number} N - 控制点数量
+   * @param {number} currentOrder - 当前阶数
+   * @returns {number} 新的阶数
+   */
+  static computeEditOrderWithBoundary(N, currentOrder) {
+    // 安全检查
+    if (currentOrder < ParametricImpl.ORDER_MIN) return ParametricImpl.ORDER_MIN;
+    if (currentOrder > ParametricImpl.ORDER_MAX) return ParametricImpl.ORDER_MAX;
+
+    const cache = ParametricImpl._orderCache[currentOrder];
+    if (!cache) return currentOrder;
+
+    const { upgrade, downgrade } = cache.thresholds;
+
+    // 1. 检查升阶条件 (N >= 下一阶的 Lower)
+    if (N >= upgrade) {
+      // 可能连升多级，虽然罕见，但循环检查以防万一
+      let newOrder = currentOrder + 1;
+      while (newOrder < ParametricImpl.ORDER_MAX) {
+        const nextCache = ParametricImpl._orderCache[newOrder];
+        // 如果 N 甚至超过了再下一阶的门槛，继续升
+        if (N >= nextCache.thresholds.upgrade) {
+          newOrder++;
+        } else {
+          break;
+        }
+      }
+      return newOrder;
+    }
+
+    // 2. 检查降阶条件 (N <= 上一阶的 Upper)
+    if (N <= downgrade) {
+      // 可能连降多级
+      let newOrder = currentOrder - 1;
+      while (newOrder > ParametricImpl.ORDER_MIN) {
+        const prevCache = ParametricImpl._orderCache[newOrder];
+        // 如果 N 甚至小于了再上一阶的门槛（即再上一阶的 downgrade），继续降
+        if (N <= prevCache.thresholds.downgrade) {
+          newOrder--;
+        } else {
+          break;
+        }
+      }
+      return newOrder;
+    }
+
+    // 3. 处于空隙或当前阶范围内 -> 保持不变
+    return currentOrder;
+  }
+
+  /**
+   * 获取指定控制点数量的阶数范围信息
+   * @param {number} N - 控制点数量
+   * @returns {{order: number, lower: number, upper: number, mid: number}} 阶数和区间信息
+   */
+  static getOrderRange(N) {
+    const order = ParametricImpl.computeEditOrder(N);
+    const bounds = ParametricImpl.getOrderBounds(order);
+    return { order, ...bounds };
+  }
+
   /**
    * 计算最大可能的球谐阶数
    * 公式：(L+1)² ≤ N  =>  L ≤ sqrt(N) - 1

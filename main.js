@@ -547,6 +547,7 @@ function processIntent(intent) {
             }
             break;
         case 'MOVE_CONTROL_POINT':
+            // Legacy: 保留兼容性，但一般不再触发
             {
                 if (SystemState.longPressTimer) {
                     clearTimeout(SystemState.longPressTimer);
@@ -556,6 +557,66 @@ function processIntent(intent) {
                 SystemState.lastMouseX = intent.mouseX;
                 SystemState.lastMouseY = intent.mouseY;
                 SystemState.ifControl = true;
+            }
+            break;
+        case 'SNAP_CONTROL_POINT_TO_GRID':
+            {
+                if (SystemState.longPressTimer) {
+                    clearTimeout(SystemState.longPressTimer);
+                    SystemState.longPressTimer = null;
+                }
+
+                const cp = intent.controlPoint;
+                const gp = intent.gridPoint;
+                const obj = SystemState.focusedObject;
+
+                if (!cp || !gp || !obj) break;
+
+                // 约束检查：不允许拖到已有控制点的位置
+                const TOLERANCE = 0.05; // 5mm 容差
+                let isOccupied = false;
+                for (const otherCp of obj.controlPoints || []) {
+                    if (otherCp === cp) continue; // 跳过自身
+                    const dx = Math.abs(otherCp.lx - gp.lx);
+                    const dy = Math.abs(otherCp.ly - gp.ly);
+                    const dz = Math.abs(otherCp.lz - gp.lz);
+                    if (dx < TOLERANCE && dy < TOLERANCE && dz < TOLERANCE) {
+                        isOccupied = true;
+                        break;
+                    }
+                }
+
+                if (isOccupied) {
+                    // 目标格点已被其他控制点占用，忽略此次移动
+                    console.log('[EDIT] 目标格点已被占用，忽略移动');
+                    break;
+                }
+
+                // 检查是否位置发生了变化（避免无效重拟合）
+                const posDiff = Math.abs(cp.lx - gp.lx) + Math.abs(cp.ly - gp.ly) + Math.abs(cp.lz - gp.lz);
+                if (posDiff < 0.001) {
+                    // 位置未变，无需更新
+                    break;
+                }
+
+                // 将格点的局部坐标赋值给控制点
+                cp.lx = gp.lx;
+                cp.ly = gp.ly;
+                cp.lz = gp.lz;
+
+                // 标记物体需要更新世界坐标
+                obj._dirty = true;
+                obj.updateWorldPoints();
+
+                // 关键：标记需要重拟合，触发实时形状更新
+                obj._needsRefit = true;
+
+                SystemState.lastMouseX = intent.mouseX;
+                SystemState.lastMouseY = intent.mouseY;
+                SystemState.sceneDirty = true;
+                SystemState.ifControl = true;
+
+                console.log(`[EDIT] 控制点吸附到格点: (${gp.lx.toFixed(2)}, ${gp.ly.toFixed(2)}, ${gp.lz.toFixed(2)})`);
             }
             break;
         case 'CHANGE_DEPTH_LAYER':
@@ -595,6 +656,44 @@ function processIntent(intent) {
             break;
         case 'ADD_CONTROL_POINT':
             addControlPointAt(intent.x, intent.y);
+            break;
+        case 'DELETE_CONTROL_POINT':
+            {
+                const obj = SystemState.focusedObject;
+                const cp = intent.controlPoint;
+                if (obj && obj.controlPoints) {
+                    const index = obj.controlPoints.indexOf(cp);
+                    if (index > -1) {
+                        const cmd = createDeleteControlPointCommand(obj, index);
+                        HistoryManager.execute(cmd);
+                        obj._needsRefit = true;
+                        updateControlPointsDisplay();
+                        console.log(`[EDIT] 删除控制点 #${index}`);
+                    }
+                }
+            }
+            break;
+        case 'ADD_CONTROL_POINT_AT_GRID':
+            {
+                const obj = SystemState.focusedObject;
+                const gp = intent.gridPoint;
+                if (obj && gp) {
+                    // 将格点的世界坐标转换为局部坐标
+                    const localPos = worldToLocal(obj, { x: gp.x, y: gp.y, z: gp.z });
+                    const newPoint = new Point(localPos.x, localPos.y, localPos.z);
+                    newPoint.lx = localPos.x;
+                    newPoint.ly = localPos.y;
+                    newPoint.lz = localPos.z;
+                    newPoint.tag = 'CONTROL';
+
+                    if (!obj.controlPoints) obj.controlPoints = [];
+                    const cmd = createAddControlPointCommand(obj, newPoint);
+                    HistoryManager.execute(cmd);
+                    obj._needsRefit = true;
+                    updateControlPointsDisplay();
+                    console.log(`[EDIT] 新增控制点 at (${localPos.x.toFixed(2)}, ${localPos.y.toFixed(2)}, ${localPos.z.toFixed(2)})`);
+                }
+            }
             break;
     }
     // ... (End of processIntent switch)
@@ -920,6 +1019,28 @@ function updateVirtualMouse(mouseX, mouseY) {
                 // EDIT 态：只吸附局部格网的活动层格点（LOCAL_GRID）或控制点（CONTROL）
                 // 且必须在屏幕平面附近
                 if (p.tag !== 'LOCAL_GRID' && p.tag !== 'CONTROL') return false;
+
+                // [FIX] 拖动控制点时，排除正在被拖动的点本身
+                if (SystemState.draggedControlPoint && p === SystemState.draggedControlPoint) {
+                    return false;
+                }
+
+                // [FIX] 检查该格点是否已被其他控制点占用（避免拖到已有控制点的位置）
+                if (SystemState.draggedControlPoint && p.tag === 'LOCAL_GRID') {
+                    const obj = SystemState.focusedObject;
+                    if (obj && obj.controlPoints) {
+                        const TOLERANCE = 0.05; // 5mm 容差
+                        for (const cp of obj.controlPoints) {
+                            if (cp === SystemState.draggedControlPoint) continue;
+                            const dx = Math.abs(cp.lx - p.lx);
+                            const dy = Math.abs(cp.ly - p.ly);
+                            const dz = Math.abs(cp.lz - p.lz);
+                            if (dx < TOLERANCE && dy < TOLERANCE && dz < TOLERANCE) {
+                                return false; // 该格点已被占用
+                            }
+                        }
+                    }
+                }
 
                 // [FIX] 严格检查点到屏幕平面的距离
                 const dir = win.direction;
@@ -1540,6 +1661,40 @@ function findControlPointAt(screenX, screenY) {
     return null;
 }
 
+/**
+ * 将世界坐标转换为物体局部坐标
+ */
+function worldToLocal(obj, worldPos) {
+    if (!obj.transform) {
+        return {
+            x: worldPos.x - obj.center.x,
+            y: worldPos.y - obj.center.y,
+            z: worldPos.z - obj.center.z
+        };
+    }
+
+    // 平移
+    const tx = worldPos.x - obj.transform.position.x;
+    const ty = worldPos.y - obj.transform.position.y;
+    const tz = worldPos.z - obj.transform.position.z;
+
+    // 逆旋转（四元数共轭）
+    const q = obj.transform.rotation;
+    const qw = q.w, qx = -q.x, qy = -q.y, qz = -q.z;
+
+    // 应用逆旋转 v' = q * v * q^(-1)
+    const ix = qw * tx + qy * tz - qz * ty;
+    const iy = qw * ty + qz * tx - qx * tz;
+    const iz = qw * tz + qx * ty - qy * tx;
+    const iw = -qx * tx - qy * ty - qz * tz;
+
+    return {
+        x: ix * qw + iw * -qx + iy * -qz - iz * -qy,
+        y: iy * qw + iw * -qy + iz * -qx - ix * -qz,
+        z: iz * qw + iw * -qz + ix * -qy - iy * -qx
+    };
+}
+
 function moveControlPoint(controlPoint, dx, dy) {
     if (!controlPoint) return;
     const obj = SystemState.focusedObject;
@@ -1853,7 +2008,28 @@ async function gameLoop(timestamp = 0) {
     for (const obj of SystemState.objects) {
         if (obj._needsRefit) {
             obj._needsRefit = false;
-            console.log('控制点已修改，需要重建形状');
+
+            // 检查是否有球谐表示
+            if (obj.representation?.type === 'sphericalHarmonics' &&
+                obj.representation.data?.sphericalHarmonics) {
+
+                const sh = obj.representation.data.sphericalHarmonics;
+                const currentOrder = obj.representation.data.fittedOrder ?? 3;
+
+                // 重新拟合（使用固定阶数，避免每次都重新判阶）
+                obj.fitSphericalHarmonics({
+                    order: currentOrder,
+                    fitter: FittingCalculator,
+                    Matrix: Matrix,
+                    sphericalHarmonics: sh
+                });
+
+                // 重新生成显示点
+                obj.generateDisplayPoints({ density: 0.05 });
+
+                console.log(`[Refit] 控制点改变，重拟合完成 L=${currentOrder}`);
+            }
+
             SystemState.sceneDirty = true;
         }
     }

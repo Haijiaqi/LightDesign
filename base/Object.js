@@ -185,7 +185,11 @@ export class Object {
 
     // ━━━ 缓存与拟合 ━━━
     this._fitCache = new SimpleFitCache();
-    this._fitStack = [];
+    // 多阶缓存：Map<order, fitStack[]>，支持不同阶数的独立增量拟合缓存
+    this._fitStackMap = new Map();
+    // 当前使用的阶数（用于编辑态追踪）
+    this._currentFitOrder = null;
+    // EFD 拟合缓存（椭圆傅里叶）
     this._fitStackX = [];
     this._fitStackY = [];
 
@@ -496,13 +500,13 @@ export class Object {
       this.controlPoints[lastIndex].x = x;
       this.controlPoints[lastIndex].y = y;
       this.controlPoints[lastIndex].z = z;
-      this._fitStack.length = Math.min(this._fitStack.length, index);
+      this._truncateAllFitStacks(index);
     } else {
       this.controlPoints[index].x = x;
       this.controlPoints[index].y = y;
       this.controlPoints[index].z = z;
       // 截断最后一个状态（基于旧末尾点），但不能增加长度
-      this._fitStack.length = Math.min(this._fitStack.length, this.controlPoints.length - 1);
+      this._truncateAllFitStacks(this.controlPoints.length - 1);
     }
 
     this._onControlPointsChanged();
@@ -520,7 +524,7 @@ export class Object {
       return false;
     }
     this.controlPoints.splice(index, 1);
-    this._fitStack = [];
+    this._clearAllFitStacks();
     this._onControlPointsChanged();
     return true;
   }
@@ -540,13 +544,13 @@ export class Object {
         this.constructionPoints[lastIndex].x = x;
         this.constructionPoints[lastIndex].y = y;
         this.constructionPoints[lastIndex].z = z;
-        this._fitStack.length = Math.min(this._fitStack.length, index);
+        this._truncateAllFitStacks(index);
       } else {
         this.constructionPoints[index].x = x;
         this.constructionPoints[index].y = y;
         this.constructionPoints[index].z = z;
         // 截断最后一个状态，但不能增加长度
-        this._fitStack.length = Math.min(this._fitStack.length, this._surfaceBoundary - 1);
+        this._truncateAllFitStacks(this._surfaceBoundary - 1);
       }
       this._boundingBoxDirty = true;
       this.metadata.modified = Date.now();
@@ -598,6 +602,61 @@ export class Object {
       surfaceArea: null,
       sections: new Map()
     };
+  }
+
+  // ==========================================================================
+  // 多阶拟合缓存管理
+  // ==========================================================================
+
+  /**
+   * 获取指定阶数的 fitStack
+   * 如果不存在则创建空数组
+   * @param {number} order - SH 阶数
+   * @returns {Array} fitStack
+   */
+  _getFitStack(order) {
+    if (!this._fitStackMap.has(order)) {
+      this._fitStackMap.set(order, []);
+    }
+    return this._fitStackMap.get(order);
+  }
+
+  /**
+   * 设置指定阶数的 fitStack
+   * @param {number} order - SH 阶数
+   * @param {Array} stack - fitStack 数组
+   */
+  _setFitStack(order, stack) {
+    this._fitStackMap.set(order, stack);
+    this._currentFitOrder = order;
+  }
+
+  /**
+   * 截断所有阶数的 fitStack 到指定索引
+   * 用于控制点修改时保持缓存一致性
+   * @param {number} index - 截断到的索引位置
+   */
+  _truncateAllFitStacks(index) {
+    for (const [order, stack] of this._fitStackMap) {
+      stack.length = Math.min(stack.length, index);
+    }
+  }
+
+  /**
+   * 清空所有阶数的 fitStack
+   * 用于控制点删除或大规模变更
+   */
+  _clearAllFitStacks() {
+    this._fitStackMap.clear();
+    this._currentFitOrder = null;
+  }
+
+  /**
+   * 获取当前缓存的阶数列表
+   * @returns {number[]} 已缓存的阶数数组
+   */
+  _getCachedOrders() {
+    return Array.from(this._fitStackMap.keys());
   }
 
   // ==========================================================================
@@ -687,14 +746,15 @@ export class Object {
       this._matrixClass = Matrix;
     }
 
-    // 最终拟合：使用增量拟合 + 逐点缓存机制
+    // 最终拟合：使用增量拟合 + 多阶缓存机制
+    const fitStack = this._getFitStack(targetOrder);
     let result;
     try {
       result = ParametricImpl.fitSpherical(
         positions,
         centerPos.x, centerPos.y, centerPos.z, // (0,0,0)
         targetOrder,
-        this._fitStack,
+        fitStack,
         this._fitterInstance,
         Matrix,
         sphericalHarmonics,
@@ -704,24 +764,27 @@ export class Object {
     } catch (err) {
       if (useIncremental) {
         console.warn('[Object] Incremental fit failed, falling back to full fit:', err.message);
-        this._fitStack = [];
+        // 清空该阶数的缓存后重试
+        const emptyStack = [];
         result = ParametricImpl.fitSpherical(
           positions,
           centerPos.x, centerPos.y, centerPos.z,
           targetOrder,
-          this._fitStack,
+          emptyStack,
           this._fitterInstance,
           Matrix,
           sphericalHarmonics,
           false,
           this.verbose
         );
+        // 更新缓存为新的空栈结果
+        this._setFitStack(targetOrder, result.fitStack);
       } else {
         throw err;
       }
     }
 
-    this._fitStack = result.fitStack;
+    this._setFitStack(targetOrder, result.fitStack);
 
     this.representation.type = 'sphericalHarmonics';
     this.representation.isClosed = true;
@@ -746,9 +809,17 @@ export class Object {
     if (!this.representation.data?.sphericalHarmonics || !this._fitterInstance) return;
 
     try {
-      const coeffs = this.representation.data.coefficients;
+      // 使用编辑态快速阶数计算（基于控制点数量）
+      const N = this.controlPoints.length;
+
+      // 编辑时使用边界判断模式：只有越过当前阶的边界才升降阶
+      const currentOrder = this._currentFitOrder ?? this.representation.data.fittedOrder;
+      const editOrder = currentOrder !== undefined
+        ? ParametricImpl.computeEditOrder(N, { currentOrder })
+        : ParametricImpl.computeEditOrder(N);
+
       this.fitSphericalHarmonics({
-        order: coeffs ? Math.floor(Math.sqrt(coeffs.length)) - 1 : 3,
+        order: editOrder,
         fitter: this._fitterInstance.constructor,
         Matrix: this._matrixClass,
         sphericalHarmonics: this.representation.data.sphericalHarmonics,

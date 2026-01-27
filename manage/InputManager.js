@@ -302,18 +302,31 @@ export const InputManager = {
 
     handleEditMouseMove(e) {
         if (SystemState.draggedControlPoint) {
-            const dx = e.clientX - SystemState.lastMouseX;
-            const dy = e.clientY - SystemState.lastMouseY;
-            if (dx !== 0 || dy !== 0) {
+            // 获取当前虚拟鼠标吸附到的格点
+            const snapped = SystemState.virtualMouse.snappedTo;
+
+            // 只有吸附到有效的局部格点时才移动控制点
+            if (snapped && snapped.tag === 'LOCAL_GRID') {
+                // 检查约束条件：
+                // 1. 不允许拖到中心点（lx=ly=lz=0）
+                const isCenter = (Math.abs(snapped.lx) < 0.01 &&
+                    Math.abs(snapped.ly) < 0.01 &&
+                    Math.abs(snapped.lz) < 0.01);
+                if (isCenter) {
+                    // 返回 null 表示不移动，虚拟鼠标仍会更新但控制点不动
+                    return null;
+                }
+
+                // 2. 检查是否与其他控制点重合（由 Hub 处理）
                 return {
-                    type: 'MOVE_CONTROL_POINT',
-                    controlPoint: SystemState.draggedControlPoint, // Hub needs to validate this
-                    dx,
-                    dy,
+                    type: 'SNAP_CONTROL_POINT_TO_GRID',
+                    controlPoint: SystemState.draggedControlPoint,
+                    gridPoint: snapped,
                     mouseX: e.clientX,
                     mouseY: e.clientY
                 };
             }
+            // 未吸附到有效格点时，不移动控制点
         }
         return null;
     },
@@ -375,47 +388,54 @@ export const InputManager = {
 
     handleEditClick(event) {
         const now = Date.now();
-        let intent = null;
-        if (lastClickTarget === 'edit_empty' && now - lastClickTime < DOUBLE_CLICK_THRESHOLD) {
-            intent = { type: 'ADD_CONTROL_POINT', x: event.clientX, y: event.clientY };
-        }
-
-        // We need to know if we clicked a control point to set lastClickTarget correctly.
-        // This implies READ access to scene state (findControlPointAt).
-        // Hub can pass this info? Or we return a GENERIC click intent and Hub processes it?
-        // Let's return logic-rich intent or a request to check.
-
-        // To strictly follow "InputManager doesn't call scene logic", 
-        // we should return: { type: 'EDIT_CLICK', x:clientX, y:clientY }
-        // And let Hub update lastClickTarget?
-        // But lastClickTarget is local to this module (top of file).
-
-        // Compromise: We need to know what we clicked.
-        // In `handleViewClick`, we used `SystemState.virtualMouse.snappedTo`.
-        // In `handleEditClick`, we need `findControlPointAt`.
-        // We can't import `findControlPointAt` from main.js (circular).
-        // It should be moved to a helper or just implemented here as pure logic given `SystemState.focusedObject`.
-        // Let's replicate the pure logic of `findControlPointAt` here since it only reads SystemState.
-
         const obj = SystemState.focusedObject;
+        if (!obj) return null;
+
+        // 1. 检查是否点击了控制点
         let clickedCP = null;
-        if (obj) {
-            const points = obj.controlPoints && obj.controlPoints.length > 0
-                ? obj.controlPoints
-                : (obj.constructionPoints || []).slice(0, 20);
-            const radius = 15;
-            for (const p of points) {
-                if (p.tag !== 'CONTROL') continue;
-                const dist = Math.sqrt((p.xM - event.clientX) ** 2 + (p.yM - event.clientY) ** 2);
-                if (dist < radius) {
-                    clickedCP = p;
-                    break;
-                }
+        const points = obj.controlPoints?.length > 0
+            ? obj.controlPoints
+            : (obj.constructionPoints || []).slice(0, 20);
+        const radius = 15;
+        for (const p of points) {
+            if (p.tag !== 'CONTROL') continue;
+            const dist = Math.sqrt((p.xM - event.clientX) ** 2 + (p.yM - event.clientY) ** 2);
+            if (dist < radius) {
+                clickedCP = p;
+                break;
             }
         }
 
+        // 2. 检查是否吸附到局部格点
+        const snapped = SystemState.virtualMouse.snappedTo;
+        const snappedToLocalGrid = snapped && snapped.tag === 'LOCAL_GRID';
+
+        // 3. 双击判定
+        const isDoubleClick = (now - lastClickTime < DOUBLE_CLICK_THRESHOLD);
+        let intent = null;
+
+        if (isDoubleClick) {
+            if (lastClickTarget === 'control_point' && clickedCP) {
+                // 双击控制点 → 删除
+                intent = { type: 'DELETE_CONTROL_POINT', controlPoint: clickedCP };
+            } else if (lastClickTarget === 'local_grid' && snappedToLocalGrid && !clickedCP) {
+                // 双击空的局部格点 → 新增
+                intent = {
+                    type: 'ADD_CONTROL_POINT_AT_GRID',
+                    gridPoint: snapped
+                };
+            }
+        }
+
+        // 4. 更新状态
         lastClickTime = now;
-        lastClickTarget = clickedCP ? 'edit_control' : 'edit_empty';
+        if (clickedCP) {
+            lastClickTarget = 'control_point';
+        } else if (snappedToLocalGrid) {
+            lastClickTarget = 'local_grid';
+        } else {
+            lastClickTarget = 'edit_empty';
+        }
 
         return intent;
     },

@@ -415,6 +415,10 @@ export class ObjectFactoryImpl {
                     const z = iz * spacing;
 
                     const p = new Point(x, y, z);
+                    // 显式设置局部坐标（确保吸附时能正确获取）
+                    p.lx = x;
+                    p.ly = y;
+                    p.lz = z;
                     p._localX = x;
                     p._localY = y;
                     p._localZ = z;
@@ -563,6 +567,133 @@ export class ObjectFactoryImpl {
             frontDirection: { x: 0, y: -1, z: 0 },
             upDirection: { x: 0, y: 0, z: 1 },
             name: 'CrossIntegerGrid'
+        });
+    }
+
+    // ==========================================================================
+    // 球形基点生成
+    // ==========================================================================
+
+    /**
+     * 创建球形基点对象
+     * 在整数格网上筛选接近球面的点，用于 SH 拟合的初始控制点
+     * 
+     * @param {number} cx - 球心 X（世界坐标）
+     * @param {number} cy - 球心 Y（世界坐标）
+     * @param {number} cz - 球心 Z（世界坐标）
+     * @param {object} [options] - 可选配置
+     * @param {number} [options.radius] - 球半径（默认使用 EditConfig.localGridHalfSize）
+     * @param {number} [options.tolerance=0.6] - 表面厚度容差（格点到球面的最大距离）
+     * @returns {Object}
+     */
+    static createSphericalBasis(cx, cy, cz, options = {}) {
+        const radius = options.radius ?? EditConfig.localGridHalfSize;
+        const tolerance = options.tolerance ?? 0.6;  // 允许 ±0.6 的误差
+        const points = [];
+
+        // 遍历包围盒内的整数格点
+        const maxCoord = Math.ceil(radius);
+        for (let x = -maxCoord; x <= maxCoord; x++) {
+            for (let y = -maxCoord; y <= maxCoord; y++) {
+                for (let z = -maxCoord; z <= maxCoord; z++) {
+                    // 计算到原点的距离
+                    const r = Math.sqrt(x * x + y * y + z * z);
+
+                    // 筛选球面附近的点
+                    if (Math.abs(r - radius) <= tolerance) {
+                        const p = new Point(x, y, z);
+                        p.isAttractable = false;
+                        points.push(p);
+                    }
+                }
+            }
+        }
+
+        // 如果点数太少，使用更宽松的容差重新生成
+        if (points.length < 4) {
+            console.warn('[ObjectFactoryImpl] createSphericalBasis: Too few points, using fallback');
+            // Fallback：使用 6 个轴上的点
+            const fallbackPoints = [
+                new Point(radius, 0, 0),
+                new Point(-radius, 0, 0),
+                new Point(0, radius, 0),
+                new Point(0, -radius, 0),
+                new Point(0, 0, radius),
+                new Point(0, 0, -radius)
+            ];
+            fallbackPoints.forEach(p => p.isAttractable = false);
+            return new Object(fallbackPoints, {
+                center: { x: cx, y: cy, z: cz },
+                frontDirection: { x: 0, y: -1, z: 0 },
+                upDirection: { x: 0, y: 0, z: 1 },
+                name: 'SphericalBasis'
+            });
+        }
+
+        return new Object(points, {
+            center: { x: cx, y: cy, z: cz },
+            frontDirection: { x: 0, y: -1, z: 0 },
+            upDirection: { x: 0, y: 0, z: 1 },
+            name: 'SphericalBasis'
+        });
+    }
+
+    /**
+     * 创建球形基点对象（带密度控制）
+     * 使用斐波那契球点分布生成更均匀的球面点
+     * 
+     * @param {number} cx - 球心 X（世界坐标）
+     * @param {number} cy - 球心 Y（世界坐标）
+     * @param {number} cz - 球心 Z（世界坐标）
+     * @param {object} [options] - 可选配置
+     * @param {number} [options.radius] - 球半径（默认使用 EditConfig.localGridHalfSize）
+     * @param {number} [options.numPoints=50] - 目标点数
+     * @returns {Object}
+     */
+    static createFibonacciSphere(cx, cy, cz, options = {}) {
+        const radius = options.radius ?? EditConfig.localGridHalfSize;
+        const n = options.numPoints ?? 50;
+        const points = [];
+
+        const goldenRatio = (1 + Math.sqrt(5)) / 2;
+        const angleIncrement = Math.PI * 2 * goldenRatio;
+
+        for (let i = 0; i < n; i++) {
+            // 均匀分布在 [-1, 1]
+            const t = i / (n - 1);
+            const y = 1 - 2 * t;
+            const radiusAtY = Math.sqrt(1 - y * y);
+
+            const theta = angleIncrement * i;
+            const x = Math.cos(theta) * radiusAtY;
+            const z = Math.sin(theta) * radiusAtY;
+
+            // 缩放到目标半径并取整到格点
+            const px = Math.round(x * radius);
+            const py = Math.round(y * radius);
+            const pz = Math.round(z * radius);
+
+            const p = new Point(px, py, pz);
+            p.isAttractable = false;
+            points.push(p);
+        }
+
+        // 去重
+        const uniquePoints = [];
+        const seen = new Set();
+        for (const p of points) {
+            const key = `${p.x},${p.y},${p.z}`;
+            if (!seen.has(key)) {
+                seen.add(key);
+                uniquePoints.push(p);
+            }
+        }
+
+        return new Object(uniquePoints, {
+            center: { x: cx, y: cy, z: cz },
+            frontDirection: { x: 0, y: -1, z: 0 },
+            upDirection: { x: 0, y: 0, z: 1 },
+            name: 'FibonacciSphere'
         });
     }
 }

@@ -238,8 +238,6 @@ export function createMoveControlPointCommand(obj, controlPoint, fromLocal, toLo
         execute() {
             if (controlPoint) {
                 controlPoint.lx = toLocal.x;
-                controlPoint.lx = toLocal.x; // Typo fix in next line
-                controlPoint.lx = toLocal.x;
                 controlPoint.ly = toLocal.y;
                 controlPoint.lz = toLocal.z;
                 obj._dirty = true;
