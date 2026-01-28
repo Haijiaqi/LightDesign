@@ -590,14 +590,25 @@ export class ObjectFactoryImpl {
     static createSphericalBasis(cx, cy, cz, options = {}) {
         // 修复：半径默认为局部格网尺寸的一半（直径 = 局部格网边长的一半）
         const radius = options.radius ?? (EditConfig.localGridHalfSize / 2);
-        const tolerance = options.tolerance ?? 0.6;  // 允许 ±0.6 的误差
+
+        // [修改] 步长与 EditConfig.spacing 挂钩
+        const step = EditConfig.spacing;
+        // [修改] 容差自适应：默认约为 0.6 * step，确保只会选中一层球面点
+        const tolerance = options.tolerance ?? (step * 0.6);
+
         const points = [];
 
-        // 遍历包围盒内的整数格点
-        const maxCoord = Math.ceil(radius);
-        for (let x = -maxCoord; x <= maxCoord; x++) {
-            for (let y = -maxCoord; y <= maxCoord; y++) {
-                for (let z = -maxCoord; z <= maxCoord; z++) {
+        // 遍历包围盒内的格点 (使用步长 step)
+        // 使用整数索引避免浮点累积误差
+        const maxSteps = Math.ceil(radius / step);
+
+        for (let ix = -maxSteps; ix <= maxSteps; ix++) {
+            for (let iy = -maxSteps; iy <= maxSteps; iy++) {
+                for (let iz = -maxSteps; iz <= maxSteps; iz++) {
+                    const x = ix * step;
+                    const y = iy * step;
+                    const z = iz * step;
+
                     // 计算到原点的距离
                     const r = Math.sqrt(x * x + y * y + z * z);
 
@@ -605,6 +616,12 @@ export class ObjectFactoryImpl {
                     if (Math.abs(r - radius) <= tolerance) {
                         const p = new Point(x, y, z);
                         p.isAttractable = false;
+
+                        // 显式设置局部坐标 (Create control points with correct local coords)
+                        p.lx = x;
+                        p.ly = y;
+                        p.lz = z;
+
                         points.push(p);
                     }
                 }
