@@ -129,6 +129,9 @@ export class Object {
     };
     this._dirty = true;
 
+    // ━━━ 物体级可见性 ━━━
+    this.isVisible = true;  // [新增] 控制整个物体是否可见（用于隐藏非聚焦物体）
+
     // 兼容旧属性 (Deprecating)
     this.center = this.transform.position; // 引用同一个对象
     this.quaternion = this.transform.rotation; // 引用同一个对象
@@ -722,12 +725,23 @@ export class Object {
     let structureRange = null;
 
     if (targetOrder === undefined) {
-      // 确保 fitter 已初始化
+      // 确保 fitter 已初始化 (保持为了后续拟合使用)
       if (!this._fitterInstance) {
         this._fitterInstance = new FitterClass({ Matrix, verbose: this.verbose });
         this._matrixClass = Matrix;
       }
 
+      // [修改] 使用区间定阶 (基于点数 N 直接查表)
+      // 替代原有的 determineOptimalOrder (基于条件数判定)
+      targetOrder = ParametricImpl.computeEditOrder(positions.length);
+      structureRange = null; // 区间定阶暂无结构范围信息
+
+      if (this.verbose) {
+        console.log(`[Object] Interval-based order determination: N=${positions.length} -> L=${targetOrder}`);
+      }
+
+      // 旧逻辑已注释：
+      /*
       // 使用 v2.4 两阶段自适应阶数确定
       const orderResult = ParametricImpl.determineOptimalOrder(
         positions,
@@ -742,9 +756,10 @@ export class Object {
 
       targetOrder = orderResult.bestOrder;
       structureRange = orderResult.structureRange;
+      */
 
       // 允许 bestOrder = 0，但 fallback 到 1
-      if (targetOrder === 0) {
+      if (targetOrder < 1) {
         console.warn('[Object] No valid SH order found, using order=1 as fallback');
         targetOrder = 1;
       }

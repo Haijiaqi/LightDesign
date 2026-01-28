@@ -151,10 +151,7 @@ class SystemStateClass {
         this.focusedObject = null;
         for (const obj of this.objects) {
             obj.visualAlpha = 1.0;
-            const points = obj.displayPoints.length > 0 ? obj.displayPoints : obj.constructionPoints;
-            for (const p of points) {
-                if (p.tag === 'DIMMED') p.tag = null;
-            }
+            obj.isVisible = true;  // [修改] 恢复所有物体可见性
         }
     }
 
@@ -282,8 +279,7 @@ class SystemStateClass {
         for (const other of this.objects) {
             if (other !== obj) {
                 other.visualAlpha = 0.05;
-                const points = other.displayPoints.length > 0 ? other.displayPoints : other.constructionPoints;
-                for (const p of points) { p.tag = 'DIMMED'; }
+                other.isVisible = false;  // [修改] 直接隐藏非聚焦物体
             }
         }
 
@@ -468,10 +464,7 @@ class SystemStateClass {
             for (const other of self.objects) {
                 if (other !== obj) {
                     other.visualAlpha = 1.0;
-                    const points = other.displayPoints.length > 0 ? other.displayPoints : other.constructionPoints;
-                    for (const p of points) {
-                        if (p.tag === 'DIMMED') p.tag = null;
-                    }
+                    other.isVisible = true;  // [修改] 恢复所有物体可见性
                 }
             }
 

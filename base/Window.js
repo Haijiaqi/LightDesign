@@ -138,6 +138,9 @@ export class Window {
     // 处理 objects 集合（原 calculateAPoint 逻辑）
     for (let oi = 0; oi < objects.length; oi++) {
       const object = objects[oi];
+      // [新增] 物体级可见性过滤：跳过被隐藏的物体（如非聚焦物体）
+      if (object.isVisible === false) continue;
+
       // 阶段1修改：优先使用 displayPoints（渲染用），回退到 constructionPoints
       const renderPoints = (object.displayPoints && object.displayPoints.length > 0)
         ? object.displayPoints
@@ -146,6 +149,9 @@ export class Window {
 
       for (let pi = 0; pi < renderPoints.length; pi++) {
         const point = renderPoints[pi];
+        // [新增] 业务可见性过滤：跳过被业务逻辑隐藏的点（如切片显示）
+        if (point.isVisible === false) continue;
+
         // 1. 执行公共基础计算
         const inverseRate = this.calculateBasePoint(
           head,
@@ -204,12 +210,12 @@ export class Window {
 
       // 阶段11新增：处理控制点（Control Points）- 仅在 EDIT 态显示
       // 控制点通常不包含在 displayPoints 中。
-      // 仅当控制点具有有效 Tag（由 main.js 在 enterEditState/showControlPoints 中设置）时才处理。
       if (object.controlPoints && object.controlPoints.length > 0) {
         for (let pi = 0; pi < object.controlPoints.length; pi++) {
           const point = object.controlPoints[pi];
-          // 关键过滤：仅处理被标记为 CONTROL 的点 (即 EDIT 态可见)
-          // 同时也兼容 tag 可能是其他值的情况，只要不是 null/undefined
+          // [新增] 业务可见性过滤：isVisible 控制切片显示
+          if (point.isVisible === false) continue;
+          // Tag 过滤：仅处理被标记为 CONTROL 的点
           if (!point.tag) continue;
 
           // 1. 初始化特有属性

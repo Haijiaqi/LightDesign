@@ -397,45 +397,72 @@ export const InputManager = {
         const obj = SystemState.focusedObject;
         if (!obj) return null;
 
-        // 1. 检查是否点击了控制点
-        let clickedCP = null;
+        // 1. 检查是否点击了可见的控制点（屏幕坐标判断）
+        let clickedVisibleCP = null;
         const points = obj.controlPoints?.length > 0
             ? obj.controlPoints
             : (obj.constructionPoints || []).slice(0, 20);
         const radius = 15;
         for (const p of points) {
+            // 使用 isVisible 判断可见性（tag 现在仅用于样式）
+            if (p.isVisible === false) continue;
             if (p.tag !== 'CONTROL') continue;
             const dist = Math.sqrt((p.xM - event.clientX) ** 2 + (p.yM - event.clientY) ** 2);
             if (dist < radius) {
-                clickedCP = p;
+                clickedVisibleCP = p;
                 break;
             }
         }
 
-        // 2. 检查是否吸附到局部格点
+        // 2. 检查是否吸附到局部格点（包括边缘点）
         const snapped = SystemState.virtualMouse.snappedTo;
-        const snappedToLocalGrid = snapped && snapped.tag === 'LOCAL_GRID';
+        const snappedToLocalGrid = snapped && (snapped.tag === 'LOCAL_GRID' || snapped.tag === 'LOCAL_GRID_EDGE');
 
-        // 3. 双击判定
+        // 3. 如果吸附到格点，检查该格点位置是否已有控制点（无论是否可见）
+        let existingCPAtGrid = null;
+        if (snappedToLocalGrid && obj.controlPoints) {
+            const TOLERANCE = 0.1; // 1mm 容差，使用局部坐标比较
+            // 使用格点的局部坐标（lx, ly, lz）与控制点比较
+            const gridLocalX = snapped.lx ?? snapped._localX ?? 0;
+            const gridLocalY = snapped.ly ?? snapped._localY ?? 0;
+            const gridLocalZ = snapped.lz ?? snapped._localZ ?? 0;
+
+            for (const cp of obj.controlPoints) {
+                const dx = Math.abs(cp.lx - gridLocalX);
+                const dy = Math.abs(cp.ly - gridLocalY);
+                const dz = Math.abs(cp.lz - gridLocalZ);
+                if (dx < TOLERANCE && dy < TOLERANCE && dz < TOLERANCE) {
+                    existingCPAtGrid = cp;
+                    break;
+                }
+            }
+        }
+
+        // 4. 双击判定
         const isDoubleClick = (now - lastClickTime < DOUBLE_CLICK_THRESHOLD);
         let intent = null;
 
         if (isDoubleClick) {
-            if (lastClickTarget === 'control_point' && clickedCP) {
-                // 双击控制点 → 删除
-                intent = { type: 'DELETE_CONTROL_POINT', controlPoint: clickedCP };
-            } else if (lastClickTarget === 'local_grid' && snappedToLocalGrid && !clickedCP) {
-                // 双击空的局部格点 → 新增
-                intent = {
-                    type: 'ADD_CONTROL_POINT_AT_GRID',
-                    gridPoint: snapped
-                };
+            if (lastClickTarget === 'control_point' && clickedVisibleCP) {
+                // 双击可见控制点 → 删除
+                intent = { type: 'DELETE_CONTROL_POINT', controlPoint: clickedVisibleCP };
+            } else if (lastClickTarget === 'local_grid' && snappedToLocalGrid) {
+                if (existingCPAtGrid) {
+                    // 双击格点，但位置已有控制点（可能不可见）→ 删除
+                    intent = { type: 'DELETE_CONTROL_POINT', controlPoint: existingCPAtGrid };
+                } else {
+                    // 双击空的局部格点 → 新增
+                    intent = {
+                        type: 'ADD_CONTROL_POINT_AT_GRID',
+                        gridPoint: snapped
+                    };
+                }
             }
         }
 
-        // 4. 更新状态
+        // 5. 更新状态
         lastClickTime = now;
-        if (clickedCP) {
+        if (clickedVisibleCP) {
             lastClickTarget = 'control_point';
         } else if (snappedToLocalGrid) {
             lastClickTarget = 'local_grid';

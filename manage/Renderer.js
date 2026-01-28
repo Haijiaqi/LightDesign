@@ -237,9 +237,7 @@ export const Renderer = {
                 p
             );
             if (inverseRate === null) continue;
-            if (p.tag === 'SLICE_CONTOUR') {
-                this.renderPointSimple(p, 0.8, pixelData, width, height);
-            }
+            // SLICE_CONTOUR 已移除
         }
     },
     renderScreenPixel(x, y, colorType, light, pixelData, width, height) {

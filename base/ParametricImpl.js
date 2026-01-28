@@ -39,9 +39,9 @@ export class ParametricImpl {
    * 阶数区间计算参数
    * 区间公式：对于 L 阶，N 的范围为 (2 * (L+1)^α, 2 * (L+1)^β]
    */
-  static ORDER_ALPHA = 1.8696;  // 下界指数
-  static ORDER_BETA = 2.0705;   // 上界指数
-  static ORDER_COEFF = 2;       // 系数
+  static ORDER_ALPHA = 1.8914;  // 下界指数
+  static ORDER_BETA = 2.0495;   // 上界指数
+  static ORDER_COEFF = 3;       // 系数
   static ORDER_MIN = 1;         // 最小阶数
   static ORDER_MAX = 25;        // 最大阶数
 

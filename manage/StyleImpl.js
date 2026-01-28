@@ -147,11 +147,10 @@ export class StyleImpl {
             fixedLight: 0.5,
             neighborRule: 'none'
         },
-        // 控制点：立体高亮，使用发光效果
+        // 控制点：立体渲染，受光照影响，使用发光效果
         CONTROL: {
             colorMode: 'stereo',
-            lightAffected: false,
-            fixedLight: 1.0,
+            lightAffected: true,  // [修改] 改为受光照影响
             neighborRule: 'glow',
             glowRadius: 5
         },
@@ -167,7 +166,8 @@ export class StyleImpl {
         LOCAL_GRID: {
             colorMode: 'stereo',
             lightAffected: true,  // 使用点的 light 属性
-            neighborRule: 'none'
+            neighborRule: 'glow',
+            glowRadius: 3
         },
         // 局部格网虚线点：立体渲染，使用动态设置的 light 值
         LOCAL_GRID_DASH: {
@@ -175,11 +175,19 @@ export class StyleImpl {
             lightAffected: true,  // 使用点的 light 属性
             neighborRule: 'none'
         },
-        // 局部格网控制点（差异化显示，强度较低）
-        LOCAL_GRID_CONTROL: {
+        // 局部格网棱点：始终显示，与普通点样式一致
+        LOCAL_GRID_EDGE: {
             colorMode: 'stereo',
+            lightAffected: true,  // 使用点的 light 属性（创建时固定为 0.8）
+            neighborRule: 'glow',
+            glowRadius: 3
+        },
+        // 屏幕平面近点：单色紫色，带发光效果
+        PLANE_NEAR: {
+            colorMode: 'mono',
+            monoKey: 'purple',
             lightAffected: false,
-            fixedLight: 1.0,
+            fixedLight: 0.95,
             neighborRule: 'glow',
             glowRadius: 3
         }

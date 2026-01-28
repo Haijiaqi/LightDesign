@@ -8,10 +8,23 @@ export const EditConfig = {
     // ===== 基础参数 (直接设定) =====
 
     /** 层间距（面向态），厘米 */
-    spacing: 1.0,
+    spacing: 0.5,
 
     /** 平面高亮阈值（厘米），点到当前编辑平面的垂直距离小于此值时高亮 */
     planeHighlightThreshold: 0.15,
+
+    /** 显示点采样密度（点/平方厘米），控制视觉渲染的细腻程度 */
+    displayPointDensity: 25.0,
+
+    /** 球壳控制点采样步长（厘米）= spacing */
+    get shControlPointStep() {
+        return this.spacing;
+    },
+
+    /** 球壳控制点采样厚度容差（厘米）= spacing * 0.4 */
+    get shControlPointThickness() {
+        return this.spacing * 0.4;
+    },
 
     // ===== 派生参数 (基于设备尺寸) =====
 

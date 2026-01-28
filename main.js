@@ -123,8 +123,8 @@ async function init() {
             sphericalHarmonics: sh
         });
 
-        // Generate display points with low density for performance
-        sphereBasis.generateDisplayPoints({ density: 50.0 });
+        // Generate display points with moderate density for better visibility
+        sphereBasis.generateDisplayPoints({ density: EditConfig.displayPointDensity });
 
         console.log(`[Main] SphericalBasis ready. Display points: ${sphereBasis.displayPoints?.length}`);
     } else {
@@ -575,6 +575,16 @@ function processIntent(intent) {
 
                 if (!cp || !gp || !obj) break;
 
+                // [规则] 禁止拖到中心点（0,0,0）
+                const CENTER_TOLERANCE = 0.01;
+                const isCenterTarget = Math.abs(gp.lx) < CENTER_TOLERANCE &&
+                    Math.abs(gp.ly) < CENTER_TOLERANCE &&
+                    Math.abs(gp.lz) < CENTER_TOLERANCE;
+                if (isCenterTarget) {
+                    console.log('[EDIT] 不允许拖动控制点到中心');
+                    break;
+                }
+
                 // 约束检查：不允许拖到已有控制点的位置
                 const TOLERANCE = 0.05; // 5mm 容差
                 let isOccupied = false;
@@ -692,18 +702,50 @@ function processIntent(intent) {
                 if (obj && gp) {
                     // 将格点的世界坐标转换为局部坐标
                     const localPos = worldToLocal(obj, { x: gp.x, y: gp.y, z: gp.z });
-                    const newPoint = new Point(localPos.x, localPos.y, localPos.z);
-                    newPoint.lx = localPos.x;
-                    newPoint.ly = localPos.y;
-                    newPoint.lz = localPos.z;
-                    newPoint.tag = 'CONTROL';
 
-                    if (!obj.controlPoints) obj.controlPoints = [];
-                    const cmd = createAddControlPointCommand(obj, newPoint);
-                    HistoryManager.execute(cmd);
-                    obj._needsRefit = true;
-                    updateControlPointsDisplay();
-                    console.log(`[EDIT] 新增控制点 at (${localPos.x.toFixed(2)}, ${localPos.y.toFixed(2)}, ${localPos.z.toFixed(2)})`);
+                    // [规则] 禁止在中心点（0,0,0）操作控制点
+                    const CENTER_TOLERANCE = 0.01;
+                    const isCenter = Math.abs(localPos.x) < CENTER_TOLERANCE &&
+                        Math.abs(localPos.y) < CENTER_TOLERANCE &&
+                        Math.abs(localPos.z) < CENTER_TOLERANCE;
+                    if (isCenter) {
+                        console.log(`[EDIT] 中心点不允许新增/删除控制点`);
+                        break;
+                    }
+
+                    // 检查该位置是否已存在控制点（使用局部坐标比较）
+                    const TOLERANCE = 0.01; // 1mm 容差
+                    const existingIndex = obj.controlPoints?.findIndex(cp => {
+                        const dx = Math.abs(cp.lx - localPos.x);
+                        const dy = Math.abs(cp.ly - localPos.y);
+                        const dz = Math.abs(cp.lz - localPos.z);
+                        return dx < TOLERANCE && dy < TOLERANCE && dz < TOLERANCE;
+                    }) ?? -1;
+
+                    if (existingIndex >= 0) {
+                        // 位置已存在控制点 → 删除它（切换逻辑）
+                        const cmd = createDeleteControlPointCommand(obj, existingIndex);
+                        HistoryManager.execute(cmd);
+                        obj._needsRefit = true;
+                        updateControlPointsDisplay();
+                        console.log(`[EDIT] 格点位置已有控制点，删除 #${existingIndex}`);
+                    } else {
+                        // 位置无控制点 → 新增
+                        const newPoint = new Point(localPos.x, localPos.y, localPos.z);
+                        newPoint.lx = localPos.x;
+                        newPoint.ly = localPos.y;
+                        newPoint.lz = localPos.z;
+                        newPoint.tag = 'CONTROL';
+                        newPoint.isVisible = true;      // 新点立即可见
+                        newPoint.isAttractable = true;  // 新点可吸附
+
+                        if (!obj.controlPoints) obj.controlPoints = [];
+                        const cmd = createAddControlPointCommand(obj, newPoint);
+                        HistoryManager.execute(cmd);
+                        obj._needsRefit = true;
+                        updateControlPointsDisplay();
+                        console.log(`[EDIT] 新增控制点 at (${localPos.x.toFixed(2)}, ${localPos.y.toFixed(2)}, ${localPos.z.toFixed(2)})`);
+                    }
                 }
             }
             break;
@@ -952,8 +994,11 @@ function updateCamera() {
 function render() {
     const ctx = SystemState.ctx;
     const { screenWidthPx: width, screenHeightPx: height } = SystemState;
+    // 正确时序：
+    // 1. updateCamera: 更新相机位置和方向，为后续计算提供 direction 基准
+    // 2. updateLocalGrid: 使用 win.direction 计算切片距离，设置 isVisible
+    // 3. Renderer.render -> Window.calculate: 使用 isVisible 过滤点
     updateCamera();
-    // [FIX] 必须在 updateCamera 之后调用，确保 light 设置在点被添加到 grid 之后生效
     updateLocalGrid();
     // [PERF] updateVisibleReflection 已在 gameLoop 中按需调用，此处移除重复调用
     const imageData = Renderer.render(ctx, width, height); // NOTE: Renderer.render now handles point drawing logic
@@ -1571,9 +1616,10 @@ function finishEnterEditState(obj) {
     console.log(`[DEBUG] LocalGrid created: displayPoints=${localGrid.displayPoints?.length}`);
 
     // 立即调用一次 updateLocalGrid 确保初始状态
-    updateLocalGrid(true); // force=true 强制首次更新
-
+    // 注意顺序：先 showControlPoints 初始化 tag，再 updateLocalGrid 设置 isVisible
     showControlPoints(obj);
+    updateLocalGrid(true); // force=true 强制首次更新，设置正确的 isVisible
+
     SystemState.ifControl = true;
     console.log('[STATE] EDIT entered');
 }
@@ -1636,22 +1682,32 @@ function exitEditState() {
 
 function showControlPoints(obj) {
     if (!obj) return;
+    // 初始化控制点属性（isVisible 由 updateLocalGrid 统一管理切片显示）
     const points = obj.controlPoints && obj.controlPoints.length > 0 ? obj.controlPoints : (obj.constructionPoints || []).slice(0, 20);
-    for (const cp of points) { cp.tag = 'CONTROL'; cp.isAttractable = true; }
+    for (const cp of points) {
+        cp.tag = 'CONTROL';
+        cp.isAttractable = true;
+        cp.isVisible = true;  // 初始可见，由 updateLocalGrid 根据切片距离更新
+    }
 }
 
 function hideControlPoints() {
     const obj = SystemState.focusedObject;
     if (!obj) return;
     const points = obj.controlPoints && obj.controlPoints.length > 0 ? obj.controlPoints : (obj.constructionPoints || []).slice(0, 20);
-    for (const p of points) { p.tag = null; }
+    for (const p of points) {
+        p.tag = null;
+        p.isVisible = false;  // 退出 EDIT 时隐藏所有控制点
+    }
 }
 
 function updateControlPointsDisplay() {
-    const obj = SystemState.focusedObject;
-    if (!obj) return;
-    hideControlPoints();
-    showControlPoints(obj);
+    // 注意：此函数现在仅用于新增/删除控制点后刷新
+    // 切片显示逻辑完全由 updateLocalGrid 负责
+    // 不再调用 showControlPoints 以避免覆盖切片状态
+
+    // 触发 updateLocalGrid 刷新控制点可见性
+    updateLocalGrid(true);
 }
 
 function findControlPointAt(screenX, screenY) {
@@ -1836,26 +1892,65 @@ function updateLocalGrid(force = false) {
     const dir = win.direction;
     const planePt = dir.start;
 
-    // 显示阈值：严格裁剪，只保留屏幕平面附近的点（与吸附阈值一致）
+    // 显示阈值：严格裁剪，只保留屏幕平面附近的点
     const DISPLAY_THRESHOLD = 0.1;
     // 吸附阈值：只有极近屏幕平面的点可吸附（0.1cm）
     const SNAP_THRESHOLD = 0.1;
 
-    // 【规格 B】只处理 displayPoints
-    // controlPoints 由 Window.calculate 统一处理（EDIT 态始终可见）
+    // ========================================================================
+    // 局部格网点：使用 isVisible 控制业务显隐，light 保持固定值
+    // ========================================================================
     for (const p of grid.displayPoints) {
         // 计算点到屏幕平面的距离
         const dist = (p.x - planePt.x) * dir.x + (p.y - planePt.y) * dir.y + (p.z - planePt.z) * dir.z;
         const absDist = Math.abs(dist);
 
         if (p.tag === 'LOCAL_GRID') {
-            // 控制可见性：通过 light 属性（0 = 不可见）
-            p.light = (absDist <= DISPLAY_THRESHOLD) ? 0.8 : 0;
-            // 控制吸附：只有屏幕平面上的点可吸附
+            // 业务可见性：通过 isVisible 控制（与物理光照分离）
+            p.isVisible = (absDist <= DISPLAY_THRESHOLD);
+            // 吸附控制：只有屏幕平面上的点可吸附
             p.isAttractable = (absDist <= SNAP_THRESHOLD);
+            // light 保持固定，不用于显隐
+            p.light = 0.8;
         } else if (p.tag === 'LOCAL_GRID_DASH') {
-            p.light = (absDist <= DISPLAY_THRESHOLD) ? 0.4 : 0;
+            p.isVisible = (absDist <= DISPLAY_THRESHOLD);
             p.isAttractable = false;
+            p.light = 0.4;
+        } else if (p.tag === 'LOCAL_GRID_EDGE') {
+            // 棱点：始终可见，始终可吸附
+            p.isVisible = true;
+            p.isAttractable = true;
+            p.light = 0.8;
+        }
+    }
+
+    // ========================================================================
+    // 控制点切片显示：使用 isVisible 控制，保留 tag='CONTROL'
+    // ========================================================================
+    const focusedObj = SystemState.focusedObject;
+    if (focusedObj && focusedObj.controlPoints && SystemState.interactionState === 'EDIT') {
+        for (const cp of focusedObj.controlPoints) {
+            // 计算控制点到屏幕平面的距离（世界坐标）
+            const dist = (cp.x - planePt.x) * dir.x + (cp.y - planePt.y) * dir.y + (cp.z - planePt.z) * dir.z;
+            const absDist = Math.abs(dist);
+
+            // 业务可见性控制（tag 始终保持 'CONTROL'，用于样式）
+            cp.isVisible = (absDist <= DISPLAY_THRESHOLD);
+            cp.isAttractable = (absDist <= SNAP_THRESHOLD);
+            // tag 不再用于显隐，保持固定
+            if (!cp.tag) cp.tag = 'CONTROL';
+        }
+    }
+
+    // ========================================================================
+    // 显示点平面近点标记：为渲染提供 isPlaneNear 属性
+    // ========================================================================
+    if (focusedObj && focusedObj.displayPoints && SystemState.interactionState === 'EDIT') {
+        const planeThreshold = EditConfig.planeHighlightThreshold;
+        for (const dp of focusedObj.displayPoints) {
+            // 计算显示点到屏幕平面的距离
+            const dist = (dp.x - planePt.x) * dir.x + (dp.y - planePt.y) * dir.y + (dp.z - planePt.z) * dir.z;
+            dp.isPlaneNear = (Math.abs(dist) <= planeThreshold);
         }
     }
 
@@ -2043,7 +2138,7 @@ async function gameLoop(timestamp = 0) {
                 });
 
                 // 重新生成显示点（密度与初始化保持一致）
-                obj.generateDisplayPoints({ density: 50.0 });
+                obj.generateDisplayPoints({ density: EditConfig.displayPointDensity });
 
                 // 调试：显示阶数变化信息
                 const orderChanged = newOrder !== currentOrder;

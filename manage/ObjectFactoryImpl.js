@@ -404,7 +404,6 @@ export class ObjectFactoryImpl {
         console.log(`创建局部格网: 尺寸=${finalSize}cm, 间距=${spacing}cm, layerCount=${count}`);
 
         const points = [];
-        const controlPoints = [];
 
         // 生成立方体点阵
         for (let ix = -count; ix <= count; ix++) {
@@ -431,30 +430,28 @@ export class ObjectFactoryImpl {
                     const edgeCount = (onEdgeX ? 1 : 0) + (onEdgeY ? 1 : 0) + (onEdgeZ ? 1 : 0);
 
                     if (edgeCount >= 2) {
-                        // 【规格 B】棱上或角上的点：作为 Control Point
-                        // - 直接作为 controlPoints 传入
-                        // - 行为规则：EDIT 态永远显示，永远可吸附，不可编辑
-                        p.tag = 'LOCAL_GRID_CONTROL';
-                        p.isEditable = false;
-                        p.isAttractable = true; // 规格要求永远可吸附
-                        controlPoints.push(p);
-                        points.push(p); // [FIX] 同时加入显示点以确保被渲染
+                        // 棱上或角上的点：作为普通显示点，但始终可见
+                        // Tag 为 LOCAL_GRID_EDGE，与普通点区分以便样式差异化
+                        p.tag = 'LOCAL_GRID_EDGE';
+                        p.isAttractable = true;
+                        p.light = 0.8; // 创建时固定，updateLocalGrid 不再处理
+                        points.push(p);
                     } else {
-                        // 【规格 B】普通格点：作为 Display Point
-                        // - 行为规则：只有靠近屏幕平面才显示/吸附
+                        // 普通格点：根据距离动态显示/隐藏
                         p.tag = 'LOCAL_GRID';
                         p.isAttractable = true;
-                        // light 初始值，会被 updateLocalGrid 动态更新
-                        p.light = 0.8;
+                        p.light = 0.8; // 初始值，会被 updateLocalGrid 动态更新
                         points.push(p);
                     }
                 }
             }
         }
 
-        console.log(`局部格网生成: 格点(Display)=${points.length}, 棱点(Control)=${controlPoints.length}`);
+        // 统计：棱点数量可通过 filter 计算（仅调试用）
+        const edgePointCount = points.filter(p => p.tag === 'LOCAL_GRID_EDGE').length;
+        console.log(`局部格网生成: 总点数=${points.length}, 棱点=${edgePointCount}`);
 
-        // 阶段3修复：正确初始化 transform
+        // 创建格网对象（不再传入 controlPoints，棱点已在 displayPoints 中）
         const gridObj = new Object(points, {
             center: {
                 x: targetObj.center.x,
@@ -466,9 +463,7 @@ export class ObjectFactoryImpl {
                 x: targetObj.quaternion.x,
                 y: targetObj.quaternion.y,
                 z: targetObj.quaternion.z
-            } : { w: 1, x: 0, y: 0, z: 0 },
-            // 【规格 B】显式传入 Control Points
-            controlPoints: controlPoints
+            } : { w: 1, x: 0, y: 0, z: 0 }
         });
 
         gridObj.isLocalGrid = true;
@@ -591,10 +586,10 @@ export class ObjectFactoryImpl {
         // 修复：半径默认为局部格网尺寸的一半（直径 = 局部格网边长的一半）
         const radius = options.radius ?? (EditConfig.localGridHalfSize / 2);
 
-        // [修改] 步长与 EditConfig.spacing 挂钩
-        const step = EditConfig.spacing;
-        // [修改] 容差自适应：默认约为 0.6 * step，确保只会选中一层球面点
-        const tolerance = options.tolerance ?? (step * 0.6);
+        // [修改] 控制点步长：默认使用配置值
+        const step = options.step ?? EditConfig.shControlPointStep;
+        // [修改] 容差自适应：默认使用配置值
+        const tolerance = options.tolerance ?? EditConfig.shControlPointThickness;
 
         const points = [];
 

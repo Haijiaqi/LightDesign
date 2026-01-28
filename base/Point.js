@@ -33,9 +33,10 @@ export class Point {
     this.rz = 0;
 
     // ========== 渲染属性 ==========
-    this.light = 0.6;           // 亮度 (0 = 不渲染)
+    this.light = 0.6;           // 亮度（物理属性：基础亮度、距离衰减、遮挡、反射）
     this.space = 'world';       // 坐标空间：'world' | 'screen'
     this.tag = null;            // 样式标签：SURFACE, CONTROL, LOCAL_GRID, etc.
+    this.isVisible = true;      // 业务可见性（用于切片显示等业务逻辑，与物理光照分离）
 
     // ========== 交互属性 ==========
     this.isAttractable = false; // 是否可被虚拟鼠标吸附

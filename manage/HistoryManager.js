@@ -198,10 +198,28 @@ export function createAddControlPointCommand(obj, point, index = -1) {
             } else {
                 obj.controlPoints.splice(insertedIndex, 0, point);
             }
+            // [FIX] 通知控制点改变，清除拟合缓存
+            if (obj._onControlPointsChanged) {
+                obj._onControlPointsChanged(); // 添加点需要清除所有缓存
+            }
+            // [FIX] 更新世界坐标，确保新点能被正确投影
+            obj._dirty = true;  // 强制更新
+            if (obj.updateWorldPoints) {
+                obj.updateWorldPoints();
+            }
         },
         undo() {
             if (obj.controlPoints && insertedIndex >= 0 && insertedIndex < obj.controlPoints.length) {
                 obj.controlPoints.splice(insertedIndex, 1);
+                // [FIX] 撤销添加后也需要通知
+                if (obj._onControlPointsChanged) {
+                    obj._onControlPointsChanged();
+                }
+                // 更新世界坐标
+                obj._dirty = true;
+                if (obj.updateWorldPoints) {
+                    obj.updateWorldPoints();
+                }
             }
         }
     };
@@ -221,11 +239,29 @@ export function createDeleteControlPointCommand(obj, index) {
             if (obj.controlPoints && index >= 0 && index < obj.controlPoints.length) {
                 deletedPoint = obj.controlPoints[index];
                 obj.controlPoints.splice(index, 1);
+                // [FIX] 通知控制点改变，清除拟合缓存
+                if (obj._onControlPointsChanged) {
+                    obj._onControlPointsChanged(); // 删除点需要清除所有缓存
+                }
+                // 更新世界坐标
+                obj._dirty = true;
+                if (obj.updateWorldPoints) {
+                    obj.updateWorldPoints();
+                }
             }
         },
         undo() {
             if (deletedPoint && obj.controlPoints) {
                 obj.controlPoints.splice(index, 0, deletedPoint);
+                // [FIX] 恢复点后也需要通知
+                if (obj._onControlPointsChanged) {
+                    obj._onControlPointsChanged();
+                }
+                // 更新世界坐标
+                obj._dirty = true;
+                if (obj.updateWorldPoints) {
+                    obj.updateWorldPoints();
+                }
             }
         }
     };

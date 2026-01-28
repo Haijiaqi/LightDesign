@@ -281,68 +281,12 @@ class OverlaySystemImpl {
             const obj = ctx.focusedObject;
             if (!obj) return;
 
-            // B. 截面轮廓 (Slice Contour) - 保持动态生成
-            if (obj.displayPoints && obj.displayPoints.length > 0) {
-                const type = obj._currentOrientationState?.type || 'FACE';
-                const layerSpacing = EditConfig.getLayerSpacingForOrientation(type);
-                const dir = win.direction;
-                const planePt = dir.start;
-                const threshold = layerSpacing * 0.6;
-                const maxPoints = Math.min(obj.displayPoints.length, 2000);
+            // B. 截面轮廓 (Slice Contour) - 已移除，统一使用 displayPoints 渲染
+            // 之前的 SLICE_CONTOUR 逻辑会导致重复渲染单像素点，造成视觉杂乱。
+            // 现在依靠主渲染管线中的 displayPoints 来展示物体。
 
-                for (let i = 0; i < maxPoints; i++) {
-                    const p = obj.displayPoints[i];
-                    const dist = (p.x - planePt.x) * dir.x +
-                        (p.y - planePt.y) * dir.y +
-                        (p.z - planePt.z) * dir.z;
-                    if (Math.abs(dist) < threshold) {
-                        me.addPoint(p.xM, p.yM, p.xL, p.xR, p.yL, p.yR, 'SLICE_CONTOUR', 0.8);
-                    }
-                }
-            }
-
-            // ===== C. [新增] 屏幕平面近点高亮 (PLANE_NEAR) =====
-            // 独立于 SLICE_CONTOUR，使用更小的阈值，表示"几乎在屏幕平面上"的点
-            {
-                const dir = win.direction;
-                const planePt = dir.start;
-                const threshold = EditConfig.planeHighlightThreshold;
-
-                // 处理 displayPoints（视觉渲染点）
-                const points = (obj.displayPoints && obj.displayPoints.length > 0)
-                    ? obj.displayPoints
-                    : obj.constructionPoints;
-
-                if (points && points.length > 0) {
-                    // 性能保护：如果是非常大的点云，可能需要降采样或优化，但通常 displayPoints 数量可控
-                    const maxPoints = Math.min(points.length, 5000);
-
-                    for (let i = 0; i < maxPoints; i++) {
-                        const p = points[i];
-
-                        // 跳过无效屏幕坐标的点 (未被投影或在屏幕外太远)
-                        if (!p.xM || !p.yM) continue;
-
-                        // 计算点到屏幕平面的垂直距离
-                        const dist = (p.x - planePt.x) * dir.x +
-                            (p.y - planePt.y) * dir.y +
-                            (p.z - planePt.z) * dir.z;
-
-                        if (Math.abs(dist) < threshold) {
-                            // 复制为屏幕辅助元素
-                            // tag = null 使用默认紫色渲染 (main.js renderOverlayPoints)
-                            const light = 0.95; // 高亮度
-                            me.addPoint(
-                                p.xM, p.yM,
-                                p.xL || p.xM, p.xR || p.xM,  // 保留视差
-                                p.yL || p.yM, p.yR || p.yM,
-                                null,
-                                light
-                            );
-                        }
-                    }
-                }
-            }
+            // PLANE_NEAR 高亮已迁移到 updateLocalGrid 中通过 isPlaneNear 属性实现
+            // 渲染时在 Renderer 中根据 isPlaneNear 属性加强显示
         });
 
         // 核心优化：直接渲染到 Buffer
@@ -402,7 +346,7 @@ class OverlaySystemImpl {
                     spacingX: baseSpacing * scaleX,
                     spacingY: baseSpacing * scaleY,
                     phaseX, phaseY,
-                    dashPattern: [0.15, 0.35]  // 更轻量的虚线样式 (实0.15cm, 虚0.35cm)
+                    dashPattern: [0.1, 0.4]  // [修改] 实0.1cm, 虚0.4cm
                 });
                 _staticCache.pool.set(cacheKey, cloud);
             }
@@ -441,8 +385,8 @@ class OverlaySystemImpl {
             const sinR = Math.sin(rotation);
 
             // 5. 极速渲染循环 (Direct Pixel Access)
-            // 颜色：紫色 (128, 0, 128) 叠加模式
-            const R = 128, G = 0, B = 128;
+            // 颜色：暗紫色 (96, 0, 96) 叠加模式
+            const R = 96, G = 0, B = 96;
 
             const drawPoints = (points) => {
                 const len = points.length;
