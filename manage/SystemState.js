@@ -272,6 +272,25 @@ class SystemStateClass {
             obj._lastRotProgress = null;
             self.interactionState = 'FOCUS';
             self._helpers.tracePoint?.(obj, 'FOCUS-entered');
+
+            // Phase 9: 激活物理模拟
+            // 强制启用物理，并设置默认参数
+            if (obj && !obj.physics.enabled) {
+                console.log(`[STATE] FOCUS: 激活物理模拟 (${CONFIG.defaultPhysicsModel})`);
+                obj.physics.enabled = true;
+                obj.physics.model = CONFIG.defaultPhysicsModel; // 'force'
+
+                // 确保有合理的刚度和阻尼，如果是 0 则给默认值
+                if (!obj.physics.stiffness || obj.physics.stiffness < 0.1) {
+                    obj.physics.stiffness = 100.0;
+                }
+                if (!obj.physics.damping || obj.physics.damping < 0.01) {
+                    obj.physics.damping = 5.0; // 适当阻尼避免永远震荡
+                }
+
+                // 标记还未在物理世界中
+                obj._inPhysicsWorld = false;
+            }
         };
 
         this.taskQueues.submit(moveRotateTask);
@@ -460,6 +479,13 @@ class SystemStateClass {
             obj._restoreRotationTarget = null;
             obj._lastAnimPos = null;
             obj._lastRotProgress = null;
+
+            // Phase 8: 清理物理临时状态
+            obj._tempDisplayPoints = null;
+            obj._tempRepresentation = null;
+            obj._tempDisplayPointsInitialized = false;
+            obj._cachedLocalPositions = null;
+            obj._physicsEnabled = false;
 
             for (const other of self.objects) {
                 if (other !== obj) {

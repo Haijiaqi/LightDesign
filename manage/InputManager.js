@@ -243,7 +243,13 @@ export const InputManager = {
 
     handleFocusMouseDown(e) {
         if (e.button === 0) {
-            return { type: 'START_DRAG_FOCUS', x: e.clientX, y: e.clientY };
+            // 返回带有屏幕坐标的意图，用于 3D 射线投射和冲量施加
+            return {
+                type: 'FOCUS_PHYSICS_TOUCH',
+                x: e.clientX,
+                y: e.clientY,
+                vmDepth: SystemState.focusVirtualMouseDepth // 传递虚拟鼠标深度
+            };
         }
         return null;
     },

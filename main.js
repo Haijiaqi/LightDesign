@@ -43,10 +43,16 @@ import { FittingCalculator } from "./math/FittingCalculator.js";
 // [新增] 导入参数化实现（用于动态阶数计算）
 import { ParametricImpl } from "./base/ParametricImpl.js";
 
+// Phase 9: 导入物理系统
+import { PhysicsSystem } from "./math/PhysicsSystem.js";
+
 
 // ============================================================================
 // CORE LOGIC & HUB
 // ============================================================================
+
+// Phase 9: 全局物理系统实例（懒惰初始化）
+let _globalPhysicsSystem = null;
 
 async function init() {
     SystemState.canvas = document.createElement("canvas");
@@ -514,6 +520,126 @@ function processIntent(intent) {
                     SystemState.ifControl = true;
                 } else {
                     console.log(`[FOCUS] Depth limit reached: ${limit.toFixed(1)}cm`);
+                }
+            }
+            break;
+        case 'FOCUS_PHYSICS_TOUCH':
+            // 物理触碰：在虚拟鼠标位置向物体表面施加冲量
+            {
+                console.log('[PHYSICS] FOCUS_PHYSICS_TOUCH intent received:', intent);
+
+                const obj = SystemState.focusedObject;
+                if (!obj) {
+                    console.log('[PHYSICS] No focused object');
+                    break;
+                }
+                if (!obj.constructionPoints || obj.constructionPoints.length === 0) {
+                    console.log('[PHYSICS] No constructionPoints on object');
+                    break;
+                }
+                console.log(`[PHYSICS] Object has ${obj.constructionPoints.length} constructionPoints, _surfaceBoundary=${obj._surfaceBoundary}`);
+
+                // 计算虚拟鼠标的 3D 世界坐标
+                const win = SystemState.mainWindow;
+                const dir = win.direction;
+                const baseDis = CONFIG.screenDistance - CONFIG.userDistanceFromOrigin;
+                const vmDepth = baseDis + (intent.vmDepth || 0);
+
+                console.log(`[PHYSICS] baseDis=${baseDis.toFixed(2)}, vmDepth=${vmDepth.toFixed(2)}, intent.vmDepth=${intent.vmDepth}`);
+
+                // 屏幕坐标 -> 归一化坐标
+                const screenX = intent.x;
+                const screenY = intent.y;
+                const normX = (screenX - win.width / 2) / win.DPIx;
+                const normY = -(screenY - win.height / 2) / win.DPIy;
+
+                console.log(`[PHYSICS] screen=(${screenX}, ${screenY}), norm=(${normX.toFixed(2)}, ${normY.toFixed(2)}), DPI=(${win.DPIx.toFixed(1)}, ${win.DPIy.toFixed(1)})`);
+
+                // 3D 射线起点（视平面）和方向
+                const viewPlaneX = dir.start.x + normX * win.vx.x + normY * win.vy.x;
+                const viewPlaneY = dir.start.y + normX * win.vx.y + normY * win.vy.y;
+                const viewPlaneZ = dir.start.z + normX * win.vx.z + normY * win.vy.z;
+
+                // 虚拟鼠标 3D 位置（沿视线方向移动 vmDepth）
+                const vmWorldX = viewPlaneX - dir.x * (intent.vmDepth || 0);
+                const vmWorldY = viewPlaneY - dir.y * (intent.vmDepth || 0);
+                const vmWorldZ = viewPlaneZ - dir.z * (intent.vmDepth || 0);
+
+                console.log(`[PHYSICS] vmWorld=(${vmWorldX.toFixed(2)}, ${vmWorldY.toFixed(2)}, ${vmWorldZ.toFixed(2)})`);
+                console.log(`[PHYSICS] objCenter=(${obj.center.x.toFixed(2)}, ${obj.center.y.toFixed(2)}, ${obj.center.z.toFixed(2)})`);
+
+                // 找到最近的表面 constructionPoint
+                let nearestPoint = null;
+                let nearestDist = Infinity;
+                let nearestIdx = -1;
+                const surfaceBound = obj._surfaceBoundary || obj.constructionPoints.length;
+
+                for (let i = 0; i < surfaceBound; i++) {
+                    const p = obj.constructionPoints[i];
+                    const px = p.x ?? (p.lx + obj.center.x);
+                    const py = p.y ?? (p.ly + obj.center.y);
+                    const pz = p.z ?? (p.lz + obj.center.z);
+                    const dx = px - vmWorldX;
+                    const dy = py - vmWorldY;
+                    const dz = pz - vmWorldZ;
+                    const dist = dx * dx + dy * dy + dz * dz;
+                    if (dist < nearestDist) {
+                        nearestDist = dist;
+                        nearestPoint = p;
+                        nearestIdx = i;
+                    }
+                }
+
+                const nearestDistCm = Math.sqrt(nearestDist);
+                console.log(`[PHYSICS] nearestIdx=${nearestIdx}, nearestDistCm=${nearestDistCm.toFixed(2)}`);
+
+                if (nearestPoint && nearestDist < 25) { // 5cm 半径内有效 (25 = 5^2)
+                    // 计算冲量方向（法向量反方向，即"推入"物体）
+                    let nx = nearestPoint.nx || 0;
+                    let ny = nearestPoint.ny || 0;
+                    let nz = nearestPoint.nz || 0;
+                    const nLen = Math.sqrt(nx * nx + ny * ny + nz * nz);
+                    console.log(`[PHYSICS] normal=(${nx.toFixed(3)}, ${ny.toFixed(3)}, ${nz.toFixed(3)}), len=${nLen.toFixed(3)}`);
+
+                    if (nLen < 0.001) {
+                        // 无法向量时使用径向
+                        const rx = (nearestPoint.lx || 0);
+                        const ry = (nearestPoint.ly || 0);
+                        const rz = (nearestPoint.lz || 0);
+                        const rLen = Math.sqrt(rx * rx + ry * ry + rz * rz);
+                        if (rLen > 0.001) {
+                            nx = rx / rLen; ny = ry / rLen; nz = rz / rLen;
+                        }
+                    } else {
+                        nx /= nLen; ny /= nLen; nz /= nLen;
+                    }
+
+                    // 冲量强度（单位：cm/s 速度）
+                    const impulseVelocity = 5.0; // 5 cm/s 的初始速度
+
+                    // 获取物理粒子并施加速度冲量
+                    const physicsState = obj.representation?.physicsState;
+                    if (physicsState && physicsState.particles && physicsState.particles[nearestIdx]) {
+                        const particle = physicsState.particles[nearestIdx];
+
+                        // 施加速度冲量（推入方向）
+                        if (particle.velocity) {
+                            particle.velocity.x -= nx * impulseVelocity;
+                            particle.velocity.y -= ny * impulseVelocity;
+                            particle.velocity.z -= nz * impulseVelocity;
+                        }
+
+                        console.log(`[PHYSICS] ✅ Velocity impulse applied to particle ${nearestIdx}: v=(${particle.velocity?.x?.toFixed(2)}, ${particle.velocity?.y?.toFixed(2)}, ${particle.velocity?.z?.toFixed(2)})`);
+                    } else {
+                        console.warn(`[PHYSICS] ⚠️ No physics particle at index ${nearestIdx}`);
+                    }
+
+                    // 标记需要更新
+                    obj._dirty = true;
+                    SystemState.sceneDirty = true;
+                    SystemState.ifControl = true;
+                } else {
+                    console.log(`[PHYSICS] ❌ No surface point within 5cm range (nearest: ${nearestDistCm.toFixed(2)}cm)`);
                 }
             }
             break;
@@ -1260,7 +1386,7 @@ function updateSliceContour() {
     SystemState.screenPoints = SystemState.screenPoints.filter(
         p => p.tag !== 'SLICE_CONTOUR'
     );
-    console.log('截面深度:', SystemState.focusSliceDepth);
+    // console.log('截面深度:', SystemState.focusSliceDepth);
     // Implementation details might be missing in raw dump? check line 1042-1050
     // It seems correct.
 }
@@ -2046,21 +2172,229 @@ function processTaskQueue(worldTime, dt) {
     SystemState.taskQueues.swap();
 }
 
+// ========== Phase 4+: 物理系统主循环 ==========
 function physicsStep(dt) {
-    for (const obj of SystemState.objects) {
-        if (obj.animationLock) continue;
-        if (!obj.physics || !obj.physics.enabled) continue;
+    // Phase 4: 仅在 FOCUS/EDIT 态运行物理
+    if (SystemState.interactionState !== 'FOCUS' && SystemState.interactionState !== 'EDIT') {
+        return;
     }
-    for (const obj of SystemState.objects) {
-        if (obj.animationLock) continue;
-        if (obj.commitPhysics) {
-            obj.commitPhysics();
+
+    // 检查物理模式是否启用
+    if (CONFIG.physicsMode === 'OFF') {
+        return;
+    }
+
+    const obj = SystemState.focusedObject;
+    if (!obj) return;
+
+    // [互斥] 如果有针对当前对象的动画任务（如归位动画），暂停物理
+    const hasAnimationOnObject = SystemState.taskQueues.current.some(t => t.target === obj);
+    if (hasAnimationOnObject) {
+        if (CONFIG.physicsDebug) {
+            console.log('[physicsStep] Paused: animation running on focused object');
+        }
+        return;
+    }
+
+    // Phase 4: 调试日志（降低频率）
+    // if (CONFIG.physicsDebug && (SystemState.frameCount % 60 === 0)) {
+    //     console.log('[physicsStep] dt=', (dt / 1000).toFixed(4), 'mode=', CONFIG.physicsMode);
+    // }
+
+    // Phase 5: 性能模式 - 直接映射建构点为临时显示点
+    if (CONFIG.physicsMode === 'PERFORMANCE') {
+        if (!obj._tempDisplayPointsInitialized && obj._isVolumetric) {
+            // 注意：这里只是数组容器拷贝，点对象仍归 constructionPoints 所有
+            // 渲染器不得修改除 tag 之外的属性
+            obj._tempDisplayPoints = obj.constructionPoints.slice(0, obj._surfaceBoundary);
+            for (const p of obj._tempDisplayPoints) {
+                p.tag = p.tag || 'PHYSICS_NODE';
+            }
+            obj._tempDisplayPointsInitialized = true;
+            if (CONFIG.physicsDebug) {
+                console.log('[physicsStep] PERFORMANCE mode: _tempDisplayPoints initialized, count=', obj._tempDisplayPoints.length);
+            }
+        }
+        // 位置已由 constructionPoints 持有，无需额外操作
+    }
+
+    // Phase 6: 效果模式 - 隔帧拟合
+    else if (CONFIG.physicsMode === 'QUALITY') {
+        if (obj._isVolumetric && obj.representation?.data?.sphericalHarmonics) {
+            // 隔帧拟合优化（降低 CPU 负载）
+            if ((SystemState.frameCount || 0) % 2 === 0) {
+                // 世界坐标 -> 局部坐标（复用数组）
+                const localPoints = obj._cachedLocalPositions || new Array(obj.constructionPoints.length);
+                for (let i = 0; i < obj.constructionPoints.length; i++) {
+                    const p = obj.constructionPoints[i];
+                    if (!localPoints[i]) localPoints[i] = { x: 0, y: 0, z: 0 };
+                    // 使用局部坐标
+                    localPoints[i].x = p.lx ?? p.x;
+                    localPoints[i].y = p.ly ?? p.y;
+                    localPoints[i].z = p.lz ?? p.z;
+                }
+                obj._cachedLocalPositions = localPoints;
+
+                // 拟合（严格使用固有阶数，禁止自动降级/升级）
+                const lockedOrder = obj.representation.data.fittedOrder || 4;
+                try {
+                    obj.fitSphericalHarmonics({
+                        sourcePoints: localPoints,
+                        order: lockedOrder,
+                        useIncremental: false,
+                        writeToTemp: true,
+                        fitter: FittingCalculator,
+                        Matrix: Matrix,
+                        sphericalHarmonics: obj.representation.data.sphericalHarmonics
+                    });
+
+                    // 首次创建或原地更新
+                    const isFirstFrame = !obj._tempDisplayPoints || obj._tempDisplayPoints.length === 0;
+                    obj.generateDisplayPoints({
+                        coefficients: obj._tempRepresentation.coefficients,
+                        writeToTemp: true,
+                        inPlace: !isFirstFrame,
+                        density: 20
+                    });
+
+                    if (CONFIG.physicsDebug) {
+                        console.log('[physicsStep] QUALITY mode: fitting completed, order=', lockedOrder);
+                    }
+                } catch (err) {
+                    console.warn('[physicsStep] QUALITY mode fitting error:', err.message);
+                }
+            }
+        }
+    }
+
+    // Phase 7: 法向量与光照更新
+    // 明确法向量数据源
+    const normalSource = (CONFIG.physicsMode === 'QUALITY' && obj._tempDisplayPoints)
+        ? obj._tempDisplayPoints
+        : obj.constructionPoints;
+
+    // 仅在有点时更新法向量
+    if (normalSource && normalSource.length > 0) {
+        // 使用径向法向量作为简化版本（避免依赖 surfaceTriangles）
+        for (const p of normalSource) {
+            const len = Math.sqrt((p.lx || 0) ** 2 + (p.ly || 0) ** 2 + (p.lz || 0) ** 2);
+            if (len > 1e-10) {
+                p.nx = (p.lx || 0) / len;
+                p.ny = (p.ly || 0) / len;
+                p.nz = (p.lz || 0) / len;
+                p._lnx = p.nx;
+                p._lny = p.ny;
+                p._lnz = p.nz;
+            }
+        }
+    }
+
+    // 触发反射更新
+    SystemState.lightDirty = true;
+
+    // Phase 9: 激活物理引擎（如果物体有物理配置）
+    // 使用懒惰初始化的全局物理系统实例
+
+    // 调试：显示条件检查
+    if (CONFIG.physicsDebug && (SystemState.frameCount % 120 === 0)) {
+        console.log(`[physicsStep] Checking physics conditions: physics.enabled=${obj.physics?.enabled}, points=${obj.constructionPoints?.length}`);
+    }
+
+    if (obj.physics?.enabled && obj.constructionPoints?.length > 0) {
+        if (!_globalPhysicsSystem) {
+            console.log('[physicsStep] Creating global PhysicsSystem');
+            _globalPhysicsSystem = new PhysicsSystem({
+                gravity: { x: 0, y: 0, z: 0 }, // 暂时禁用重力
+                substeps: 10, // 增加子步数提高稳定性
+                airDamping: 0.5, // 高空气阻力，快速衰减运动
+                constraintIterations: 15, // 增加约束迭代
+                verbose: CONFIG.physicsDebug
+            });
+        }
+        // 确保物体在物理世界中（且没有初始化失败）
+        if (!obj._inPhysicsWorld && !obj._physicsInitFailed) {
+            console.log('[physicsStep] Building physics topology for object');
+            // 必须先构建物理拓扑（粒子、约束），否则 PhysicsSystem 无法模拟
+            try {
+                // 如果是球谐类型，需要先生成体积网格
+                if (obj.representation?.type === 'sphericalHarmonics') {
+                    console.log('[physicsStep] Generating volumetric mesh for SH object');
+                    // 使用较大间距生成稀疏网格，适合物理模拟
+                    // 对于半径 2.5cm 的球，使用 1.0cm 间距约产生 ~30-50 个点
+                    obj.generateVolumetricMesh({
+                        spacing: 1.0, // 1.0cm 间距
+                        relaxIterations: 10
+                    });
+                }
+
+                obj.rebuildPhysicsTopology({
+                    physicsModel: obj.physics.model || CONFIG.defaultPhysicsModel,
+                    stiffness: obj.physics.stiffness || 1.0, // 极低刚度，防止爆炸
+                    damping: obj.physics.damping || 10 // 高阻尼，快速衰减
+                });
+                console.log('[physicsStep] Topology built, mode=', obj.mode);
+            } catch (err) {
+                console.error('[physicsStep] Failed to build topology:', err.message);
+                obj._physicsInitFailed = true; // 标记失败，避免循环重试
+                return;
+            }
+
+            console.log('[physicsStep] Adding object to physics world');
+            _globalPhysicsSystem.addObject(obj);
+            obj._inPhysicsWorld = true;
+            console.log('[physicsStep] Object added, _globalPhysicsSystem.objectCount=', _globalPhysicsSystem.objects?.length);
+
+            // 跳过本帧的物理计算，让系统稳定一帧
+            return;
+        }
+        // 执行物理步
+        if (CONFIG.physicsDebug) {
+            const hasStarted = obj._hasLoggedPhysicsStart;
+            if (!hasStarted) {
+                console.log(`[PHYSICS] Object entering physics loop: ${obj.metadata?.name || 'Unknown'}`);
+                console.log(`[PHYSICS] physicsModel=${obj.physics.model}, mass=${obj.physics.mass}`);
+                obj._hasLoggedPhysicsStart = true;
+            }
+        }
+
+        _globalPhysicsSystem.step(dt / 1000); // dt 是毫秒，PhysicsSystem 期望秒
+
+        // NaN 检测：如果物理发散，立即停止
+        const p0 = obj.constructionPoints[0];
+        if (p0 && (isNaN(p0.x) || isNaN(p0.y) || isNaN(p0.z))) {
+            console.error('[PHYSICS] NaN detected! Disabling physics for this object.');
+            obj.physics.enabled = false;
+            obj._inPhysicsWorld = false;
+            return;
+        }
+
+        // 调试：观察第一个点的变化
+        if (CONFIG.physicsDebug && (SystemState.frameCount % 60 === 0)) {
+            const p0 = obj.constructionPoints[0];
+            const pLast = obj.constructionPoints[4]; // 之前被击中的点 ID=4
+            console.log(`[PHYSICS] Step ${SystemState.frameCount}: P4 loc=(${pLast?.lx.toFixed(3)}, ${pLast?.ly.toFixed(3)}, ${pLast?.lz.toFixed(3)})`);
+        }
+    }
+
+    // 原有物理逻辑（保留兼容）
+    for (const o of SystemState.objects) {
+        if (o.animationLock) continue;
+        if (!o.physics || !o.physics.enabled) continue;
+    }
+    for (const o of SystemState.objects) {
+        if (o.animationLock) continue;
+        if (o.commitPhysics) {
+            o.commitPhysics();
         }
     }
 }
 
 async function gameLoop(timestamp = 0) {
-    const dt = timestamp - SystemState.lastTimestamp;
+    let dt = timestamp - SystemState.lastTimestamp;
+
+    // [Fix] 限制最大 dt 为 33ms（约30fps），防止物理系统发散
+    if (dt > 33) dt = 33;
+
     SystemState.lastTimestamp = timestamp;
     SystemState.worldTime = timestamp;
 

@@ -238,9 +238,9 @@ class PhysicsSystem {
     this.stats.stepCount++;
     this.stats.lastStepTime = Date.now() - startTime;
 
-    if (this.verbose && this.stats.stepCount % 60 === 0) {
-      console.log('[Physics] Stats:', this.getStats());
-    }
+    // if (this.verbose && this.stats.stepCount % 60 === 0) {
+    //   console.log('[Physics] Stats:', this.getStats());
+    // }
   }
 
   /**
@@ -253,6 +253,19 @@ class PhysicsSystem {
     const physicsData = this._gatherPhysicsData();
 
     if (physicsData.length === 0) return;
+
+    // 0. [Fix] 对于 Verlet 积分，直接在位置更新时应用阻尼
+    // 而不是通过力计算（力计算依赖 velocity，但 Verlet 的 velocity 是后验的）
+    // 这里只初始化 velocity（用于用户冲量），不覆盖已有值
+    if (this.method === 'verlet') {
+      for (const data of physicsData) {
+        for (const p of data.particles) {
+          if (p.fixed) continue;
+          if (!p.velocity) p.velocity = { x: 0, y: 0, z: 0 };
+          // 不从 oldPosition 估算 velocity，保留用户冲量
+        }
+      }
+    }
 
     // 1. 施加外力（重力、用户力）
     this._applyForces(physicsData, dt);
@@ -602,21 +615,47 @@ class PhysicsSystem {
       };
     }
 
+    // [Fix] 如果有用户冲量（velocity 非零），将其转换为位置偏移
+    // 这让用户点击能驱动物体运动
+    if (p.velocity.x !== 0 || p.velocity.y !== 0 || p.velocity.z !== 0) {
+      p.position.x += p.velocity.x * dt;
+      p.position.y += p.velocity.y * dt;
+      p.position.z += p.velocity.z * dt;
+      // 应用后清零（冲量只作用一次）
+      p.velocity.x *= 0.5; // 保留部分用于后续帧
+      p.velocity.y *= 0.5;
+      p.velocity.z *= 0.5;
+    }
+
     // 加速度
     const ax = p.force.x / p.mass;
     const ay = p.force.y / p.mass;
     const az = p.force.z / p.mass;
 
+    // [Fix] NaN 检测
+    if (isNaN(ax) || isNaN(ay) || isNaN(az)) return;
+
     // Verlet 位置更新：x(t+dt) = 2x(t) - x(t-dt) + a·dt²
-    const newX = 2 * p.position.x - p.oldPosition.x + ax * dt * dt;
-    const newY = 2 * p.position.y - p.oldPosition.y + ay * dt * dt;
-    const newZ = 2 * p.position.z - p.oldPosition.z + az * dt * dt;
+    // [Fix] 添加阻尼：减少位置变化的幅度
+    const damping = 0.98; // 2% 能量损失
+    let newX = p.position.x + (p.position.x - p.oldPosition.x) * damping + ax * dt * dt;
+    let newY = p.position.y + (p.position.y - p.oldPosition.y) * damping + ay * dt * dt;
+    let newZ = p.position.z + (p.position.z - p.oldPosition.z) * damping + az * dt * dt;
 
-    // ⚠️ 注意：不在此处计算速度
-    // 速度将在约束求解后由 _updateVelocitiesAfterConstraints() 计算
-    // 这确保速度反映约束修正后的真实运动
+    // [Fix] 限制单帧最大位移（防止爆炸）
+    const maxDisp = 0.5; // 最大 0.5cm/帧
+    const dx = newX - p.position.x;
+    const dy = newY - p.position.y;
+    const dz = newZ - p.position.z;
+    const dispLen = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (dispLen > maxDisp) {
+      const scale = maxDisp / dispLen;
+      newX = p.position.x + dx * scale;
+      newY = p.position.y + dy * scale;
+      newZ = p.position.z + dz * scale;
+    }
 
-    // ⭐ 优化：更新 oldPosition（复用对象，避免 new）
+    // 更新 oldPosition
     p.oldPosition.x = p.position.x;
     p.oldPosition.y = p.position.y;
     p.oldPosition.z = p.position.z;
@@ -641,10 +680,25 @@ class PhysicsSystem {
     const ay = p.force.y / p.mass;
     const az = p.force.z / p.mass;
 
+    // NaN 检测：如果加速度无效，跳过
+    if (isNaN(ax) || isNaN(ay) || isNaN(az)) {
+      return;
+    }
+
     // 更新速度
     p.velocity.x += ax * dt;
     p.velocity.y += ay * dt;
     p.velocity.z += az * dt;
+
+    // [Fix] 速度钳制：防止爆炸 (最大 100 cm/s)
+    const maxVel = 100;
+    const vLen = Math.sqrt(p.velocity.x * p.velocity.x + p.velocity.y * p.velocity.y + p.velocity.z * p.velocity.z);
+    if (vLen > maxVel) {
+      const scale = maxVel / vLen;
+      p.velocity.x *= scale;
+      p.velocity.y *= scale;
+      p.velocity.z *= scale;
+    }
 
     // 更新位置
     p.position.x += p.velocity.x * dt;
@@ -1884,3 +1938,6 @@ if (typeof module !== 'undefined' && module.exports) {
   window.PhysicsSystem = PhysicsSystem;
   window.ClothGenerator = ClothGenerator;
 }
+
+// ES Module 导出
+export { PhysicsSystem, ClothGenerator };

@@ -141,10 +141,12 @@ export class Window {
       // [新增] 物体级可见性过滤：跳过被隐藏的物体（如非聚焦物体）
       if (object.isVisible === false) continue;
 
-      // 阶段1修改：优先使用 displayPoints（渲染用），回退到 constructionPoints
-      const renderPoints = (object.displayPoints && object.displayPoints.length > 0)
-        ? object.displayPoints
-        : object.constructionPoints;
+      // Phase 3: 优先使用临时显示点（物理态），否则回退到固有 displayPoints / constructionPoints
+      const renderPoints = (object._tempDisplayPoints && object._tempDisplayPoints.length > 0)
+        ? object._tempDisplayPoints
+        : (object.displayPoints && object.displayPoints.length > 0)
+          ? object.displayPoints
+          : object.constructionPoints;
       if (!renderPoints || renderPoints.length === 0) continue;
 
       for (let pi = 0; pi < renderPoints.length; pi++) {
@@ -243,10 +245,12 @@ export class Window {
     if (!light) {
       for (let oi = 0; oi < otherObjects.length; oi++) {
         const object = otherObjects[oi];
-        // 阶段1修改：优先使用 displayPoints，回退到 constructionPoints
-        const renderPoints = (object.displayPoints && object.displayPoints.length > 0)
-          ? object.displayPoints
-          : object.constructionPoints;
+        // Phase 3: 优先使用临时显示点（物理态），否则回退到固有 displayPoints / constructionPoints
+        const renderPoints = (object._tempDisplayPoints && object._tempDisplayPoints.length > 0)
+          ? object._tempDisplayPoints
+          : (object.displayPoints && object.displayPoints.length > 0)
+            ? object.displayPoints
+            : object.constructionPoints;
         if (!renderPoints || renderPoints.length === 0) continue;
         for (let pi = 0; pi < renderPoints.length; pi++) {
           const point = renderPoints[pi];
@@ -359,16 +363,16 @@ export class Window {
     const rate = this.disOfPointToPlane / disOfPointToHeadPlane;
     const inverseRate = 1 - rate;
 
-    // Debug CenterPoint
-    if (point.isObjectCenter && Math.random() < 0.01) {
-      console.log('CenterPoint Debug:',
-        'DisToPlane:', this.disOfPointToPlane.toFixed(2),
-        'DisToHead:', disOfPointToHeadPlane.toFixed(2),
-        'Rate:', rate.toFixed(4),
-        'InvRate:', inverseRate.toFixed(4),
-        'DisParallax:', ((eyeD / 2) * inverseRate).toFixed(4)
-      );
-    }
+    // Debug CenterPoint (disabled)
+    // if (point.isObjectCenter && Math.random() < 0.01) {
+    //   console.log('CenterPoint Debug:',
+    //     'DisToPlane:', this.disOfPointToPlane.toFixed(2),
+    //     'DisToHead:', disOfPointToHeadPlane.toFixed(2),
+    //     'Rate:', rate.toFixed(4),
+    //     'InvRate:', inverseRate.toFixed(4),
+    //     'DisParallax:', ((eyeD / 2) * inverseRate).toFixed(4)
+    //   );
+    // }
 
     // 5. 屏幕坐标转换（公共）
     const disOfPointProjToHeadPlaneXaxis = this.vy.projL(hpdx, hpdy, hpdz);

@@ -32,4 +32,14 @@ export const CONFIG = {
         maxArea: 10000,
         smoothingFactor: 0.1,
     },
+
+    // ========== Phase 3: 物理系统配置 ==========
+    // 物理渲染开关：false 时回落到原渲染路径
+    usePhysicsRendering: true,
+    // 物理模式：'OFF' | 'PERFORMANCE' | 'QUALITY'
+    physicsMode: 'QUALITY',
+    // 物理调试日志
+    physicsDebug: true,
+    // 默认物理模型：'pbd' (Position-Based Dynamics) | 'force' (质点弹簧)
+    defaultPhysicsModel: 'force',
 };

@@ -23,8 +23,8 @@ export class PhysicsBridgeImpl {
   // 常量定义
   // ==========================================================================
 
-  static DEFAULT_STIFFNESS = 1000;
-  static DEFAULT_DAMPING = 10;
+  static DEFAULT_STIFFNESS = 1; // [Fix] 极低刚度，防止物理爆炸
+  static DEFAULT_DAMPING = 10;  // [Fix] 高阻尼
 
   static BENDING_COMPLIANCE_CLOTH = 0.1;
   static BENDING_COMPLIANCE_LINE = 0.05;

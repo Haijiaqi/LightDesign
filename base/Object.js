@@ -243,6 +243,19 @@ export class Object {
 
     this.verbose = options.verbose ?? false;
 
+    // ========== 物理系统集成：临时数据层 (Phase 0) ==========
+    // 临时显示点：物理态渲染时使用，不污染固有 displayPoints
+    this._tempDisplayPoints = null;
+    // 临时球谐表示：物理态拟合结果，不污染固有 representation.data
+    this._tempRepresentation = null;
+    // 物理启用标记
+    this._physicsEnabled = false;
+    // 缓存的局部坐标数组（避免每帧 new）
+    this._cachedLocalPositions = null;
+    // 临时显示点初始化标记
+    this._tempDisplayPointsInitialized = false;
+    // ========================================================
+
     // ========== 阶段3修复：初始化局部坐标 ==========
     // 如果 options.center 被显式传入，说明工厂方法已经生成了局部坐标
     // 此时 Point.x/y/z 就是 lx/ly/lz，直接复制即可
@@ -700,6 +713,9 @@ export class Object {
     const order = options.order ?? 3;
     const useIncremental = options.useIncremental ?? true;
     const force = options.force ?? false;
+    // Phase 1: 新增参数
+    const sourcePoints = options.sourcePoints; // Array<{x,y,z}> | undefined
+    const writeToTemp = options.writeToTemp ?? false;
 
     const context = { pointVersion: this._controlPointVersion, order };
     if (!force && !useIncremental) {
@@ -709,7 +725,10 @@ export class Object {
 
     // [修改] 使用局部坐标进行拟合
     // 局部中心始终为 (0,0,0)
-    const positions = this.controlPoints.map(p => ({ x: p.lx, y: p.ly, z: p.lz }));
+    // Phase 1: 支持外部传入 sourcePoints
+    const positions = sourcePoints
+      ? sourcePoints
+      : this.controlPoints.map(p => ({ x: p.lx, y: p.ly, z: p.lz }));
     const centerPos = { x: 0, y: 0, z: 0 };
 
     // [新增] 自动计算阶数（如果没有手动指定）
@@ -819,20 +838,32 @@ export class Object {
 
     this._setFitStack(targetOrder, result.fitStack);
 
-    this.representation.type = 'sphericalHarmonics';
-    this.representation.isClosed = true;
-    this.representation.data = {
-      coefficients: result.coefficients,
-      sphericalHarmonics: sphericalHarmonics,
-      coordinateSystem: 'local',
-      fittedOrder: targetOrder,
-      structureRange: structureRange  // v2.4: 保存结构区间
-    };
+    // Phase 1: 根据 writeToTemp 路由结果存储
+    if (writeToTemp) {
+      // 写入临时表示，不污染固有数据
+      this._tempRepresentation = {
+        coefficients: result.coefficients,
+        sphericalHarmonics: sphericalHarmonics,
+        coordinateSystem: 'local',
+        fittedOrder: targetOrder
+      };
+    } else {
+      // 原有逻辑：写入固有表示
+      this.representation.type = 'sphericalHarmonics';
+      this.representation.isClosed = true;
+      this.representation.data = {
+        coefficients: result.coefficients,
+        sphericalHarmonics: sphericalHarmonics,
+        coordinateSystem: 'local',
+        fittedOrder: targetOrder,
+        structureRange: structureRange  // v2.4: 保存结构区间
+      };
 
-    this.mode = 'parametric';
+      this.mode = 'parametric';
 
-    if (!useIncremental) {
-      this._fitCache.set(context, result);
+      if (!useIncremental) {
+        this._fitCache.set(context, result);
+      }
     }
 
     return result;
@@ -1122,6 +1153,9 @@ export class Object {
    * @param {object} options
    * @param {number} options.count - 采样点数（默认基于表面积自动计算）
    * @param {number} options.density - 采样密度（点/平方厘米，默认 4）
+   * @param {Array} options.coefficients - Phase 2: 自定义系数（默认使用 representation.data）
+   * @param {boolean} options.writeToTemp - Phase 2: 是否写入临时显示点
+   * @param {boolean} options.inPlace - Phase 2: 是否原地更新现有点（性能优化）
    * @returns {{count: number, displayPoints: Array}}
    */
   generateDisplayPoints(options = {}) {
@@ -1134,6 +1168,10 @@ export class Object {
 
     const density = options.density ?? 4;  // 点/cm²
     let count = options.count;
+    // Phase 2: 新增参数
+    const writeToTemp = options.writeToTemp ?? false;
+    const inPlace = options.inPlace ?? false;
+    const customCoefficients = options.coefficients;
 
     if (this.representation.type === 'elliptic-fourier-2d') {
       // 2D 布料显示点（使用 EFD 边界）
@@ -1146,9 +1184,20 @@ export class Object {
     }
 
     // 3D 球谐体显示点
-    const { coefficients, sphericalHarmonics } = this.representation.data;
+    // Phase 2: 优先使用传入的 coefficients，否则用固有数据
+    const coefficients = customCoefficients || this.representation.data?.coefficients;
+    const sphericalHarmonics = this.representation.data?.sphericalHarmonics;
     if (!coefficients || !sphericalHarmonics) {
       throw new Error('[Object] Missing spherical harmonics data');
+    }
+
+    // Phase 2: 确定目标数组
+    const targetArray = writeToTemp ? this._tempDisplayPoints : this.displayPoints;
+
+    // Phase 2: inPlace 模式 - 原地更新现有点坐标
+    if (inPlace && targetArray && targetArray.length > 0) {
+      this._updateDisplayPointsInPlace(targetArray, coefficients, sphericalHarmonics);
+      return { count: targetArray.length, displayPoints: targetArray };
     }
 
     // 自动计算采样点数
@@ -1177,7 +1226,7 @@ export class Object {
     );
 
     // 创建显示点
-    this.displayPoints = sampledPositions.map(p => {
+    const newPoints = sampledPositions.map(p => {
       const pt = new Point(0, 0, 0); // 世界坐标稍后计算
       // 设置局部坐标
       pt.lx = p.x;
@@ -1188,12 +1237,11 @@ export class Object {
       pt.light = 0.8;
       return pt;
     });
-    this._displayPointVersion++;
 
     // 计算法向量 (局部坐标系)
     const centerZero = { x: 0, y: 0, z: 0 };
-    for (let i = 0; i < this.displayPoints.length; i++) {
-      const p = this.displayPoints[i];
+    for (let i = 0; i < newPoints.length; i++) {
+      const p = newPoints[i];
       const pos = sampledPositions[i];
 
       // 使用球谐函数的梯度计算法向量
@@ -1223,18 +1271,78 @@ export class Object {
       }
     }
 
-    // [新增] 立即更新世界坐标
-    this._dirty = true;
-    this.updateWorldPoints({ force: true });
+    // Phase 2: 根据 writeToTemp 路由存储
+    if (writeToTemp) {
+      this._tempDisplayPoints = newPoints;
+    } else {
+      this.displayPoints = newPoints;
+      this._displayPointVersion++;
+      // [新增] 立即更新世界坐标
+      this._dirty = true;
+      this.updateWorldPoints({ force: true });
+    }
 
     if (this.verbose) {
-      console.log(`[Object] Display points generated: ${this.displayPoints.length}`);
+      console.log(`[Object] Display points generated: ${newPoints.length}, writeToTemp=${writeToTemp}`);
     }
 
     return {
-      count: this.displayPoints.length,
-      displayPoints: this.displayPoints
+      count: newPoints.length,
+      displayPoints: newPoints
     };
+  }
+
+  /**
+   * Phase 2: 原地更新显示点坐标（避免 GC）
+   * @private
+   */
+  _updateDisplayPointsInPlace(points, coefficients, sphericalHarmonics) {
+    const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+    const numSamples = points.length;
+
+    for (let i = 0; i < numSamples; i++) {
+      // Fibonacci lattice 公式
+      const y = 1 - (2 * i + 1) / numSamples;
+      const radiusAtY = Math.sqrt(1 - y * y);
+      const theta = goldenAngle * i;
+
+      // 球坐标
+      const phi = Math.acos(Math.max(-1, Math.min(1, y)));
+      const thetaNorm = theta % (2 * Math.PI);
+
+      // 获取实际半径
+      const r = sphericalHarmonics.evaluate(coefficients, phi, thetaNorm);
+
+      // 笛卡尔坐标
+      const sinPhi = Math.sin(phi);
+      const p = points[i];
+      p.lx = r * sinPhi * Math.cos(thetaNorm);
+      p.ly = r * sinPhi * Math.sin(thetaNorm);
+      p.lz = r * Math.cos(phi);
+
+      // 计算法向量
+      const normal = sphericalHarmonics.computeSurfaceNormal?.(
+        coefficients, phi, thetaNorm, { x: 0, y: 0, z: 0 }
+      );
+      if (normal) {
+        p.nx = normal.x;
+        p.ny = normal.y;
+        p.nz = normal.z;
+        p._lnx = normal.x;
+        p._lny = normal.y;
+        p._lnz = normal.z;
+      } else {
+        const len = Math.sqrt(p.lx * p.lx + p.ly * p.ly + p.lz * p.lz);
+        if (len > 1e-10) {
+          p.nx = p.lx / len;
+          p.ny = p.ly / len;
+          p.nz = p.lz / len;
+          p._lnx = p.nx;
+          p._lny = p.ny;
+          p._lnz = p.nz;
+        }
+      }
+    }
   }
 
   _generateDisplayPoints2D(count, density) {
@@ -2099,9 +2207,18 @@ export class Object {
     for (let i = 0; i < surfaceCount; i++) {
       const particle = particles[i];
       if (particle && particle.position) {
-        this.constructionPoints[i].x = particle.position.x;
-        this.constructionPoints[i].y = particle.position.y;
-        this.constructionPoints[i].z = particle.position.z;
+        // [Fix] 严格的 NaN 检查，防止污染渲染数据
+        if (isNaN(particle.position.x) || isNaN(particle.position.y) || isNaN(particle.position.z)) {
+          continue;
+        }
+        const cp = this.constructionPoints[i];
+        cp.x = particle.position.x;
+        cp.y = particle.position.y;
+        cp.z = particle.position.z;
+        // [Fix] 同时更新局部坐标（渲染器可能依赖 lx/ly/lz）
+        cp.lx = particle.position.x - this.center.x;
+        cp.ly = particle.position.y - this.center.y;
+        cp.lz = particle.position.z - this.center.z;
       }
     }
 
@@ -2115,9 +2232,17 @@ export class Object {
       const particle = particles[internalStart + i];
       const internalPoint = this.constructionPoints[this._surfaceBoundary + i];
       if (particle && particle.position && internalPoint) {
+        // [Fix] 严格的 NaN 检查
+        if (isNaN(particle.position.x) || isNaN(particle.position.y) || isNaN(particle.position.z)) {
+          continue;
+        }
         internalPoint.x = particle.position.x;
         internalPoint.y = particle.position.y;
         internalPoint.z = particle.position.z;
+        // [Fix] 同步局部坐标
+        internalPoint.lx = particle.position.x - this.center.x;
+        internalPoint.ly = particle.position.y - this.center.y;
+        internalPoint.lz = particle.position.z - this.center.z;
       }
     }
 
