@@ -2176,6 +2176,105 @@ function processTaskQueue(worldTime, dt) {
     SystemState.taskQueues.swap();
 }
 
+// ========== COM Splitting (质心分离) ==========
+// 参考: .agent/implementation_plans/physics_com_splitting_design.md
+
+/**
+ * 初始化物理质心锚点
+ * 在物体加入物理世界后调用，锁定 anchorCOM 作为参考点
+ */
+function initPhysicsCOM(obj) {
+    const physicsState = obj.representation?.physicsState;
+    if (!physicsState || !physicsState.particles) return;
+
+    const particles = physicsState.particles;
+
+    // 计算质量加权质心
+    let totalMass = 0;
+    let com = { x: 0, y: 0, z: 0 };
+    for (const p of particles) {
+        com.x += p.position.x * p.mass;
+        com.y += p.position.y * p.mass;
+        com.z += p.position.z * p.mass;
+        totalMass += p.mass;
+    }
+
+    if (totalMass > 0) {
+        com.x /= totalMass;
+        com.y /= totalMass;
+        com.z /= totalMass;
+    }
+
+    // 缓存到 physicsState
+    physicsState.totalMass = totalMass;
+    physicsState.anchorCOM = { ...com };  // 锁定锚点，永不修改
+    physicsState.initialCOM = { ...com }; // 仅供调试
+
+    if (CONFIG.physicsDebug) {
+        console.log(`[COM] Initialized anchorCOM=(${com.x.toFixed(3)}, ${com.y.toFixed(3)}, ${com.z.toFixed(3)}), totalMass=${totalMass.toFixed(3)}`);
+    }
+}
+
+/**
+ * 提取质心漂移并转移到 Object.center
+ * 在 PhysicsSystem.step() 后、commitPhysics() 前调用
+ */
+function extractCOMDrift(obj) {
+    const physicsState = obj.representation?.physicsState;
+    if (!physicsState || !physicsState.anchorCOM) return;
+
+    const particles = physicsState.particles;
+    const anchor = physicsState.anchorCOM;
+    const totalMass = physicsState.totalMass;
+
+    if (totalMass <= 0) return;
+
+    // 1. 计算当前帧质心
+    let currCOM = { x: 0, y: 0, z: 0 };
+    for (const p of particles) {
+        currCOM.x += p.position.x * p.mass;
+        currCOM.y += p.position.y * p.mass;
+        currCOM.z += p.position.z * p.mass;
+    }
+    currCOM.x /= totalMass;
+    currCOM.y /= totalMass;
+    currCOM.z /= totalMass;
+
+    // 2. 计算相对于锚点的漂移
+    const drift = {
+        x: currCOM.x - anchor.x,
+        y: currCOM.y - anchor.y,
+        z: currCOM.z - anchor.z
+    };
+
+    // 3. 归心：将所有粒子拉回锚点
+    for (const p of particles) {
+        p.position.x -= drift.x;
+        p.position.y -= drift.y;
+        p.position.z -= drift.z;
+
+        // Verlet 积分：同步 oldPosition
+        if (p.oldPosition) {
+            p.oldPosition.x -= drift.x;
+            p.oldPosition.y -= drift.y;
+            p.oldPosition.z -= drift.z;
+        }
+    }
+
+    // 4. 转移：将漂移累加到 Object.center
+    obj.center.x += drift.x;
+    obj.center.y += drift.y;
+    obj.center.z += drift.z;
+
+    // 调试日志（低频）
+    if (CONFIG.physicsDebug && (SystemState.frameCount % 120 === 0)) {
+        const driftMag = Math.sqrt(drift.x * drift.x + drift.y * drift.y + drift.z * drift.z);
+        if (driftMag > 0.001) {
+            console.log(`[COM] drift=(${drift.x.toFixed(4)}, ${drift.y.toFixed(4)}, ${drift.z.toFixed(4)}), center=(${obj.center.x.toFixed(3)}, ${obj.center.y.toFixed(3)}, ${obj.center.z.toFixed(3)})`);
+        }
+    }
+}
+
 // ========== Phase 4+: 物理系统主循环 ==========
 function physicsStep(dt) {
     // Phase 4: 仅在 FOCUS/EDIT 态运行物理
@@ -2347,6 +2446,9 @@ function physicsStep(dt) {
             obj._inPhysicsWorld = true;
             console.log('[physicsStep] Object added, _globalPhysicsSystem.objectCount=', _globalPhysicsSystem.objects?.length);
 
+            // [COM Splitting] 初始化质心锚点
+            initPhysicsCOM(obj);
+
             // 跳过本帧的物理计算，让系统稳定一帧
             return;
         }
@@ -2361,6 +2463,9 @@ function physicsStep(dt) {
         }
 
         _globalPhysicsSystem.step(dt / 1000); // dt 是毫秒，PhysicsSystem 期望秒
+
+        // [COM Splitting] 提取质心漂移，转移到 Object.center
+        extractCOMDrift(obj);
 
         // NaN 检测：如果物理发散，立即停止
         const p0 = obj.constructionPoints[0];
