@@ -630,6 +630,10 @@ function processIntent(intent) {
                         }
 
                         console.log(`[PHYSICS] ✅ Velocity impulse applied to particle ${nearestIdx}: v=(${particle.velocity?.x?.toFixed(2)}, ${particle.velocity?.y?.toFixed(2)}, ${particle.velocity?.z?.toFixed(2)})`);
+
+                        // [Fix] 标记物体进入物理活动状态（用于 QUALITY 模式拟合判断）
+                        obj._physicsActive = true;
+                        obj._physicsActiveFrames = 0; // 活动帧计数器
                     } else {
                         console.warn(`[PHYSICS] ⚠️ No physics particle at index ${nearestIdx}`);
                     }
@@ -2218,52 +2222,53 @@ function physicsStep(dt) {
         // 位置已由 constructionPoints 持有，无需额外操作
     }
 
-    // Phase 6: 效果模式 - 隔帧拟合
+    // Phase 6: 效果模式 - 只在物理活动时拟合
     else if (CONFIG.physicsMode === 'QUALITY') {
-        if (obj._isVolumetric && obj.representation?.data?.sphericalHarmonics) {
-            // 隔帧拟合优化（降低 CPU 负载）
-            if ((SystemState.frameCount || 0) % 2 === 0) {
-                // 世界坐标 -> 局部坐标（复用数组）
-                const localPoints = obj._cachedLocalPositions || new Array(obj.constructionPoints.length);
-                for (let i = 0; i < obj.constructionPoints.length; i++) {
-                    const p = obj.constructionPoints[i];
-                    if (!localPoints[i]) localPoints[i] = { x: 0, y: 0, z: 0 };
-                    // 使用局部坐标
-                    localPoints[i].x = p.lx ?? p.x;
-                    localPoints[i].y = p.ly ?? p.y;
-                    localPoints[i].z = p.lz ?? p.z;
-                }
-                obj._cachedLocalPositions = localPoints;
-
-                // 拟合（严格使用固有阶数，禁止自动降级/升级）
-                const lockedOrder = obj.representation.data.fittedOrder || 4;
-                try {
-                    obj.fitSphericalHarmonics({
-                        sourcePoints: localPoints,
-                        order: lockedOrder,
-                        useIncremental: false,
-                        writeToTemp: true,
-                        fitter: FittingCalculator,
-                        Matrix: Matrix,
-                        sphericalHarmonics: obj.representation.data.sphericalHarmonics
-                    });
-
-                    // 首次创建或原地更新
-                    const isFirstFrame = !obj._tempDisplayPoints || obj._tempDisplayPoints.length === 0;
-                    obj.generateDisplayPoints({
-                        coefficients: obj._tempRepresentation.coefficients,
-                        writeToTemp: true,
-                        inPlace: !isFirstFrame,
-                        density: 20
-                    });
-
-                    if (CONFIG.physicsDebug) {
-                        console.log('[physicsStep] QUALITY mode: fitting completed, order=', lockedOrder);
-                    }
-                } catch (err) {
-                    console.warn('[physicsStep] QUALITY mode fitting error:', err.message);
-                }
+        // 只在物理活动时（用户点击后）执行拟合
+        if (obj._physicsActive && obj._isVolumetric && obj.representation?.data?.sphericalHarmonics) {
+            // 世界坐标 -> 局部坐标（复用数组）
+            const localPoints = obj._cachedLocalPositions || new Array(obj.constructionPoints.length);
+            for (let i = 0; i < obj.constructionPoints.length; i++) {
+                const p = obj.constructionPoints[i];
+                if (!localPoints[i]) localPoints[i] = { x: 0, y: 0, z: 0 };
+                // 使用局部坐标
+                localPoints[i].x = p.lx ?? p.x;
+                localPoints[i].y = p.ly ?? p.y;
+                localPoints[i].z = p.lz ?? p.z;
             }
+            obj._cachedLocalPositions = localPoints;
+
+            // 拟合（严格使用固有阶数，禁止自动降级/升级）
+            const lockedOrder = obj.representation.data.fittedOrder || 4;
+            try {
+                obj.fitSphericalHarmonics({
+                    sourcePoints: localPoints,
+                    order: lockedOrder,
+                    useIncremental: false,
+                    writeToTemp: true,
+                    fitter: FittingCalculator,
+                    Matrix: Matrix,
+                    sphericalHarmonics: obj.representation.data.sphericalHarmonics
+                });
+
+                // 首次创建或原地更新
+                const isFirstFrame = !obj._tempDisplayPoints || obj._tempDisplayPoints.length === 0;
+                obj.generateDisplayPoints({
+                    coefficients: obj._tempRepresentation.coefficients,
+                    writeToTemp: true,
+                    inPlace: !isFirstFrame,
+                    density: 20
+                });
+
+                if (CONFIG.physicsDebug) {
+                    console.log('[physicsStep] QUALITY mode: fitting completed, order=', lockedOrder);
+                }
+            } catch (err) {
+                console.warn('[physicsStep] QUALITY mode fitting error:', err.message);
+            }
+
+            // 活动帧计数
+            obj._physicsActiveFrames = (obj._physicsActiveFrames || 0) + 1;
         }
     }
 
@@ -2319,10 +2324,8 @@ function physicsStep(dt) {
                 // 如果是球谐类型，需要先生成体积网格
                 if (obj.representation?.type === 'sphericalHarmonics') {
                     console.log('[physicsStep] Generating volumetric mesh for SH object');
-                    // 使用较大间距生成稀疏网格，适合物理模拟
-                    // 对于半径 2.5cm 的球，使用 1.0cm 间距约产生 ~30-50 个点
+                    // 使用默认间距 (GeometryImpl.DEFAULT_SPACING_VOLUMETRIC = 0.5cm)
                     obj.generateVolumetricMesh({
-                        spacing: 1.0, // 1.0cm 间距
                         relaxIterations: 10
                     });
                 }
@@ -2373,6 +2376,27 @@ function physicsStep(dt) {
             const p0 = obj.constructionPoints[0];
             const pLast = obj.constructionPoints[4]; // 之前被击中的点 ID=4
             console.log(`[PHYSICS] Step ${SystemState.frameCount}: P4 loc=(${pLast?.lx.toFixed(3)}, ${pLast?.ly.toFixed(3)}, ${pLast?.lz.toFixed(3)})`);
+        }
+
+        // [Fix] 静止检测：如果物理活动了足够久且没有明显运动，则停止拟合
+        if (obj._physicsActive && obj._physicsActiveFrames > 60) {
+            // 检测平均速度
+            const particles = obj.representation?.physicsState?.particles || [];
+            let totalVelSq = 0;
+            for (const p of particles) {
+                if (p.velocity) {
+                    totalVelSq += p.velocity.x * p.velocity.x + p.velocity.y * p.velocity.y + p.velocity.z * p.velocity.z;
+                }
+            }
+            const avgVelSq = totalVelSq / (particles.length || 1);
+
+            // 如果平均速度很小（< 0.01 cm/s），认为静止
+            if (avgVelSq < 0.0001) {
+                obj._physicsActive = false;
+                if (CONFIG.physicsDebug) {
+                    console.log('[PHYSICS] Object settled (avgVelSq=' + avgVelSq.toFixed(6) + ')');
+                }
+            }
         }
     }
 

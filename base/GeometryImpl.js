@@ -30,7 +30,7 @@ export class GeometryImpl {
   static KNN_INTERNAL = 8;
 
   // 默认建构点间距
-  static DEFAULT_SPACING_VOLUMETRIC = 0.02;  // 球谐体默认间距 2cm
+  static DEFAULT_SPACING_VOLUMETRIC = 0.5;  // 球谐体默认间距 0.5cm
   static DEFAULT_SPACING_CLOTH = 0.015;      // 布料默认间距 1.5cm
 
   // ==========================================================================
@@ -690,11 +690,11 @@ export class GeometryImpl {
 
     for (let i = 0; points.length < numSamples && attempts < maxAttempts; i++) {
       attempts++;
-      
+
       // Fibonacci 格点
       const fx = (i / goldenRatio) % 1;
       const fy = (i / (goldenRatio * goldenRatio)) % 1;
-      
+
       const x = minX + fx * width;
       const y = minY + fy * height;
 
