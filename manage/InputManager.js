@@ -312,7 +312,7 @@ export const InputManager = {
             const snapped = SystemState.virtualMouse.snappedTo;
 
             // 只有吸附到有效的局部格点时才移动控制点
-            if (snapped && snapped.tag === 'LOCAL_GRID') {
+            if (snapped && (snapped.tag === 'LOCAL_GRID' || snapped.tag === 'LOCAL_GRID_EDGE')) {
                 // 检查约束条件：
                 // 1. 不允许拖到中心点（lx=ly=lz=0）
                 const isCenter = (Math.abs(snapped.lx) < 0.01 &&

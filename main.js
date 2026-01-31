@@ -1263,7 +1263,7 @@ function updateVirtualMouse(mouseX, mouseY) {
             if (SystemState.interactionState === 'EDIT') {
                 // EDIT 态：只吸附局部格网的活动层格点（LOCAL_GRID）或控制点（CONTROL）
                 // 且必须在屏幕平面附近
-                if (p.tag !== 'LOCAL_GRID' && p.tag !== 'CONTROL') return false;
+                if (p.tag !== 'LOCAL_GRID' && p.tag !== 'CONTROL' && p.tag !== 'LOCAL_GRID_EDGE') return false;
 
                 // [FIX] 拖动控制点时，排除正在被拖动的点本身
                 if (SystemState.draggedControlPoint && p === SystemState.draggedControlPoint) {
