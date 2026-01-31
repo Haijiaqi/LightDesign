@@ -272,6 +272,109 @@ class Matrix {
 
     return Math.sqrt(residual);
   }
+
+  // =================== Eigen Value Solver ===================
+
+  /**
+   * 求解实对称矩阵的特征系统 (Jacobi 迭代法)
+   * 返回最大特征值对应的特征向量（或全部特征值系统）
+   * 
+   * @param {Float64Array|Array} matrix - 一维数组（行主序）表示的 N x N 矩阵
+   * @param {number} n - 矩阵维度
+   * @param {number} maxIter - 最大迭代次数
+   * @param {number} epsilon - 收敛阈值
+   * @returns {{eigenValue: number, eigenVector: Float64Array}} 最大特征对
+   */
+  static eigenJacobi(matrix, n, maxIter = 50, epsilon = 1e-9) {
+    let A = matrix.slice(); // 浅拷贝，避免修改原矩阵
+
+    // 初始化特征向量矩阵 V 为单位矩阵
+    let V = new Float64Array(n * n);
+    for (let i = 0; i < n; i++) V[i * n + i] = 1;
+
+    for (let iter = 0; iter < maxIter; iter++) {
+      // 1. 寻找最大的非对角元素
+      let maxVal = 0;
+      let p = 0, q = 1;
+
+      for (let i = 0; i < n - 1; i++) {
+        for (let j = i + 1; j < n; j++) {
+          const val = Math.abs(A[i * n + j]);
+          if (val > maxVal) {
+            maxVal = val;
+            p = i; q = j;
+          }
+        }
+      }
+
+      if (maxVal < epsilon) break; // 已收敛
+
+      // 2. 计算旋转角度
+      const App = A[p * n + p];
+      const Aqq = A[q * n + q];
+      const Apq = A[p * n + q];
+
+      const tau = (Aqq - App) / (2 * Apq);
+      let t;
+      if (tau >= 0) {
+        t = 1 / (tau + Math.sqrt(1 + tau * tau));
+      } else {
+        t = -1 / (-tau + Math.sqrt(1 + tau * tau));
+      }
+      const c = 1 / Math.sqrt(1 + t * t);
+      const s = t * c;
+
+      // 3. 旋转矩阵 A
+      // A' = J^T * A * J
+      A[p * n + p] = c * c * App - 2 * s * c * Apq + s * s * Aqq;
+      A[q * n + q] = s * s * App + 2 * s * c * Apq + c * c * Aqq;
+      A[p * n + q] = 0;
+      A[q * n + p] = 0;
+
+      // 更新其他元素
+      for (let i = 0; i < n; i++) {
+        if (i !== p && i !== q) {
+          const Api = A[p * n + i];
+          const Aqi = A[q * n + i];
+          A[p * n + i] = c * Api - s * Aqi;
+          A[i * n + p] = A[p * n + i]; // 对称
+          A[q * n + i] = s * Api + c * Aqi;
+          A[i * n + q] = A[q * n + i]; // 对称
+        }
+      }
+
+      // 4. 累积特征向量 V
+      // V' = V * J
+      for (let i = 0; i < n; i++) {
+        const Vip = V[i * n + p];
+        const Viq = V[i * n + q];
+        V[i * n + p] = c * Vip - s * Viq;
+        V[i * n + q] = s * Vip + c * Viq;
+      }
+    }
+
+    // 寻找最大特征值（代数最大）
+    // 注意：对于四元数求解，我们寻找的是最大正特征值
+    let maxEigenValue = -Infinity;
+    let maxIndex = 0;
+    for (let i = 0; i < n; i++) {
+      if (A[i * n + i] > maxEigenValue) {
+        maxEigenValue = A[i * n + i];
+        maxIndex = i;
+      }
+    }
+
+    // 提取对应的特征向量
+    const eigenVector = new Float64Array(n);
+    for (let i = 0; i < n; i++) {
+      eigenVector[i] = V[i * n + maxIndex];
+    }
+
+    return {
+      eigenValue: maxEigenValue,
+      eigenVector: eigenVector
+    };
+  }
 }
 
 if (typeof module !== 'undefined' && module.exports) {

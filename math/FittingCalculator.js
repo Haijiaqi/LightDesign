@@ -1,3 +1,5 @@
+import { Matrix } from './Matrix.js';
+
 /**
  * 通用拟合计算类
  * 优先级：第二级（依赖 Matrix 类和 Point 类）
@@ -954,6 +956,123 @@ class FittingCalculator {
 
     return x;
   }
+
+  // ====================================================
+  // 刚体变换拟合 (Kabsch / Davenport's q-method)
+  // ====================================================
+
+  /**
+   * 拟合最佳刚体变换 (Rotation & Translation)
+   * 使得 sum |R * p_src + T - p_dst|^2 最小
+   * 
+   * 使用 Davenport's q-method 求解，等价于 Kabsch 算法但通过特征值分解实现，
+   * 数值稳定性更好，且直接给出四元数。
+   * 
+   * @param {Array<{x,y,z}>} sourcePoints - 源点集 (Rest Shape)
+   * @param {Array<{x,y,z}>} targetPoints - 目标点集 (Current Shape)
+   * @returns {{rotation: {w,x,y,z}, center: {x,y,z}, error: number}}
+   */
+  static fitRigidTransform(sourcePoints, targetPoints) {
+    if (sourcePoints.length !== targetPoints.length || sourcePoints.length < 3) {
+      console.warn('[FittingCalculator] rigid fit requires at least 3 matching points');
+      return {
+        rotation: { w: 1, x: 0, y: 0, z: 0 },
+        center: { x: 0, y: 0, z: 0 },
+        error: 0
+      };
+    }
+
+    const n = sourcePoints.length;
+
+    // 1. 计算质心
+    let cx_s = 0, cy_s = 0, cz_s = 0;
+    let cx_t = 0, cy_t = 0, cz_t = 0;
+
+    for (let i = 0; i < n; i++) {
+      cx_s += sourcePoints[i].x; cy_s += sourcePoints[i].y; cz_s += sourcePoints[i].z;
+      cx_t += targetPoints[i].x; cy_t += targetPoints[i].y; cz_t += targetPoints[i].z;
+    }
+    cx_s /= n; cy_s /= n; cz_s /= n;
+    cx_t /= n; cy_t /= n; cz_t /= n;
+
+    // 2. 构建协方差矩阵 H = sum( (p_s - c_s) * (p_t - c_t)^T )
+    let Hxx = 0, Hxy = 0, Hxz = 0;
+    let Hyx = 0, Hyy = 0, Hyz = 0;
+    let Hzx = 0, Hzy = 0, Hzz = 0;
+
+    for (let i = 0; i < n; i++) {
+      const sx = sourcePoints[i].x - cx_s;
+      const sy = sourcePoints[i].y - cy_s;
+      const sz = sourcePoints[i].z - cz_s;
+
+      const tx = targetPoints[i].x - cx_t;
+      const ty = targetPoints[i].y - cy_t;
+      const tz = targetPoints[i].z - cz_t;
+
+      Hxx += sx * tx; Hxy += sx * ty; Hxz += sx * tz;
+      Hyx += sy * tx; Hyy += sy * ty; Hyz += sy * tz;
+      Hzx += sz * tx; Hzy += sz * ty; Hzz += sz * tz;
+    }
+
+    // 3. 构建 4x4 对称矩阵 K (Davenport's q-method)
+    const K00 = Hxx + Hyy + Hzz;
+    const K01 = Hyz - Hzy;
+    const K02 = Hzx - Hxz;
+    const K03 = Hxy - Hyx;
+
+    const K10 = K01;
+    const K11 = Hxx - Hyy - Hzz;
+    const K12 = Hxy + Hyx;
+    const K13 = Hxz + Hzx;
+
+    const K20 = K02;
+    const K21 = K12;
+    const K22 = Hyy - Hxx - Hzz;
+    const K23 = Hyz + Hzy;
+
+    const K30 = K03;
+    const K31 = K13;
+    const K32 = K23;
+    const K33 = Hzz - Hxx - Hyy;
+
+    const K_mat = [
+      K00, K01, K02, K03,
+      K10, K11, K12, K13,
+      K20, K21, K22, K23,
+      K30, K31, K32, K33
+    ];
+
+    // 4. 求解 K 的最大特征值对应的特征向量
+    const { eigenVector } = Matrix.eigenJacobi(K_mat, 4);
+
+    // 特征向量即为四元数 [w, x, y, z]
+    // 注意：特征向量是 [w, x, y, z] 还是 [x, y, z, w]?
+    // K 矩阵构造是基于 q = [w, x, y, z] (实部在前) 的约定
+    const q = { w: eigenVector[0], x: eigenVector[1], y: eigenVector[2], z: eigenVector[3] };
+
+    // 归一化四元数
+    const len = Math.sqrt(q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z);
+    if (len > 1e-9) {
+      q.w /= len; q.x /= len; q.y /= len; q.z /= len;
+    }
+
+    // 5. 反射修正 (Reflection Correction)
+    // 检查行列式 det(R)
+    // R = (3x3 rotation matrix derived from quaternion) always has det=+1.
+    // 但如果点云是被镜像了，拟合的四元数可能表示"翻转"后的旋转？
+    // 四元数只能表示 SO(3) 旋转，无法表示镜像。
+    // 如果最佳变换包含镜像，Kabsch (SVD) 会得到 det=-1 的矩阵。
+    // Davenport q-method 总是产生一个合法的旋转（四元数），它会自动找到"最接近镜像的旋转"。
+    // 所以这里的 q 已经是最佳纯旋转。这是我们想要的（防止物体内翻）。
+
+    return {
+      rotation: q,
+      center: { x: cx_t, y: cy_t, z: cz_t },
+      error: 0
+    };
+  }
+
+
 }
 
 // 导出

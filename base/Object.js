@@ -30,6 +30,7 @@ import { Point } from "./Point.js";
 import { GeometryImpl } from "./GeometryImpl.js";
 import { ParametricImpl } from "./ParametricImpl.js";
 import { PhysicsBridgeImpl } from "./PhysicsBridgeImpl.js";
+import { FittingCalculator } from "../math/FittingCalculator.js";
 
 // ============================================================================
 // SimpleFitCache
@@ -1787,6 +1788,52 @@ export class Object {
   // rebuildPhysicsTopology
   // ==========================================================================
 
+  // ==========================================================================
+  // 坐标变换辅助 (Phase 17)
+  // ==========================================================================
+
+  _worldToBody(p) {
+    const dx = p.x - this.center.x;
+    const dy = p.y - this.center.y;
+    const dz = p.z - this.center.z;
+
+    const q = this.quaternion;
+    const qw = q.w, qx = -q.x, qy = -q.y, qz = -q.z; // Conjugate
+
+    // v_body = q_inv * v_world * q
+    const ix = qw * dx + qy * dz - qz * dy;
+    const iy = qw * dy + qz * dx - qx * dz;
+    const iz = qw * dz + qx * dy - qy * dx;
+    const iw = -qx * dx - qy * dy - qz * dz;
+
+    return {
+      x: ix * qw + iw * -qx + iy * -qz - iz * -qy,
+      y: iy * qw + iw * -qy + iz * -qx - ix * -qz,
+      z: iz * qw + iw * -qz + ix * -qy - iy * -qx
+    };
+  }
+
+  _bodyToWorld(p, center, rotation) {
+    const c = center || this.center;
+    const q = rotation || this.quaternion;
+
+    // v_world = q * v_body * q_inv
+    const ix = q.w * p.x + q.y * p.z - q.z * p.y;
+    const iy = q.w * p.y + q.z * p.x - q.x * p.z;
+    const iz = q.w * p.z + q.x * p.y - q.y * p.x;
+    const iw = -q.x * p.x - q.y * p.y - q.z * p.z;
+
+    const rx = ix * q.w + iw * -q.x + iy * -q.z - iz * -q.y;
+    const ry = iy * q.w + iw * -q.y + iz * -q.x - ix * -q.z;
+    const rz = iz * q.w + iw * -q.z + ix * -q.y - iy * -q.x;
+
+    return {
+      x: c.x + rx,
+      y: c.y + ry,
+      z: c.z + rz
+    };
+  }
+
   rebuildPhysicsTopology(options = {}) {
     if (this._surfaceBoundary === 0) {
       throw new Error('[Object] No surface points for physics topology');
@@ -1937,12 +1984,98 @@ export class Object {
       console.log(`[Object] Physics topology rebuilt: ${particles.length} particles, ${constraints.length} constraints`);
     }
 
+    // [Phase 17] 缓存 Rest Shape (Body Space)
+    // 用于 commitPhysicsState 时的姿态即使
+    this._referenceShape = [];
+    // const allPositions = [...surfacePositions, ...internalPositions]; // Reusing existing variable
+    for (const p of allPositions) {
+      this._referenceShape.push(this._worldToBody(p));
+    }
+
     return {
       particles: particles.length,
       constraints: constraints.length,
       surfaceCount: this._surfaceBoundary,
       internalCount: internalPositions.length
     };
+  }
+
+  // [Phase 17] 提交物理状态 (Q-Method / Kabsch)
+  // 将当前的物理形变"烘焙"为中心位移+旋转，并重置粒子位置
+  // 防止塑性形变积累，确保物体永远回归 Rest Shape
+  commitPhysicsState() {
+    if (!this.representation.physicsState || !this._referenceShape) return;
+
+    const particles = this.representation.physicsState.particles;
+    if (!particles || particles.length !== this._referenceShape.length) return;
+
+    const currentPoints = [];
+    for (const p of particles) {
+      currentPoints.push({ x: p.position.x, y: p.position.y, z: p.position.z });
+    }
+
+    // 1. 拟合最佳刚体变换
+    const result = FittingCalculator.fitRigidTransform(this._referenceShape, currentPoints);
+
+    if (this.verbose) {
+      console.log('[Object] commitPhysicsState:', result);
+    }
+
+    // 2. 更新对象参数
+    // [Phase 17 Update] 仅更新旋转，FOCUS态中心保持不变
+    // this.center.x = result.center.x;
+    // this.center.y = result.center.y;
+    // this.center.z = result.center.z;
+    this.quaternion = result.rotation;
+
+    // 3. 强制重置粒子位置 (Hard Commit)
+    for (let i = 0; i < particles.length; i++) {
+      const p = particles[i];
+      const ref = this._referenceShape[i];
+      const ideal = this._bodyToWorld(ref, this.center, this.quaternion);
+
+      p.position.x = ideal.x;
+      p.position.y = ideal.y;
+      p.position.z = ideal.z;
+      p.oldPosition.x = ideal.x;
+      p.oldPosition.y = ideal.y;
+      p.oldPosition.z = ideal.z;
+      p.velocity.x = 0;
+      p.velocity.y = 0;
+      p.velocity.z = 0;
+      p.force.x = 0;
+      p.force.y = 0;
+      p.force.z = 0;
+    }
+
+    // 同步到 constructionPoints 以便渲染立即更新
+    this._syncPhysicsToConstruction();
+
+    // [Modified] 显示状态管理交还给 main.js (CONFIG.revertOnSettle)
+    // this._tempDisplayPoints = null;
+    // this._tempDisplayPointsInitialized = false;
+  }
+
+  _syncPhysicsToConstruction() {
+    if (!this.representation.physicsState || !this.constructionPoints) return;
+
+    const particles = this.representation.physicsState.particles;
+    // constructionPoints 与 particles 顺序一致（先表面后内部）
+    const count = Math.min(particles.length, this.constructionPoints.length);
+
+    for (let i = 0; i < count; i++) {
+      const p = particles[i];
+      const cp = this.constructionPoints[i];
+
+      cp.x = p.position.x;
+      cp.y = p.position.y;
+      cp.z = p.position.z;
+
+      // PhysicsSystem计算了法线，这里也可以同步回cp以便光照正确
+      if (p.nx !== undefined) { // 简单检查
+        cp.nx = p.nx; cp.ny = p.ny; cp.nz = p.nz;
+      }
+    }
   }
 
   _bindPhysicsData(points) {

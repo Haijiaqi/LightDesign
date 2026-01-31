@@ -2649,6 +2649,11 @@ function physicsStep(dt) {
             if (avgVelSq < CONFIG.physicsDisplay.settleVelocityThreshold) {
                 obj._physicsActive = false;
 
+                // [Phase 17] 交互结束后，固化物理姿态并重置变形
+                if (obj.commitPhysicsState) {
+                    obj.commitPhysicsState();
+                }
+
                 // [配置化] 根据 revertOnSettle 决定是否恢复固有显示
                 if (CONFIG.physicsDisplay.revertOnSettle) {
                     obj._tempDisplayPoints = null;
