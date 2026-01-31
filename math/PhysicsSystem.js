@@ -140,6 +140,14 @@ class PhysicsSystem {
     this.constraintIterations = options.constraintIterations ?? 10;
     this.constraintRelaxation = options.constraintRelaxation ?? 1.0;
 
+    // [Fix] 全局显式积分阻尼 (用于控制能量耗散)
+    this.globalDamping = options.globalDamping ?? 0.98;
+
+    // [Fix] 系统安全限制
+    this.maxDisplacement = options.maxDisplacement ?? 0.5;
+    this.fixedTimeStep = options.fixedTimeStep ?? (1 / 60);
+    this.maxStepsPerFrame = options.maxStepsPerFrame ?? 4;
+
     // ====================================================
     // 碰撞参数
     // ====================================================
@@ -221,21 +229,54 @@ class PhysicsSystem {
 
   /**
    * 执行一个物理步（对外接口）
-   * @param {number} dt - 时间步长（可选，默认使用 this.timeStep）
+   * 
+   * [Fix] 使用固定时间步长累积器，解决 Variable dt 导致的 Verlet 积分发散问题。
+   * Verlet 积分器假设 dt 恒定，浏览器帧率波动会导致能量误差累积，最终发散。
+   * 通过累积器机制，无论外部传入的 dt 如何变化，内部始终使用恒定的 FIXED_DT 积分。
+   * 
+   * @param {number} dt - 时间步长（秒），来自 requestAnimationFrame 的帧间时间差
    */
   step(dt = null) {
     dt = dt ?? this.timeStep;
     const startTime = Date.now();
 
-    // 子步（提高稳定性）
-    const subDt = dt / this.substeps;
+    // [Fix] 初始化累加器（首次调用）
+    if (this._accumulator === undefined) {
+      this._accumulator = 0;
+    }
 
-    for (let i = 0; i < this.substeps; i++) {
-      this._substep(subDt);
+    // [Fix] 固定时间步长（从配置读取）
+    const FIXED_DT = this.fixedTimeStep;
+
+    // [Fix] 防止死亡螺旋：限制单帧最大物理时间
+    // 如果帧率极低（如切换标签页后回来），不要试图追赶所有时间
+    const MAX_FRAME_TIME = 0.05;  // 最多模拟 50ms
+    if (dt > MAX_FRAME_TIME) {
+      dt = MAX_FRAME_TIME;
+    }
+
+    // 累加帧时间
+    this._accumulator += dt;
+
+    // [Fix] 限制最大步数，防止卡死
+    const MAX_STEPS = this.maxStepsPerFrame;
+    let steps = 0;
+
+    // 以固定时间步长消耗累积的时间
+    while (this._accumulator >= FIXED_DT && steps < MAX_STEPS) {
+      // 每个固定步长内，再细分 substeps
+      const subDt = FIXED_DT / this.substeps;
+
+      for (let i = 0; i < this.substeps; i++) {
+        this._substep(subDt);
+      }
+
+      this._accumulator -= FIXED_DT;
+      steps++;
     }
 
     // 更新统计
-    this.stats.stepCount++;
+    this.stats.stepCount += steps;
     this.stats.lastStepTime = Date.now() - startTime;
 
     // if (this.verbose && this.stats.stepCount % 60 === 0) {
@@ -484,7 +525,7 @@ class PhysicsSystem {
       } else if (s2 !== undefined) {
         stiffness = s2;
       } else {
-        stiffness = 1000;  // 默认值
+        stiffness = 100;  // [Fix] 降低默认刚度，避免振荡发散
       }
     }
 
@@ -530,7 +571,11 @@ class PhysicsSystem {
       } else if (d2 !== undefined) {
         damping = d2;
       }
-      // 注意：如果都未定义，damping 保持 undefined（不应用阻尼）
+      // [Fix] 如果都未定义，使用默认阻尼（而不是跳过阻尼计算）
+      if (damping === undefined) {
+        // [Fix] 降低阻尼以产生欠阻尼震荡 (0.5 -> 0.05)
+        damping = 0.05;
+      }
     }
 
     // 阻尼（相对速度）
@@ -637,13 +682,13 @@ class PhysicsSystem {
 
     // Verlet 位置更新：x(t+dt) = 2x(t) - x(t-dt) + a·dt²
     // [Fix] 添加阻尼：减少位置变化的幅度
-    const damping = 0.98; // 2% 能量损失
+    const damping = this.globalDamping; // 使用配置的全局阻尼
     let newX = p.position.x + (p.position.x - p.oldPosition.x) * damping + ax * dt * dt;
     let newY = p.position.y + (p.position.y - p.oldPosition.y) * damping + ay * dt * dt;
     let newZ = p.position.z + (p.position.z - p.oldPosition.z) * damping + az * dt * dt;
 
     // [Fix] 限制单帧最大位移（防止爆炸）
-    const maxDisp = 0.5; // 最大 0.5cm/帧
+    const maxDisp = this.maxDisplacement; // [Fix] 从配置读取位移限制
     const dx = newX - p.position.x;
     const dy = newY - p.position.y;
     const dz = newZ - p.position.z;
@@ -699,6 +744,12 @@ class PhysicsSystem {
       p.velocity.y *= scale;
       p.velocity.z *= scale;
     }
+
+    // [Fix] 速度衰减（全局阻尼）
+    const velocityDamping = 0.98;
+    p.velocity.x *= velocityDamping;
+    p.velocity.y *= velocityDamping;
+    p.velocity.z *= velocityDamping;
 
     // 更新位置
     p.position.x += p.velocity.x * dt;
@@ -825,6 +876,18 @@ class PhysicsSystem {
     if (dt <= 0) return;
 
     for (const data of physicsData) {
+      // [Fix] 检查是否有 PBD 约束（distance 类型）
+      // Force 模型使用 Verlet 积分，其隐式速度由 position - oldPosition 提供，
+      // 不需要显式速度更新。如果强制更新速度，会导致发散。
+      // 只对有 PBD 约束的对象执行速度更新。
+      const hasPBDConstraints = data.constraints.some(c =>
+        c.type === 'distance' || c.type === 'bending' || c.type === 'shape_matching'
+      );
+
+      if (!hasPBDConstraints) {
+        continue; // Force 模型，跳过速度更新
+      }
+
       for (let i = 0; i < data.particles.length; i++) {
         const p = data.particles[i];
         if (!p.fixed && p.velocity && data._oldPositions) {

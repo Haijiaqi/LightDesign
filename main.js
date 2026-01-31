@@ -533,6 +533,64 @@ function processIntent(intent) {
                     console.log('[PHYSICS] No focused object');
                     break;
                 }
+
+                // [方案A] 延迟初始化物理系统：仅在首次左击时初始化
+                if (obj._physicsReady && !obj.physics.enabled) {
+                    console.log('[PHYSICS] First touch: initializing physics system...');
+
+                    // 1. 启用物理
+                    obj.physics.enabled = true;
+
+                    // 2. 生成体积网格（覆盖 constructionPoints）
+                    if (obj.representation?.type === 'sphericalHarmonics') {
+                        console.log('[PHYSICS] Generating volumetric mesh for SH object');
+                        obj.generateVolumetricMesh({
+                            relaxIterations: 10
+                        });
+                    }
+
+                    // 3. 构建物理拓扑
+                    obj.rebuildPhysicsTopology({
+                        physicsModel: obj.physics.model || CONFIG.defaultPhysicsModel,
+                        stiffness: obj.physics.stiffness || CONFIG.physicsParams.force.stiffness,
+                        damping: obj.physics.damping || CONFIG.physicsParams.force.damping
+                    });
+
+                    // 4. 创建全局物理系统（如果不存在）
+                    if (!_globalPhysicsSystem) {
+                        _globalPhysicsSystem = new PhysicsSystem({
+                            gravity: { x: 0, y: 0, z: 0 },
+                            substeps: CONFIG.physicsParams.system.substeps,
+                            airDamping: CONFIG.physicsParams.force.airDamping,
+                            globalDamping: CONFIG.physicsParams.force.globalDamping,
+                            constraintIterations: 15,
+                            verbose: CONFIG.physicsDebug,
+                            // 系统参数
+                            maxDisplacement: CONFIG.physicsParams.system.maxDisplacement,
+                            fixedTimeStep: CONFIG.physicsParams.system.fixedTimeStep,
+                            maxStepsPerFrame: CONFIG.physicsParams.system.maxStepsPerFrame
+                        });
+                    }
+
+                    // 5. 添加到物理世界
+                    _globalPhysicsSystem.addObject(obj);
+                    obj._inPhysicsWorld = true;
+
+                    // 6. 初始化质心锚点
+                    initPhysicsCOM(obj);
+
+                    // 7. PERFORMANCE 模式：设置临时显示点
+                    if (CONFIG.physicsMode === 'PERFORMANCE' && obj._isVolumetric) {
+                        obj._tempDisplayPoints = obj.constructionPoints.slice(0, obj._surfaceBoundary);
+                        for (const p of obj._tempDisplayPoints) {
+                            p.tag = p.tag || 'PHYSICS_NODE';
+                        }
+                        obj._tempDisplayPointsInitialized = true;
+                    }
+
+                    console.log('[PHYSICS] Physics system initialized on first touch');
+                }
+
                 if (!obj.constructionPoints || obj.constructionPoints.length === 0) {
                     console.log('[PHYSICS] No constructionPoints on object');
                     break;
@@ -615,7 +673,7 @@ function processIntent(intent) {
                     }
 
                     // 冲量强度（单位：cm/s 速度）
-                    const impulseVelocity = 5.0; // 5 cm/s 的初始速度
+                    const impulseVelocity = CONFIG.physicsParams?.force?.impulseScale ?? 50.0;
 
                     // 获取物理粒子并施加速度冲量
                     const physicsState = obj.representation?.physicsState;
@@ -1538,11 +1596,12 @@ function applyTouchImpulse(impulse) {
 function moveObjectTo(obj, x, y, z) {
     if (!obj) return;
 
-    // 阶段3重构：使用 Transform 组件
-    // 禁止直接修改 Point 世界坐标
+    // 计算位移增量（用于物理粒子同步）
+    const dx = x - obj.center.x;
+    const dy = y - obj.center.y;
+    const dz = z - obj.center.z;
 
-    // 更新 Transform
-    // 注意：obj.center 引用了 obj.transform.position，但为了明确语义，使用 transform
+    // 阶段3重构：使用 Transform 组件
     if (obj.transform) {
         obj.transform.position.x = x;
         obj.transform.position.y = y;
@@ -1552,17 +1611,12 @@ function moveObjectTo(obj, x, y, z) {
         obj.updateWorldPoints();
     } else {
         // Fallback for legacy objects (if any)
-        const dx = x - obj.center.x;
-        const dy = y - obj.center.y;
-        const dz = z - obj.center.z;
-
         const points = obj.displayPoints.length > 0 ? obj.displayPoints : obj.constructionPoints;
         for (const p of points) {
             p.x += dx;
             p.y += dy;
             p.z += dz;
         }
-        // FIX: 确保 controlPoints 也跟随移动
         if (obj.controlPoints && obj.controlPoints.length > 0) {
             for (const cp of obj.controlPoints) {
                 cp.x += dx;
@@ -1575,9 +1629,35 @@ function moveObjectTo(obj, x, y, z) {
         obj.center.z = z;
     }
 
+    // [滚轮修复] 同步更新物理粒子位置
+    // 物理粒子使用世界坐标，当物体中心移动时需要同步偏移
+    const physicsState = obj.representation?.physicsState;
+    if (physicsState && physicsState.particles && obj._inPhysicsWorld) {
+        for (const particle of physicsState.particles) {
+            if (particle && particle.position) {
+                particle.position.x += dx;
+                particle.position.y += dy;
+                particle.position.z += dz;
+                // 同步 oldPosition（Verlet 积分使用，防止下一帧产生意外速度）
+                if (particle.oldPosition) {
+                    particle.oldPosition.x += dx;
+                    particle.oldPosition.y += dy;
+                    particle.oldPosition.z += dz;
+                }
+            }
+        }
+
+        // [修复] 同步 COM 锚点
+        // extractCOMDrift 依赖 anchorCOM 作为零漂移基准
+        // 如果物体整体被移动，锚点必须跟随移动，否则会被误判为物理漂移
+        if (physicsState.anchorCOM) {
+            physicsState.anchorCOM.x += dx;
+            physicsState.anchorCOM.y += dy;
+            physicsState.anchorCOM.z += dz;
+        }
+    }
+
     if (obj.centerPoint) {
-        // centerPoint is updated in updateWorldPoints if transform exists
-        // but double check for sync
         obj.centerPoint.x = x;
         obj.centerPoint.y = y;
         obj.centerPoint.z = z;
@@ -1595,6 +1675,16 @@ function enterEditState() {
         console.warn('enterEditState: 没有聚焦的物体');
         return;
     }
+
+    // [配置化] 根据配置决定是否清除物理显示状态
+    // keepPhysicsInEdit=false 时切回固有显示，true 时保持物理显示
+    if (!CONFIG.physicsDisplay.keepPhysicsInEdit) {
+        obj._tempDisplayPoints = null;
+        obj._tempDisplayPointsInitialized = false;
+        obj._physicsActive = false;
+    }
+    // 注：保留 physics.enabled 和 _inPhysicsWorld，以便后续可以重新激活物理
+
     SystemState.interactionState = 'EDIT_ENTERING';
     const radiusEdit = measureObjectRadius(obj);
     console.log(`[STATE] FOCUS→EDIT: 半径=${radiusEdit.toFixed(3)}cm, center.y=${obj.center.y.toFixed(2)}`);
@@ -2262,9 +2352,12 @@ function extractCOMDrift(obj) {
     }
 
     // 4. 转移：将漂移累加到 Object.center
-    obj.center.x += drift.x;
-    obj.center.y += drift.y;
-    obj.center.z += drift.z;
+    // [配置化] 只有启用 COM 平移分离时才执行
+    if (CONFIG.physicsDisplay.enableCOMTranslation) {
+        obj.center.x += drift.x;
+        obj.center.y += drift.y;
+        obj.center.z += drift.z;
+    }
 
     // 调试日志（低频）
     if (CONFIG.physicsDebug && (SystemState.frameCount % 120 === 0)) {
@@ -2304,11 +2397,65 @@ function physicsStep(dt) {
     //     console.log('[physicsStep] dt=', (dt / 1000).toFixed(4), 'mode=', CONFIG.physicsMode);
     // }
 
-    // Phase 5: 性能模式 - 直接映射建构点为临时显示点
+    // [配置化] activateOnFocusEnter：进入 FOCUS 后自动初始化物理
+    // [Fix] 必须检查 interactionState === 'FOCUS'，防止在 EDIT 态重拟合禁用物理后被错误地自动重新激活
+    if (CONFIG.physicsDisplay.activateOnFocusEnter &&
+        obj._physicsReady &&
+        !obj.physics.enabled &&
+        SystemState.interactionState === 'FOCUS') {
+        console.log('[PHYSICS] Auto-activating physics (activateOnFocusEnter=true)');
+
+        // 复用 FOCUS_PHYSICS_TOUCH 中的初始化逻辑
+        obj.physics.enabled = true;
+
+        if (obj.representation?.type === 'sphericalHarmonics') {
+            obj.generateVolumetricMesh({ relaxIterations: 10 });
+        }
+
+        obj.rebuildPhysicsTopology({
+            physicsModel: obj.physics.model || CONFIG.defaultPhysicsModel,
+            stiffness: obj.physics.stiffness || CONFIG.physicsParams.force.stiffness,
+            damping: obj.physics.damping || CONFIG.physicsParams.force.damping
+        });
+
+        if (!_globalPhysicsSystem) {
+            _globalPhysicsSystem = new PhysicsSystem({
+                gravity: { x: 0, y: 0, z: 0 },
+                substeps: CONFIG.physicsParams.system.substeps,
+                airDamping: CONFIG.physicsParams.force.airDamping,
+                globalDamping: CONFIG.physicsParams.force.globalDamping,
+                constraintIterations: 15,
+                verbose: CONFIG.physicsDebug,
+                // 系统参数
+                maxDisplacement: CONFIG.physicsParams.system.maxDisplacement,
+                fixedTimeStep: CONFIG.physicsParams.system.fixedTimeStep,
+                maxStepsPerFrame: CONFIG.physicsParams.system.maxStepsPerFrame
+            });
+        }
+
+        _globalPhysicsSystem.addObject(obj);
+        obj._inPhysicsWorld = true;
+        initPhysicsCOM(obj);
+
+        if (CONFIG.physicsMode === 'PERFORMANCE' && obj._isVolumetric) {
+            obj._tempDisplayPoints = obj.constructionPoints.slice(0, obj._surfaceBoundary);
+            for (const p of obj._tempDisplayPoints) {
+                p.tag = p.tag || 'PHYSICS_NODE';
+            }
+            obj._tempDisplayPointsInitialized = true;
+        }
+
+        // 自动激活模式下立即进入物理活动状态
+        obj._physicsActive = true;
+        obj._physicsActiveFrames = 0;
+    }
+
+    // Phase 5: 性能模式 - 直接映射建构点为临时显示点（仅在物理激活后）
     if (CONFIG.physicsMode === 'PERFORMANCE') {
-        if (!obj._tempDisplayPointsInitialized && obj._isVolumetric) {
+        // [方案A] 只在物理激活 (_physicsActive=true) 后设置临时显示点
+        // 物理未激活时保持固有显示 (displayPoints)
+        if (obj._physicsActive && !obj._tempDisplayPointsInitialized && obj._isVolumetric) {
             // 注意：这里只是数组容器拷贝，点对象仍归 constructionPoints 所有
-            // 渲染器不得修改除 tag 之外的属性
             obj._tempDisplayPoints = obj.constructionPoints.slice(0, obj._surfaceBoundary);
             for (const p of obj._tempDisplayPoints) {
                 p.tag = p.tag || 'PHYSICS_NODE';
@@ -2365,9 +2512,7 @@ function physicsStep(dt) {
             } catch (err) {
                 console.warn('[physicsStep] QUALITY mode fitting error:', err.message);
             }
-
-            // 活动帧计数
-            obj._physicsActiveFrames = (obj._physicsActiveFrames || 0) + 1;
+            // 注：活动帧计数已移至物理步骤后统一处理
         }
     }
 
@@ -2415,29 +2560,30 @@ function physicsStep(dt) {
                 verbose: CONFIG.physicsDebug
             });
         }
-        // 确保物体在物理世界中（且没有初始化失败）
+        // [方案A] 备用初始化路径
+        // 正常情况下，物理初始化在 FOCUS_PHYSICS_TOUCH 中进行
+        // 这里是兜底逻辑，防止物理启用但未通过点击初始化的情况
         if (!obj._inPhysicsWorld && !obj._physicsInitFailed) {
-            console.log('[physicsStep] Building physics topology for object');
-            // 必须先构建物理拓扑（粒子、约束），否则 PhysicsSystem 无法模拟
+            console.log('[physicsStep] Fallback: Building physics topology for object');
             try {
-                // 如果是球谐类型，需要先生成体积网格
-                if (obj.representation?.type === 'sphericalHarmonics') {
+                if (obj.representation?.type === 'sphericalHarmonics' && !obj._isVolumetric) {
                     console.log('[physicsStep] Generating volumetric mesh for SH object');
-                    // 使用默认间距 (GeometryImpl.DEFAULT_SPACING_VOLUMETRIC = 0.5cm)
                     obj.generateVolumetricMesh({
                         relaxIterations: 10
                     });
                 }
 
-                obj.rebuildPhysicsTopology({
-                    physicsModel: obj.physics.model || CONFIG.defaultPhysicsModel,
-                    stiffness: obj.physics.stiffness || 1.0, // 极低刚度，防止爆炸
-                    damping: obj.physics.damping || 10 // 高阻尼，快速衰减
-                });
-                console.log('[physicsStep] Topology built, mode=', obj.mode);
+                if (!obj.representation?.physicsState?.particles?.length) {
+                    obj.rebuildPhysicsTopology({
+                        physicsModel: obj.physics.model || CONFIG.defaultPhysicsModel,
+                        stiffness: obj.physics.stiffness || CONFIG.physicsParams.force.stiffness,
+                        damping: obj.physics.damping || CONFIG.physicsParams.force.damping
+                    });
+                    console.log('[physicsStep] Topology built, mode=', obj.mode);
+                }
             } catch (err) {
                 console.error('[physicsStep] Failed to build topology:', err.message);
-                obj._physicsInitFailed = true; // 标记失败，避免循环重试
+                obj._physicsInitFailed = true;
                 return;
             }
 
@@ -2446,7 +2592,6 @@ function physicsStep(dt) {
             obj._inPhysicsWorld = true;
             console.log('[physicsStep] Object added, _globalPhysicsSystem.objectCount=', _globalPhysicsSystem.objects?.length);
 
-            // [COM Splitting] 初始化质心锚点
             initPhysicsCOM(obj);
 
             // 跳过本帧的物理计算，让系统稳定一帧
@@ -2467,6 +2612,11 @@ function physicsStep(dt) {
         // [COM Splitting] 提取质心漂移，转移到 Object.center
         extractCOMDrift(obj);
 
+        // [修复] 物理活动帧计数（两种模式共用，确保静止检测能触发）
+        if (obj._physicsActive) {
+            obj._physicsActiveFrames = (obj._physicsActiveFrames || 0) + 1;
+        }
+
         // NaN 检测：如果物理发散，立即停止
         const p0 = obj.constructionPoints[0];
         if (p0 && (isNaN(p0.x) || isNaN(p0.y) || isNaN(p0.z))) {
@@ -2483,8 +2633,8 @@ function physicsStep(dt) {
             console.log(`[PHYSICS] Step ${SystemState.frameCount}: P4 loc=(${pLast?.lx.toFixed(3)}, ${pLast?.ly.toFixed(3)}, ${pLast?.lz.toFixed(3)})`);
         }
 
-        // [Fix] 静止检测：如果物理活动了足够久且没有明显运动，则停止拟合
-        if (obj._physicsActive && obj._physicsActiveFrames > 60) {
+        // [配置化] 静止检测：如果物理活动了足够久且没有明显运动，则停止拟合
+        if (obj._physicsActive && obj._physicsActiveFrames > CONFIG.physicsDisplay.settleFrameThreshold) {
             // 检测平均速度
             const particles = obj.representation?.physicsState?.particles || [];
             let totalVelSq = 0;
@@ -2495,11 +2645,19 @@ function physicsStep(dt) {
             }
             const avgVelSq = totalVelSq / (particles.length || 1);
 
-            // 如果平均速度很小（< 0.01 cm/s），认为静止
-            if (avgVelSq < 0.0001) {
+            // [配置化] 使用配置的速度阈值判定静止
+            if (avgVelSq < CONFIG.physicsDisplay.settleVelocityThreshold) {
                 obj._physicsActive = false;
+
+                // [配置化] 根据 revertOnSettle 决定是否恢复固有显示
+                if (CONFIG.physicsDisplay.revertOnSettle) {
+                    obj._tempDisplayPoints = null;
+                    obj._tempDisplayPointsInitialized = false;
+                }
+
                 if (CONFIG.physicsDebug) {
-                    console.log('[PHYSICS] Object settled (avgVelSq=' + avgVelSq.toFixed(6) + ')');
+                    const action = CONFIG.physicsDisplay.revertOnSettle ? 'restored to displayPoints' : 'kept physics display';
+                    console.log(`[PHYSICS] Object settled, ${action} (avgVelSq=${avgVelSq.toFixed(6)})`);
                 }
             }
         }
@@ -2582,8 +2740,17 @@ async function gameLoop(timestamp = 0) {
             console.log(`[Refit] 检测到 _needsRefit, obj=${obj.metadata?.name}, representation.type=${obj.representation?.type}, hasSH=${!!obj.representation?.data?.sphericalHarmonics}`);
 
             // 检查是否有球谐表示
-            if (obj.representation?.type === 'sphericalHarmonics' &&
-                obj.representation.data?.sphericalHarmonics) {
+            // [Fix] 即使 representation.type 被更改为 'volumetric' (物理开启后)，
+            // 只要存在 data.sphericalHarmonics，就应该允许编辑和重拟合
+            if (obj.representation?.data?.sphericalHarmonics) {
+                // [Fix] 重拟合会改变几何形状，使得当前的物理拓扑失效。
+                // 并且拟合会将 mode 改为 parametric，导致物理引擎报错 (Illegal physics access)。
+                // 因此在重拟合前必须禁用物理。下次启用物理时会触发 rebuild。
+                if (obj.physics.enabled) {
+                    console.log('[Refit] Disabling physics due to shape modification');
+                    obj.physics.enabled = false;
+                    obj._inPhysicsWorld = false;
+                }
 
                 const sh = obj.representation.data.sphericalHarmonics;
                 const currentOrder = obj.representation.data.fittedOrder ?? 3;

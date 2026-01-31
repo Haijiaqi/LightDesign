@@ -273,23 +273,25 @@ class SystemStateClass {
             self.interactionState = 'FOCUS';
             self._helpers.tracePoint?.(obj, 'FOCUS-entered');
 
-            // Phase 9: 激活物理模拟
-            // 强制启用物理，并设置默认参数
-            if (obj && !obj.physics.enabled) {
-                console.log(`[STATE] FOCUS: 激活物理模拟 (${CONFIG.defaultPhysicsModel})`);
-                obj.physics.enabled = true;
+            // Phase 9: 物理准备（延迟启用）
+            // 只标记物理就绪，实际启用等待用户左击触发
+            if (obj) {
+                console.log(`[STATE] FOCUS: 物理就绪，等待用户交互 (${CONFIG.defaultPhysicsModel})`);
+                obj._physicsReady = true;  // 标记可以启用物理
                 obj.physics.model = CONFIG.defaultPhysicsModel; // 'force'
 
-                // 确保有合理的刚度和阻尼，如果是 0 则给默认值
+                // 预设合理的刚度和阻尼
                 if (!obj.physics.stiffness || obj.physics.stiffness < 0.1) {
                     obj.physics.stiffness = 100.0;
                 }
                 if (!obj.physics.damping || obj.physics.damping < 0.01) {
-                    obj.physics.damping = 5.0; // 适当阻尼避免永远震荡
+                    obj.physics.damping = 5.0;
                 }
 
-                // 标记还未在物理世界中
+                // 确保物理未启用（保持固有显示）
+                obj.physics.enabled = false;
                 obj._inPhysicsWorld = false;
+                obj._physicsActive = false;
             }
         };
 
