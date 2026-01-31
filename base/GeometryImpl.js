@@ -25,9 +25,9 @@ export class GeometryImpl {
   // ==========================================================================
 
   static EPSILON = 1e-10;
-  static KNN_3D = 10;
+  static KNN_3D = 6;
   static KNN_2D = 6;
-  static KNN_INTERNAL = 8;
+  static KNN_INTERNAL = 6;
 
   // 默认建构点间距
   static DEFAULT_SPACING_VOLUMETRIC = 0.5;  // 球谐体默认间距 0.5cm
