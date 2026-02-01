@@ -27,11 +27,11 @@ description: 物理驱动的旋转控制与 Kabsch/Q-method 姿态反解 (Phase 
 *   **目标文件**: `math/FittingCalculator.js`
 *   **做什么**:
     *   实现 `fitRigidTransform(sourcePoints, targetPoints)` 方法。
-    *   实现 **Davenport's q-method** 算法（求解 4x4 对称矩阵的最大特征值对应的特征向量）。
+    *   实现 **Davenport's q-method** 算法（构建 4x4 对称 K 矩阵，复用 `Matrix.eigenJacobi` 求解特征值）。
     *   **必须**实现为纯函数：不修改类实例状态，不依赖外部状态。
 *   **禁止什么**:
     *   禁止引入 `Alignment.js` 或其他新文件。
-    *   禁止使用 SVD（因为还需要实现复杂的 SVD 算法），直接使用特征值求解闭式解或简易迭代。
+    *   禁止重复实现特征值求解器（直接复用 `Matrix.eigenJacobi`）。
 *   **检查点 (交付标准)**:
     *   编写一个临时测试：生成一组点，将其旋转 45 度。调用函数，确认返回的四元数对应 45 度旋转（误差 < 1e-6）。
 
@@ -45,7 +45,7 @@ description: 物理驱动的旋转控制与 Kabsch/Q-method 姿态反解 (Phase 
     *   **实现提交逻辑**: `commitPhysicsState()`。
         1. 收集当前粒子位置。
         2. 调用 `FittingCalculator.fitRigidTransform` 求解 $(Position, Quaternion)$。
-        3. 更新 `this.center` 和 `this.quaternion`。
+        3. **Rotation-Only Commit (FOCUS 态策略)**: 仅更新 `this.quaternion`，保持 `this.center` 不变（确保物体视觉中心锁定）。
         4. **强制重置**: 根据新的 $C, Q$ 和 `_referenceShape`，计算完美的粒子位置，可以直接复用 `rebuildPhysicsTopology` 中的逻辑或新写辅助函数。
         5. 覆盖 `p.position` 和 `p.oldPosition`。
 *   **要照抄什么**:
@@ -112,8 +112,8 @@ description: 物理驱动的旋转控制与 Kabsch/Q-method 姿态反解 (Phase 
 
 | 类型 | 连接方式 | 参数 | 代码位置 |
 |------|---------|------|----------|
-| **表面点** | KNN 三角化 + 遮挡过滤 | `KNN_3D = 10` | GeometryImpl.js:28 |
-| **内部点** | KNN + 距离阈值 | `KNN_INTERNAL = 8` | GeometryImpl.js:30 |
+| **表面点** | KNN 三角化 + 遮挡过滤 | `KNN_3D = 6` | GeometryImpl.js:28 |
+| **内部点** | KNN + 距离阈值 | `KNN_INTERNAL = 6` | GeometryImpl.js:30 |
 | **皮骨连接** | 距离阈值 (无 KNN 限制) | `maxDistance` | buildSkinBoneTopology |
 
 ### 遮挡法 (Occlusion Callback)
@@ -126,10 +126,7 @@ description: 物理驱动的旋转控制与 Kabsch/Q-method 姿态反解 (Phase 
 
 ### 优化空间
 
-*   可以将 `KNN_3D` 从 10 降至 **6-8**。
-*   可以将 `KNN_INTERNAL` 从 8 降至 **4-5**。
-*   **风险**：连接数过低会导致剪切刚度不足（物体变形时容易"滑动"而非"弹回"）。
-*   **建议**：先实验，观察效果后再调整。
+*   **已实施优化**: 将 `KNN_3D` 从 10 降至 6，`KNN_INTERNAL` 从 8 降至 6，显著减少了约束数量，提高了物理模拟的帧率。
 
 ---
 

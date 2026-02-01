@@ -136,6 +136,21 @@ export const EditConfig = {
         }
         // EDGE-V: X沿对角, Y沿棱
         return { width: diagSize, height: edgeSize };
+    },
+
+    // ===== 交互力学参数 =====
+
+    /**
+     * 物理交互参数
+     * 用于驱动 FOCUS 态的旋转交互
+     */
+    InteractionForces: {
+        swipeGain: 0.1,          // 鼠标速度 -> 冲量系数
+        swipeCooldown: 100,      // 扫动防抖冷却 (ms)
+        swipeSliceThreshold: 0.8,// 扫动切片吸附阈值 (cm)
+        pokeImpulse: 20.0,       // 点击垂直冲量 (固定值)
+        pokeRadius: 5.0,         // 点击 AOE 半径 (cm)
+        pokeDecay: 'gaussian'    // 衰减类型
     }
 };
 
