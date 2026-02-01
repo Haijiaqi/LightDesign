@@ -1989,13 +1989,19 @@ export class Object {
       console.log(`[Object] Physics topology rebuilt: ${particles.length} particles, ${constraints.length} constraints`);
     }
 
-    // [Phase 17] 缓存 Rest Shape (Body Space)
-    // 用于 commitPhysicsState 时的姿态即使
+    // [Phase 17] 缓存 Rest Shape (Local Space - 相对于 this.center)
+    // 方案B：存储局部坐标，避免每次拟合时重复计算减法
+    // referenceLocal[i] = particle.position - center_at_capture
     this._referenceShape = [];
-    // const allPositions = [...surfacePositions, ...internalPositions]; // Reusing existing variable
     for (const p of allPositions) {
-      this._referenceShape.push(this._worldToBody(p));
+      this._referenceShape.push({
+        x: p.x - this.center.x,
+        y: p.y - this.center.y,
+        z: p.z - this.center.z
+      });
     }
+    // 记录初始中心，用于后续拟合
+    this._referenceCenter = { x: this.center.x, y: this.center.y, z: this.center.z };
 
     return {
       particles: particles.length,
@@ -2014,49 +2020,118 @@ export class Object {
     const particles = this.representation.physicsState.particles;
     if (!particles || particles.length !== this._referenceShape.length) return;
 
-    // [FIX] 将当前粒子位置转换为局部坐标（相对于 this.center）
-    // 这样 fitRigidTransform 的两个输入都是局部坐标，只提取纯旋转
-    const currentLocal = [];
-    for (const p of particles) {
-      currentLocal.push({
-        x: p.position.x - this.center.x,
-        y: p.position.y - this.center.y,
-        z: p.position.z - this.center.z
-      });
-    }
+    // [方案B] 使用局部坐标进行拟合
+    // _referenceShape 已经是局部坐标（相对于 _referenceCenter）
+    // 将当前粒子位置也转为相对于当前 this.center 的局部坐标
+    const currentLocal = particles.map(p => ({
+      x: p.position.x - this.center.x,
+      y: p.position.y - this.center.y,
+      z: p.position.z - this.center.z
+    }));
 
-    // 1. 拟合最佳刚体变换（纯旋转，因为两者都是局部坐标）
-    const result = FittingCalculator.fitRigidTransform(this._referenceShape, currentLocal);
+    const result = FittingCalculator.fitRigidTransform(
+      this._referenceShape,  // 局部坐标
+      currentLocal           // 局部坐标
+    );
 
     if (this.verbose) {
       console.log('[Object] commitPhysicsState:', result);
     }
 
-    // 2. 更新对象旋转（记录最终朝向）
+    // === 详细调试 ===
+    const r = result.rotation;
+    console.log(`[COMMIT] this.center = (${this.center.x.toFixed(4)}, ${this.center.y.toFixed(4)}, ${this.center.z.toFixed(4)})`);
+    console.log(`[COMMIT] result.rotation = (w=${r.w.toFixed(4)}, x=${r.x.toFixed(4)}, y=${r.y.toFixed(4)}, z=${r.z.toFixed(4)})`);
+    console.log(`[COMMIT] _referenceShape[0] (local) = (${this._referenceShape[0].x.toFixed(4)}, ${this._referenceShape[0].y.toFixed(4)}, ${this._referenceShape[0].z.toFixed(4)})`);
+
+    // 2. 更新对象旋转
     this.quaternion = result.rotation;
 
-    // 3. 清零速度和力，但保持粒子当前位置
-    // 不重置到理想位置，因为物理最终位置就是正确位置
-    // 这样可以避免跳变
+    // 3. 重置粒子到理想位置
+    // [方案B] ideal = this.center + rotation * referenceLocal
     for (let i = 0; i < particles.length; i++) {
       const p = particles[i];
+      const refLocal = this._referenceShape[i];  // 已经是局部坐标
+      // 直接使用局部坐标，应用旋转，再加上当前中心
+      const ideal = this._bodyToWorld(
+        refLocal,           // 局部坐标（已经相对于原点）
+        this.center,        // 旋转中心 = 当前物心
+        result.rotation
+      );
+
+      // 首个粒子的详细日志
+      if (i === 0) {
+        console.log(`[COMMIT] p[0] refLocal = (${refLocal.x.toFixed(4)}, ${refLocal.y.toFixed(4)}, ${refLocal.z.toFixed(4)})`);
+        console.log(`[COMMIT] p[0] BEFORE = (${p.position.x.toFixed(4)}, ${p.position.y.toFixed(4)}, ${p.position.z.toFixed(4)})`);
+        console.log(`[COMMIT] p[0] ideal = (${ideal.x.toFixed(4)}, ${ideal.y.toFixed(4)}, ${ideal.z.toFixed(4)})`);
+      }
+
+      // 重置粒子到理想位置
+      p.position.x = ideal.x;
+      p.position.y = ideal.y;
+      p.position.z = ideal.z;
+      p.oldPosition.x = ideal.x;
+      p.oldPosition.y = ideal.y;
+      p.oldPosition.z = ideal.z;
+
+      // 清零速度和力
       p.velocity.x = 0;
       p.velocity.y = 0;
       p.velocity.z = 0;
       p.force.x = 0;
       p.force.y = 0;
       p.force.z = 0;
-      // 同步 oldPosition 防止下次物理产生速度
-      p.oldPosition.x = p.position.x;
-      p.oldPosition.y = p.position.y;
-      p.oldPosition.z = p.position.z;
     }
 
-    // 4. 不需要再同步，因为 settle 时已经同步过了
-    // this._syncPhysicsToConstruction();
+    // 4. 同步当前位置到 constructionPoints
+    this._syncPhysicsToConstruction();
+
+    console.log(`[COMMIT] AFTER sync: cp[0] = (${this.constructionPoints[0].x.toFixed(4)}, ${this.constructionPoints[0].y.toFixed(4)}, ${this.constructionPoints[0].z.toFixed(4)})`);
+
+    // 5. [核心] 物理冷重启：基于当前几何重建整个 physicsState
+    // 这会清除所有 solver 历史、约束缓存、迭代残差
+    // 效果：物体像"第一次出现"一样，无任何残余应力
+    this._coldRestartPhysics();
 
     if (this.verbose) {
-      console.log('[Object] commitPhysicsState complete (rotation extracted, positions preserved)');
+      console.log('[Object] commitPhysicsState complete (physics cold restart)');
+    }
+  }
+  // [物理冷重启] 基于当前几何状态重建整个 physicsState
+  // 清除所有 solver 历史、约束缓存、迭代残差
+  // 保留：Object.center, Object.quaternion, constructionPoints 位置
+  _coldRestartPhysics() {
+    // 保存当前物理配置
+    const physicsConfig = {
+      physicsModel: this.physics?.model || 'force',
+      stiffness: this.physics?.stiffness || 1.0,
+      damping: this.physics?.damping || 0.5
+    };
+
+    // 重建物理拓扑（从当前 constructionPoints 位置）
+    // 这会：
+    // 1. 创建新的 particles 数组（位置来自 constructionPoints）
+    // 2. 创建新的 constraints 数组（restLength 基于当前位置）
+    // 3. 更新 _referenceShape（基于当前位置的局部坐标）
+    // 4. 清除所有 solver 状态
+    const result = this.rebuildPhysicsTopology(physicsConfig);
+
+    if (result) {
+      console.log(`[COLD RESTART] Physics rebuilt: ${result.particles} particles, ${result.constraints} constraints`);
+
+      // [关键] 重新初始化 COM 锚点，确保质心分离逻辑正常工作
+      const physicsState = this.representation.physicsState;
+      if (physicsState && physicsState.particles) {
+        let totalMass = 0;
+        for (const p of physicsState.particles) {
+          totalMass += p.mass || 0;
+        }
+        // 使用 this.center 作为锚点（与 commitPhysicsState 保持一致）
+        physicsState.totalMass = totalMass;
+        physicsState.anchorCOM = { x: this.center.x, y: this.center.y, z: this.center.z };
+        physicsState.initialCOM = { x: this.center.x, y: this.center.y, z: this.center.z };
+        console.log(`[COLD RESTART] COM reinitialized: anchorCOM=(${this.center.x.toFixed(3)}, ${this.center.y.toFixed(3)}, ${this.center.z.toFixed(3)})`);
+      }
     }
   }
 
@@ -2092,9 +2167,13 @@ export class Object {
           fixed: false
         };
       } else {
+        // 更新 position 和 prevPosition（冷重启时重置速度为零）
         p._physicsData.position.x = p.x;
         p._physicsData.position.y = p.y;
         p._physicsData.position.z = p.z;
+        p._physicsData.prevPosition.x = p.x;
+        p._physicsData.prevPosition.y = p.y;
+        p._physicsData.prevPosition.z = p.z;
       }
     }
   }

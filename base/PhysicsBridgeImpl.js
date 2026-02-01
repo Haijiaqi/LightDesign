@@ -62,10 +62,13 @@ export class PhysicsBridgeImpl {
     const particles = [];
 
     for (let i = 0; i < count; i++) {
+      const prevPos = physicsDataArray[i].prevPosition;
       particles[i] = {
         position: physicsDataArray[i].position,
-        prevPosition: physicsDataArray[i].prevPosition,
+        prevPosition: prevPos,
+        oldPosition: prevPos,  // 别名，Verlet 积分器和 POKE/SWIPE 使用
         velocity: physicsDataArray[i].velocity,
+        force: { x: 0, y: 0, z: 0 },  // Verlet 需要
         mass: massPerParticle,
         invMass: invMass,
         fixed: false,
@@ -88,18 +91,22 @@ export class PhysicsBridgeImpl {
     const particles = [];
 
     for (let i = 0; i < count; i++) {
+      const pos = {
+        x: internalPositions[i].x,
+        y: internalPositions[i].y,
+        z: internalPositions[i].z
+      };
+      const prevPos = {
+        x: internalPositions[i].x,
+        y: internalPositions[i].y,
+        z: internalPositions[i].z
+      };
       particles[i] = {
-        position: {
-          x: internalPositions[i].x,
-          y: internalPositions[i].y,
-          z: internalPositions[i].z
-        },
-        prevPosition: {
-          x: internalPositions[i].x,
-          y: internalPositions[i].y,
-          z: internalPositions[i].z
-        },
+        position: pos,
+        prevPosition: prevPos,
+        oldPosition: prevPos,  // 别名
         velocity: { x: 0, y: 0, z: 0 },
+        force: { x: 0, y: 0, z: 0 },  // Verlet 需要
         mass: massPerParticle,
         invMass: invMass,
         fixed: false,
