@@ -297,12 +297,22 @@ class SystemStateClass {
 
         this.taskQueues.submit(moveRotateTask);
 
+        // [CRITICAL] 隐藏所有非聚焦物体
         for (const other of this.objects) {
             if (other !== obj) {
                 other.visualAlpha = 0.05;
-                other.isVisible = false;  // [修改] 直接隐藏非聚焦物体
+                other.isVisible = false;  // 直接隐藏非聚焦物体
             }
         }
+
+        // [FIX] 显式确保 worldGrid 被隐藏（即使它在 objects 中）
+        if (this.worldGrid && this.worldGrid !== obj) {
+            this.worldGrid.isVisible = false;
+        }
+
+        // [FIX] 从 objects 中移除 worldGrid，确保其点不参与 Grid 计算
+        // 在 exitFocus 时会恢复
+        this.objects = this.objects.filter(o => o !== this.worldGrid);
 
         this.ifControl = true;
     }
@@ -492,8 +502,14 @@ class SystemStateClass {
             for (const other of self.objects) {
                 if (other !== obj) {
                     other.visualAlpha = 1.0;
-                    other.isVisible = true;  // [修改] 恢复所有物体可见性
+                    other.isVisible = true;  // 恢复所有物体可见性
                 }
+            }
+
+            // [FIX] 恢复 worldGrid 到 objects 数组
+            if (self.worldGrid && !self.objects.includes(self.worldGrid)) {
+                self.worldGrid.isVisible = true;
+                self.objects.push(self.worldGrid);
             }
 
             self.interactionState = 'VIEW';

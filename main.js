@@ -600,108 +600,238 @@ function processIntent(intent) {
                 // 计算虚拟鼠标的 3D 世界坐标
                 const win = SystemState.mainWindow;
                 const dir = win.direction;
-                const baseDis = CONFIG.screenDistance - CONFIG.userDistanceFromOrigin;
-                const vmDepth = baseDis + (intent.vmDepth || 0);
 
-                console.log(`[PHYSICS] baseDis=${baseDis.toFixed(2)}, vmDepth=${vmDepth.toFixed(2)}, intent.vmDepth=${intent.vmDepth}`);
+                // 使用 getPointsInCell - 只检查鼠标所在的 GridCell
+                // 有就有，没有就没有
+                const cellPoints = win.getPointsInCell(intent.x, intent.y, null);
 
-                // 屏幕坐标 -> 归一化坐标
-                const screenX = intent.x;
-                const screenY = intent.y;
-                const normX = (screenX - win.width / 2) / win.DPIx;
-                const normY = -(screenY - win.height / 2) / win.DPIy;
+                // [DEBUG] Poke 诊断
+                console.log(`[POKE DEBUG] Click=(${intent.x}, ${intent.y}), cellPoints=${cellPoints.length}`);
 
-                console.log(`[PHYSICS] screen=(${screenX}, ${screenY}), norm=(${normX.toFixed(2)}, ${normY.toFixed(2)}), DPI=(${win.DPIx.toFixed(1)}, ${win.DPIy.toFixed(1)})`);
-
-                // 3D 射线起点（视平面）和方向
-                const viewPlaneX = dir.start.x + normX * win.vx.x + normY * win.vy.x;
-                const viewPlaneY = dir.start.y + normX * win.vx.y + normY * win.vy.y;
-                const viewPlaneZ = dir.start.z + normX * win.vx.z + normY * win.vy.z;
-
-                // 虚拟鼠标 3D 位置（沿视线方向移动 vmDepth）
-                const vmWorldX = viewPlaneX - dir.x * (intent.vmDepth || 0);
-                const vmWorldY = viewPlaneY - dir.y * (intent.vmDepth || 0);
-                const vmWorldZ = viewPlaneZ - dir.z * (intent.vmDepth || 0);
-
-                console.log(`[PHYSICS] vmWorld=(${vmWorldX.toFixed(2)}, ${vmWorldY.toFixed(2)}, ${vmWorldZ.toFixed(2)})`);
-                console.log(`[PHYSICS] objCenter=(${obj.center.x.toFixed(2)}, ${obj.center.y.toFixed(2)}, ${obj.center.z.toFixed(2)})`);
-
-                // 找到最近的表面 constructionPoint
-                let nearestPoint = null;
-                let nearestDist = Infinity;
-                let nearestIdx = -1;
-                const surfaceBound = obj._surfaceBoundary || obj.constructionPoints.length;
-
-                for (let i = 0; i < surfaceBound; i++) {
-                    const p = obj.constructionPoints[i];
-                    const px = p.x ?? (p.lx + obj.center.x);
-                    const py = p.y ?? (p.ly + obj.center.y);
-                    const pz = p.z ?? (p.lz + obj.center.z);
-                    const dx = px - vmWorldX;
-                    const dy = py - vmWorldY;
-                    const dz = pz - vmWorldZ;
-                    const dist = dx * dx + dy * dy + dz * dz;
-                    if (dist < nearestDist) {
-                        nearestDist = dist;
-                        nearestPoint = p;
-                        nearestIdx = i;
-                    }
+                if (cellPoints.length === 0) {
+                    console.log('[POKE] No points in cell, skipping');
+                    break;
                 }
 
-                const nearestDistCm = Math.sqrt(nearestDist);
-                console.log(`[PHYSICS] nearestIdx=${nearestIdx}, nearestDistCm=${nearestDistCm.toFixed(2)}`);
+                // 取 cell 中离用户最近的点（dis 最小）- cell 已按 dis 排序
+                const nearestPoint = cellPoints[0];
+                const pointIdx = obj.constructionPoints ? obj.constructionPoints.indexOf(nearestPoint) : -1;
+                console.log(`[POKE] nearestPoint idx=${pointIdx}, surfaceBound=${obj._surfaceBoundary}`);
 
-                if (nearestPoint && nearestDist < 25) { // 5cm 半径内有效 (25 = 5^2)
-                    // 计算冲量方向（法向量反方向，即"推入"物体）
-                    let nx = nearestPoint.nx || 0;
-                    let ny = nearestPoint.ny || 0;
-                    let nz = nearestPoint.nz || 0;
-                    const nLen = Math.sqrt(nx * nx + ny * ny + nz * nz);
-                    console.log(`[PHYSICS] normal=(${nx.toFixed(3)}, ${ny.toFixed(3)}, ${nz.toFixed(3)}), len=${nLen.toFixed(3)}`);
+                if (nearestPoint && nearestPoint.x !== undefined) {
+                    // [Phase 3] Poke Enhancement
+                    // 1. 方向锁定：Camera Look Dir (window.direction)
+                    const pushDir = win.direction; // {x, y, z}Normalized
 
-                    if (nLen < 0.001) {
-                        // 无法向量时使用径向
-                        const rx = (nearestPoint.lx || 0);
-                        const ry = (nearestPoint.ly || 0);
-                        const rz = (nearestPoint.lz || 0);
-                        const rLen = Math.sqrt(rx * rx + ry * ry + rz * rz);
-                        if (rLen > 0.001) {
-                            nx = rx / rLen; ny = ry / rLen; nz = rz / rLen;
-                        }
-                    } else {
-                        nx /= nLen; ny /= nLen; nz /= nLen;
-                    }
+                    // 2. 冲量强度 (从配置读取)
+                    const impulseMag = EditConfig.InteractionForces.pokeImpulse ?? 20.0;
 
-                    // 冲量强度（单位：cm/s 速度）
-                    const impulseVelocity = CONFIG.physicsParams?.force?.impulseScale ?? 50.0;
+                    // 3. AOE 衰减参数
+                    const aoeRadius = EditConfig.InteractionForces.pokeRadius ?? 5.0;
+                    const aoeDecayType = EditConfig.InteractionForces.pokeDecay || 'gaussian';
+                    const sigma = aoeRadius / 2.0; // Gaussian width
 
-                    // 获取物理粒子并施加速度冲量
+                    // 获取物理状态
                     const physicsState = obj.representation?.physicsState;
-                    if (physicsState && physicsState.particles && physicsState.particles[nearestIdx]) {
-                        const particle = physicsState.particles[nearestIdx];
+                    if (!physicsState || !physicsState.particles) break; // 注意: 是 break 不是 return
 
-                        // 施加速度冲量（推入方向）
-                        if (particle.velocity) {
-                            particle.velocity.x -= nx * impulseVelocity;
-                            particle.velocity.y -= ny * impulseVelocity;
-                            particle.velocity.z -= nz * impulseVelocity;
+                    // 4. 利用空间加速结构查找邻居 (Grid or Brute Force fallback for now)
+                    // 由于目前没有建立基于 Particle 的独立 Grid，我们遍历 particles。
+                    // 优化：后续阶段可引入 SpatialHash。目前假设粒子数 < 2048，暴力遍历可接受。
+
+                    let activeCount = 0;
+                    const particles = physicsState.particles;
+
+                    // poke 中心点: 使用实际找到的 nearestPoint 的位置，而不是 vmWorld
+                    // 这样 AOE 以实际的表面点为中心，更准确
+                    const pokeCenter = {
+                        x: nearestPoint.x ?? (nearestPoint.lx + obj.center.x),
+                        y: nearestPoint.y ?? (nearestPoint.ly + obj.center.y),
+                        z: nearestPoint.z ?? (nearestPoint.lz + obj.center.z)
+                    };
+
+                    for (let i = 0; i < particles.length; i++) {
+                        const p = particles[i];
+                        if (p.fixed) continue;
+
+                        const dx = p.position.x - pokeCenter.x;
+                        const dy = p.position.y - pokeCenter.y;
+                        const dz = p.position.z - pokeCenter.z;
+                        const distSq = dx * dx + dy * dy + dz * dz;
+
+                        if (distSq > aoeRadius * aoeRadius) continue;
+
+                        // 计算权重 [MODIFIED] - 用户要求各区域同性，去掉衰减
+                        const dist = Math.sqrt(distSq);
+                        let w = 1.0;
+                        /* 
+                        if (aoeDecayType === 'gaussian') {
+                            w = Math.exp(-distSq / (sigma * sigma));
+                        } else {
+                            w = 1.0 - (dist / aoeRadius);
                         }
+                        */
 
-                        console.log(`[PHYSICS] ✅ Velocity impulse applied to particle ${nearestIdx}: v=(${particle.velocity?.x?.toFixed(2)}, ${particle.velocity?.y?.toFixed(2)}, ${particle.velocity?.z?.toFixed(2)})`);
+                        if (w < 0.01) continue;
 
-                        // [Fix] 标记物体进入物理活动状态（用于 QUALITY 模式拟合判断）
-                        obj._physicsActive = true;
-                        obj._physicsActiveFrames = 0; // 活动帧计数器
-                    } else {
-                        console.warn(`[PHYSICS] ⚠️ No physics particle at index ${nearestIdx}`);
+                        // [Verlet Friendly] 施加冲量 -> 修改 oldPosition
+                        // F = m * a -> Impulse = m * deltaV
+                        // deltaX = deltaV * dt
+                        // oldPosition -= deltaX
+                        // 假设 dt = 1/60 (Physics fixed step)
+                        const dt = 1 / 60;
+
+                        // 冲量 = I * w * dir
+                        // velocityChange = Impulse / mass
+                        // displacement = velocityChange * dt
+
+                        const invMass = 1.0 / (p.mass || 1.0);
+                        const dv = impulseMag * w * invMass;
+
+                        const dispX = pushDir.x * dv * dt;
+                        const dispY = pushDir.y * dv * dt;
+                        const dispZ = pushDir.z * dv * dt;
+
+                        p.oldPosition.x -= dispX;
+                        p.oldPosition.y -= dispY;
+                        p.oldPosition.z -= dispZ;
+
+                        activeCount++;
                     }
 
-                    // 标记需要更新
-                    obj._dirty = true;
-                    SystemState.sceneDirty = true;
-                    SystemState.ifControl = true;
+                    if (activeCount > 0) {
+                        console.log(`[PHYSICS] Poke applied to ${activeCount} particles with Impulse=${impulseMag}`);
+                        obj._physicsActive = true;
+                        obj._physicsActiveFrames = 0;
+                        obj._dirty = true;
+                        SystemState.sceneDirty = true;
+                    } else {
+                        console.log(`[PHYSICS] No particles in AOE (radius=${aoeRadius}cm, center=nearestPoint)`);
+                    }
                 } else {
-                    console.log(`[PHYSICS] ❌ No surface point within 5cm range (nearest: ${nearestDistCm.toFixed(2)}cm)`);
+                    console.log(`[PHYSICS] nearestPoint has no valid x coordinate`);
+                }
+            }
+            break;
+
+        case 'SWIPE_PHYSICS_IMPULSE':
+            {
+                // [Phase 17] Physics Swipe Implementation
+                // 优化: 使用 pointIndex 直接索引粒子，O(1)
+                const { point, pointIndex, velocity, timestamp } = intent;
+                const obj = SystemState.focusedObject;
+                if (!obj || !obj.representation?.physicsState) break;
+
+                const particles = obj.representation.physicsState.particles;
+
+                // 优先使用 pointIndex 直接获取粒子 (O(1))
+                // 如果 pointIndex 不存在或越界，则回退到位置匹配
+                let targetP = null;
+                if (pointIndex !== undefined && pointIndex >= 0 && pointIndex < particles.length) {
+                    targetP = particles[pointIndex];
+                } else if (point && point.x !== undefined) {
+                    // Fallback: 位置匹配 (O(n))
+                    let minDistSq = Infinity;
+                    for (const p of particles) {
+                        const dx = p.position.x - point.x;
+                        const dy = p.position.y - point.y;
+                        const dz = p.position.z - point.z;
+                        const dSq = dx * dx + dy * dy + dz * dz;
+                        if (dSq < minDistSq) {
+                            minDistSq = dSq;
+                            targetP = p;
+                        }
+                    }
+                    if (minDistSq > 25.0) targetP = null; // 5cm tolerance
+                } else {
+                    console.log('[SWIPE] point is undefined or has no x property:', point);
+                    break;
+                }
+
+                if (targetP) {
+                    // 1. Debounce Check - 使用时间戳而不是 frameCount
+                    const now = Date.now();
+                    const cooldown = EditConfig.InteractionForces.swipeCooldown ?? 100; // ms
+                    if (targetP._lastImpulseTime && (now - targetP._lastImpulseTime) < cooldown) {
+                        // 节流日志
+                        break;
+                    }
+
+                    // 2. Coordinate Conversion (Screen Velocity -> World Velocity)
+                    const win = SystemState.mainWindow;
+                    // Scale factor: roughly map screen pixels to world cm
+                    // At typical view distance, 1cm world ≈ DPI pixels. 
+                    // But perspective matters.
+                    // Simplified: (px / DPI) * sensitivity
+
+                    const gain = EditConfig.InteractionForces.swipeGain ?? 0.1;
+                    const vxWorldMag = (velocity.x / win.DPIx) * gain;
+                    const vyWorldMag = -(velocity.y / win.DPIy) * gain; // Screen Y is inverted
+
+                    const worldVelX = vxWorldMag * win.vx.x + vyWorldMag * win.vy.x;
+                    const worldVelY = vxWorldMag * win.vx.y + vyWorldMag * win.vy.y;
+                    const worldVelZ = vxWorldMag * win.vx.z + vyWorldMag * win.vy.z;
+
+                    // console.log(`[SWIPE] World velocity: (${worldVelX.toFixed(4)}, ${worldVelY.toFixed(4)}, ${worldVelZ.toFixed(4)})`);
+
+
+                    // 3. Relative Velocity Check
+                    // Ensure we are adding energy, not fighting it (unless desired?)
+                    // "Don't push if it's already going faster than you"
+                    // v_particle approx = (pos - oldPos) / dt
+                    const dt = 1 / 60;
+                    const pVx = (targetP.position.x - targetP.oldPosition.x) / dt;
+                    const pVy = (targetP.position.y - targetP.oldPosition.y) / dt;
+                    const pVz = (targetP.position.z - targetP.oldPosition.z) / dt;
+
+                    const dotProd = worldVelX * pVx + worldVelY * pVy + worldVelZ * pVz;
+                    const pSpeedSq = pVx * pVx + pVy * pVy + pVz * pVz;
+
+                    // Only apply if we are pushing "forward" or "faster"
+                    // Simple logic: if dot < pSpeedSq, implies mouse is slower than particle in that dir?
+                    // Let's use simple logic: Always add, rely on damping to stabilize?
+                    // User Plan: "dot(v_world, v_particle) < |v_particle|^2"
+                    // If v_world is small and v_particle large, dot < pSpeedSq is TRUE.
+                    // Wait, if I push SLOWER than particle, dot < pSpeedSq. I SHOULD NOT push.
+                    // Check Logic: 
+                    // v_mouse projection on v_Part < v_Part magnitude?
+                    // If I move mouse slower than object, I shouldn't accelerate it.
+                    // So: if (dot < pSpeedSq) SKIP.
+                    // BUT initial state pSpeed is 0. 0 < 0 is false? No.
+                    // Let's refine: if (pSpeedSq > 0.1 && dot < pSpeedSq) skip.
+
+                    if (pSpeedSq > 10.0 && dotProd < pSpeedSq) {
+                        // Mouse is moving slower than particle in particle's direction -> Slip effect (no force)
+                        break;
+                    }
+
+                    // 4. Center Weighting [REMOVED] - 用户要求各区域同性
+                    // const w = Math.min(1.0, Math.max(0.0, rLen / R_MAX));
+                    const w = 1.0;
+
+                    // 5. Apply Impulse (Verlet Friendly)
+                    // deltaX = v_world * w * dt
+                    // 之前的 50.0 系数保留以维持手感 (配合 swipeGain)
+                    const dispX = worldVelX * w * dt * 50.0;
+                    const dispY = worldVelY * w * dt * 50.0;
+                    const dispZ = worldVelZ * w * dt * 50.0;
+
+                    targetP.oldPosition.x -= dispX;
+                    targetP.oldPosition.y -= dispY;
+                    targetP.oldPosition.z -= dispZ;
+
+                    targetP._lastImpulseTime = now;
+
+                    obj._physicsActive = true;
+                    obj._physicsActiveFrames = 0;
+
+                    console.log(`[SWIPE] Applied to particle, w=${w.toFixed(2)}, disp=(${dispX.toFixed(3)}, ${dispY.toFixed(3)}, ${dispZ.toFixed(3)})`);
+                } else {
+                    // 节流日志
+                    if (!SystemState._swipeMissLogFrame || SystemState.frameCount - SystemState._swipeMissLogFrame > 120) {
+                        console.log(`[SWIPE] No particle match for point (minDistSq=${minDistSq.toFixed(2)})`);
+                        SystemState._swipeMissLogFrame = SystemState.frameCount;
+                    }
                 }
             }
             break;
@@ -2279,21 +2409,15 @@ function initPhysicsCOM(obj) {
 
     const particles = physicsState.particles;
 
-    // 计算质量加权质心
+    // 计算总质量（用于后续归一化）
     let totalMass = 0;
-    let com = { x: 0, y: 0, z: 0 };
     for (const p of particles) {
-        com.x += p.position.x * p.mass;
-        com.y += p.position.y * p.mass;
-        com.z += p.position.z * p.mass;
         totalMass += p.mass;
     }
 
-    if (totalMass > 0) {
-        com.x /= totalMass;
-        com.y /= totalMass;
-        com.z /= totalMass;
-    }
+    // [FIX] 使用 obj.center 作为锚点，而非从粒子计算
+    // 这确保 COM 锚定与 commitPhysicsState 的 _bodyToWorld 使用相同的参考点
+    const com = { x: obj.center.x, y: obj.center.y, z: obj.center.z };
 
     // 缓存到 physicsState
     physicsState.totalMass = totalMass;
@@ -2301,7 +2425,7 @@ function initPhysicsCOM(obj) {
     physicsState.initialCOM = { ...com }; // 仅供调试
 
     if (CONFIG.physicsDebug) {
-        console.log(`[COM] Initialized anchorCOM=(${com.x.toFixed(3)}, ${com.y.toFixed(3)}, ${com.z.toFixed(3)}), totalMass=${totalMass.toFixed(3)}`);
+        console.log(`[COM] Initialized anchorCOM=(${com.x.toFixed(3)}, ${com.y.toFixed(3)}, ${com.z.toFixed(3)}), totalMass=${totalMass.toFixed(3)}, usingObjectCenter=true`);
     }
 }
 
@@ -2626,14 +2750,9 @@ function physicsStep(dt) {
             return;
         }
 
-        // 调试：观察第一个点的变化
-        if (CONFIG.physicsDebug && (SystemState.frameCount % 60 === 0)) {
-            const p0 = obj.constructionPoints[0];
-            const pLast = obj.constructionPoints[4]; // 之前被击中的点 ID=4
-            console.log(`[PHYSICS] Step ${SystemState.frameCount}: P4 loc=(${pLast?.lx.toFixed(3)}, ${pLast?.ly.toFixed(3)}, ${pLast?.lz.toFixed(3)})`);
-        }
-
-        // [配置化] 静止检测：如果物理活动了足够久且没有明显运动，则停止拟合
+        // [配置化] 静止检测：如果物理活动了足够久且没有明显运动，则停止
+        // 注意：必须在持续同步之前检测，避免 settle 帧双重同步
+        let settled = false;
         if (obj._physicsActive && obj._physicsActiveFrames > CONFIG.physicsDisplay.settleFrameThreshold) {
             // 检测平均速度
             const particles = obj.representation?.physicsState?.particles || [];
@@ -2648,8 +2767,14 @@ function physicsStep(dt) {
             // [配置化] 使用配置的速度阈值判定静止
             if (avgVelSq < CONFIG.physicsDisplay.settleVelocityThreshold) {
                 obj._physicsActive = false;
+                settled = true;
 
-                // [Phase 17] 交互结束后，固化物理姿态并重置变形
+                // [关键] 先做最后一次同步，确保渲染显示的是物理最终位置
+                if (obj._syncPhysicsToConstruction) {
+                    obj._syncPhysicsToConstruction();
+                }
+
+                // [Phase 17] 然后执行重置到理想形状
                 if (obj.commitPhysicsState) {
                     obj.commitPhysicsState();
                 }
@@ -2666,9 +2791,23 @@ function physicsStep(dt) {
                 }
             }
         }
+
+        // [FIX] 持续同步 particles 到 constructionPoints，使物理运动可视化
+        // 只在物理激活期间同步，settle 帧不同步（已在上面单独处理）
+        if (obj._physicsActive && !settled && obj._syncPhysicsToConstruction) {
+            obj._syncPhysicsToConstruction();
+        }
+
+        // 调试：观察第一个点的变化
+        if (CONFIG.physicsDebug && (SystemState.frameCount % 60 === 0)) {
+            const pLast = obj.constructionPoints[4];
+            console.log(`[PHYSICS] Step ${SystemState.frameCount}: P4 loc=(${pLast?.lx?.toFixed(3)}, ${pLast?.ly?.toFixed(3)}, ${pLast?.lz?.toFixed(3)})`);
+        }
     }
 
     // 原有物理逻辑（保留兼容）
+    // 移除冗余的 commitPhysics 调用，因为物理同步已在 commitPhysicsState 或 physics loop 中处理
+    /*
     for (const o of SystemState.objects) {
         if (o.animationLock) continue;
         if (!o.physics || !o.physics.enabled) continue;
@@ -2679,6 +2818,7 @@ function physicsStep(dt) {
             o.commitPhysics();
         }
     }
+    */
 }
 
 async function gameLoop(timestamp = 0) {

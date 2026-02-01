@@ -755,6 +755,53 @@ export class Window {
     return nearest;
   }
 
+  /**
+   * 获取指定屏幕坐标附近 (3x3 邻域) 的所有点
+   * 简单直接：有就有，没有就没有
+   * @param {number} screenX - 屏幕 X 坐标
+   * @param {number} screenY - 屏幕 Y 坐标
+   * @param {function} filterCallback - (可选) 过滤回调
+   * @returns {Array} 邻域中的点数组 (可能为空，按 dis 排序)
+   */
+  getPointsInCell(screenX, screenY, filterCallback = null) {
+    if (!this.grid || this.grid.length === 0) return [];
+
+    const centerGx = Math.floor(screenX / this.gridsize);
+    const centerGy = Math.floor(screenY / this.gridsize);
+    const gridWidth = this.grid.length;
+    const gridHeight = this.grid[0]?.length || 0;
+
+    // 收集 3x3 邻域中的点
+    let result = [];
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        const gx = centerGx + dx;
+        const gy = centerGy + dy;
+
+        // 边界检查
+        if (gx < 0 || gx >= gridWidth) continue;
+        if (gy < 0 || gy >= gridHeight) continue;
+
+        const cell = this.grid[gx][gy];
+        if (!cell || cell.length === 0) continue;
+
+        // 应用过滤器
+        if (filterCallback) {
+          for (const p of cell) {
+            if (filterCallback(p)) result.push(p);
+          }
+        } else {
+          result.push(...cell);
+        }
+      }
+    }
+
+    // 按距离排序（离用户最近的在前）
+    result.sort((a, b) => (a.dis || 0) - (b.dis || 0));
+
+    return result;
+  }
+
 
   createGridObject(params) {
     // --------------------------

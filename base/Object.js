@@ -1086,6 +1086,11 @@ export class Object {
     const newSurfacePoints = this._createPoints(surfacePositions);
     const newInternalPoints = this._createPoints(internalPositions);
 
+    // [MODIFIED] 设置内部点不可见，不参与渲染和交互检测(Grid)，但参与物理计算
+    for (const p of newInternalPoints) {
+      p.isVisible = false;
+    }
+
     // 统一存储：[表面点..., 内部点...]
     this.constructionPoints = [...newSurfacePoints, ...newInternalPoints];
     this._surfaceBoundary = newSurfacePoints.length;
@@ -2001,7 +2006,7 @@ export class Object {
   }
 
   // [Phase 17] 提交物理状态 (Q-Method / Kabsch)
-  // 将当前的物理形变"烘焙"为中心位移+旋转，并重置粒子位置
+  // 将当前的物理形变"烘焙"为旋转，并重置粒子到理想形状
   // 防止塑性形变积累，确保物体永远回归 Rest Shape
   commitPhysicsState() {
     if (!this.representation.physicsState || !this._referenceShape) return;
@@ -2009,51 +2014,50 @@ export class Object {
     const particles = this.representation.physicsState.particles;
     if (!particles || particles.length !== this._referenceShape.length) return;
 
-    const currentPoints = [];
+    // [FIX] 将当前粒子位置转换为局部坐标（相对于 this.center）
+    // 这样 fitRigidTransform 的两个输入都是局部坐标，只提取纯旋转
+    const currentLocal = [];
     for (const p of particles) {
-      currentPoints.push({ x: p.position.x, y: p.position.y, z: p.position.z });
+      currentLocal.push({
+        x: p.position.x - this.center.x,
+        y: p.position.y - this.center.y,
+        z: p.position.z - this.center.z
+      });
     }
 
-    // 1. 拟合最佳刚体变换
-    const result = FittingCalculator.fitRigidTransform(this._referenceShape, currentPoints);
+    // 1. 拟合最佳刚体变换（纯旋转，因为两者都是局部坐标）
+    const result = FittingCalculator.fitRigidTransform(this._referenceShape, currentLocal);
 
     if (this.verbose) {
       console.log('[Object] commitPhysicsState:', result);
     }
 
-    // 2. 更新对象参数
-    // [Phase 17 Update] 仅更新旋转，FOCUS态中心保持不变
-    // this.center.x = result.center.x;
-    // this.center.y = result.center.y;
-    // this.center.z = result.center.z;
+    // 2. 更新对象旋转（记录最终朝向）
     this.quaternion = result.rotation;
 
-    // 3. 强制重置粒子位置 (Hard Commit)
+    // 3. 清零速度和力，但保持粒子当前位置
+    // 不重置到理想位置，因为物理最终位置就是正确位置
+    // 这样可以避免跳变
     for (let i = 0; i < particles.length; i++) {
       const p = particles[i];
-      const ref = this._referenceShape[i];
-      const ideal = this._bodyToWorld(ref, this.center, this.quaternion);
-
-      p.position.x = ideal.x;
-      p.position.y = ideal.y;
-      p.position.z = ideal.z;
-      p.oldPosition.x = ideal.x;
-      p.oldPosition.y = ideal.y;
-      p.oldPosition.z = ideal.z;
       p.velocity.x = 0;
       p.velocity.y = 0;
       p.velocity.z = 0;
       p.force.x = 0;
       p.force.y = 0;
       p.force.z = 0;
+      // 同步 oldPosition 防止下次物理产生速度
+      p.oldPosition.x = p.position.x;
+      p.oldPosition.y = p.position.y;
+      p.oldPosition.z = p.position.z;
     }
 
-    // 同步到 constructionPoints 以便渲染立即更新
-    this._syncPhysicsToConstruction();
+    // 4. 不需要再同步，因为 settle 时已经同步过了
+    // this._syncPhysicsToConstruction();
 
-    // [Modified] 显示状态管理交还给 main.js (CONFIG.revertOnSettle)
-    // this._tempDisplayPoints = null;
-    // this._tempDisplayPointsInitialized = false;
+    if (this.verbose) {
+      console.log('[Object] commitPhysicsState complete (rotation extracted, positions preserved)');
+    }
   }
 
   _syncPhysicsToConstruction() {

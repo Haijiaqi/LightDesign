@@ -264,11 +264,109 @@ export const InputManager = {
         const now = Date.now();
         let intent = null;
         if (lastClickTarget === 'focus_click' && now - lastClickTime < DOUBLE_CLICK_THRESHOLD) {
-            intent = { type: 'ENTER_EDIT_STATE' };
+            // [Check] 双击物体外部才进入 EDIT 态
+            // 使用 getPointsInCell 检查点击位置是否有物体点
+            const win = SystemState.mainWindow;
+            // 检查 3x3 邻域，只有完全没点才认为是外部
+            const points = win.getPointsInCell(event.clientX, event.clientY, null);
+
+            if (!points || points.length === 0) {
+                intent = { type: 'ENTER_EDIT_STATE' };
+            } else {
+                console.log('[FOCUS] Double click on object ignored (potential poke)');
+            }
         }
         lastClickTime = now;
         lastClickTarget = 'focus_click';
         return intent;
+    },
+
+    handleFocusMouseMove(e) {
+        // [Phase 17] 物理驱动旋转 - 扫动检测 (Swipe Detection)
+        // 优化: 使用 getPointsInCell + 3x3 邻域搜索
+
+        // 0. 性能节流 (Throttling) - 100ms 冷却
+        const now = Date.now();
+        if (SystemState._lastSwipeCheckTime && (now - SystemState._lastSwipeCheckTime) < 100) {
+            return null;
+        }
+
+        const obj = SystemState.focusedObject;
+        if (!obj || !obj.representation?.physicsState?.particles) return null;
+
+        // 1. 速度预检：如果没有足够速度，不产生冲量
+        const dx = e.clientX - SystemState.lastMouseX;
+        const dy = e.clientY - SystemState.lastMouseY;
+        const speedSq = dx * dx + dy * dy;
+        const MIN_SPEED_SQ = 4.0; // 2px 阈值
+
+        if (speedSq < MIN_SPEED_SQ) return null;
+
+        // 2. 使用 getPointsInCell - 只检查鼠标所在的 GridCell
+        const win = SystemState.mainWindow;
+        if (!win || !win.getPointsInCell) return null;
+
+        const swipeSliceThreshold = EditConfig.InteractionForces.swipeSliceThreshold;
+        const dir = win.direction;
+        const planePt = dir.start;
+        const currentSliceDepth = SystemState.focusSliceDepth || 0;
+
+        // 获取鼠标所在 cell 的所有点（未过滤）
+        const surfaceBound = obj._surfaceBoundary || Infinity;
+        const allCellPoints = win.getPointsInCell(e.clientX, e.clientY, null);
+
+        // [DEBUG] 每 2 秒打印一次诊断
+        const debugInterval = 2000;
+        if (!SystemState._lastSwipeDebugTime || (now - SystemState._lastSwipeDebugTime) > debugInterval) {
+            console.log(`[SWIPE DEBUG] Mouse=(${e.clientX}, ${e.clientY}), allCellPoints=${allCellPoints.length}, sliceDepth=${currentSliceDepth.toFixed(2)}, threshold=${swipeSliceThreshold}`);
+
+            // 打印前 3 个点的切片距离
+            for (let i = 0; i < Math.min(3, allCellPoints.length); i++) {
+                const p = allCellPoints[i];
+                const dist = (p.x - planePt.x) * dir.x + (p.y - planePt.y) * dir.y + (p.z - planePt.z) * dir.z;
+                const distToSlice = Math.abs(dist - currentSliceDepth);
+                const idx = obj.constructionPoints ? obj.constructionPoints.indexOf(p) : -1;
+                console.log(`  [Point ${i}] dist=${dist.toFixed(2)}, distToSlice=${distToSlice.toFixed(2)}, idx=${idx}, surfaceBound=${surfaceBound}`);
+            }
+            SystemState._lastSwipeDebugTime = now;
+        }
+
+        // 应用过滤
+        const cellPoints = allCellPoints.filter((p) => {
+            // [Filter 1] 必须属于聚焦物体的 constructionPoints
+            const idx = obj.constructionPoints ? obj.constructionPoints.indexOf(p) : -1;
+            if (idx < 0) return false; // 不属于该物体（如世界格网点）
+
+            // [Filter 2] 必须是 Surface Point (跳过内部点)
+            if (idx >= surfaceBound) return false;
+
+            // [Filter 3] 切片深度过滤 (屏幕面 ± threshold)
+            const dist = (p.x - planePt.x) * dir.x +
+                (p.y - planePt.y) * dir.y +
+                (p.z - planePt.z) * dir.z;
+            const distToSlice = Math.abs(dist - currentSliceDepth);
+            return distToSlice <= swipeSliceThreshold;
+        });
+
+        if (cellPoints.length > 0) {
+            // 取离用户最近的点（cell 已按 dis 排序）
+            const hitPoint = cellPoints[0];
+
+            console.log(`[SWIPE] Triggered! filteredPoints=${cellPoints.length}, hitPoint idx=${obj.constructionPoints?.indexOf(hitPoint)}`);
+
+            // 更新节流时间戳 (只有成功命中才更新)
+            SystemState._lastSwipeCheckTime = now;
+
+            return {
+                type: 'SWIPE_PHYSICS_IMPULSE',
+                point: hitPoint,
+                pointIndex: hitPoint._constructionIndex,
+                velocity: { x: dx, y: dy },
+                timestamp: now
+            };
+        }
+
+        return null;
     },
 
     // EDIT STATE HANDLERS
@@ -308,18 +406,19 @@ export const InputManager = {
 
     handleEditMouseMove(e) {
         if (SystemState.draggedControlPoint) {
+            // 既有逻辑：拖拽控制点 (优先级最高)
             // 获取当前虚拟鼠标吸附到的格点
             const snapped = SystemState.virtualMouse.snappedTo;
 
             // 只有吸附到有效的局部格点时才移动控制点
             if (snapped && (snapped.tag === 'LOCAL_GRID' || snapped.tag === 'LOCAL_GRID_EDGE')) {
+                // ... (原有逻辑保持不变)
                 // 检查约束条件：
                 // 1. 不允许拖到中心点（lx=ly=lz=0）
                 const isCenter = (Math.abs(snapped.lx) < 0.01 &&
                     Math.abs(snapped.ly) < 0.01 &&
                     Math.abs(snapped.lz) < 0.01);
                 if (isCenter) {
-                    // 返回 null 表示不移动，虚拟鼠标仍会更新但控制点不动
                     return null;
                 }
 
@@ -332,14 +431,13 @@ export const InputManager = {
                     mouseY: e.clientY
                 };
             }
-            // 未吸附到有效格点时，不移动控制点
-            // 调试：显示 snapped 状态
-            if (snapped) {
-                console.log(`[InputManager] 拖拽中但格点 tag=${snapped.tag} 不是 LOCAL_GRID`);
-            } else {
-                console.log(`[InputManager] 拖拽中但无吸附点`);
-            }
+        } else {
+            // [Phase 17] 如果没有拖拽控制点，也要进行物理扫动检测 (同 FOCUS 态)
+            // 复用 handleFocusMouseMove 逻辑
+            const swipeIntent = InputManager.handleFocusMouseMove(e);
+            if (swipeIntent) return swipeIntent;
         }
+
         return null;
     },
 
@@ -464,6 +562,19 @@ export const InputManager = {
                     };
                 }
             }
+        } else {
+            // [Phase 17] 单击时触发 FOCUS_PHYSICS_TOUCH (Poke)
+            // 如果不是双击，也不是点击控制点/格点，那么就是普通的 Physics Poke
+            // 只有当没有特定目标时才尝试
+            if (!clickedVisibleCP && !snappedToLocalGrid) {
+                // 复用 FOCUS 态的点击逻辑
+                intent = {
+                    type: 'FOCUS_PHYSICS_TOUCH',
+                    x: event.clientX,
+                    y: event.clientY,
+                    vmDepth: SystemState.focusVirtualMouseDepth
+                };
+            }
         }
 
         // 5. 更新状态
@@ -494,7 +605,7 @@ export const InputManager = {
                 onContinuousInput: this.handleFocusEdgeRotation,
                 onKeyDown: this.handleFocusKeyDown,
                 onMouseDown: this.handleFocusMouseDown,
-                onMouseMove: () => null,
+                onMouseMove: this.handleFocusMouseMove, // [Phase 17] 新增扫动检测
                 onWheel: this.handleFocusWheel,
                 onClick: this.handleFocusClick
             },
@@ -503,7 +614,7 @@ export const InputManager = {
                 onContinuousInput: () => null,
                 onKeyDown: this.handleEditKeyDown,
                 onMouseDown: this.handleEditMouseDown,
-                onMouseMove: this.handleEditMouseMove,
+                onMouseMove: this.handleEditMouseMove, // [Phase 17] 内含扫动检测
                 onWheel: this.handleEditWheel,
                 onClick: this.handleEditClick,
                 onWheelSliceDepth: this.handleEditWheelSliceDepth
