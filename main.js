@@ -1312,6 +1312,18 @@ function updateCamera() {
 function render() {
     const ctx = SystemState.ctx;
     const { screenWidthPx: width, screenHeightPx: height } = SystemState;
+
+    // [DEBUG] 渲染时位置日志
+    const obj = SystemState.focusedObject;
+    if (obj && obj._tempDisplayPoints && obj._tempDisplayPoints.length > 0) {
+        const p0 = obj._tempDisplayPoints[0];
+        if (SystemState._lastRenderP0X !== p0.x || SystemState._lastRenderP0Y !== p0.y) {
+            console.log(`[RENDER T=${performance.now().toFixed(1)}] renderPoints[0] = (${p0.x.toFixed(4)}, ${p0.y.toFixed(4)}, ${p0.z.toFixed(4)})`);
+            SystemState._lastRenderP0X = p0.x;
+            SystemState._lastRenderP0Y = p0.y;
+        }
+    }
+
     // 正确时序：
     // 1. updateCamera: 更新相机位置和方向，为后续计算提供 direction 基准
     // 2. updateLocalGrid: 使用 win.direction 计算切片距离，设置 isVisible
@@ -2731,16 +2743,6 @@ function physicsStep(dt) {
             }
         }
 
-        _globalPhysicsSystem.step(dt / 1000); // dt 是毫秒，PhysicsSystem 期望秒
-
-        // [COM Splitting] 提取质心漂移，转移到 Object.center
-        extractCOMDrift(obj);
-
-        // [修复] 物理活动帧计数（两种模式共用，确保静止检测能触发）
-        if (obj._physicsActive) {
-            obj._physicsActiveFrames = (obj._physicsActiveFrames || 0) + 1;
-        }
-
         // NaN 检测：如果物理发散，立即停止
         const p0 = obj.constructionPoints[0];
         if (p0 && (isNaN(p0.x) || isNaN(p0.y) || isNaN(p0.z))) {
@@ -2750,11 +2752,12 @@ function physicsStep(dt) {
             return;
         }
 
-        // [配置化] 静止检测：如果物理活动了足够久且没有明显运动，则停止
-        // 注意：必须在持续同步之前检测，避免 settle 帧双重同步
-        let settled = false;
+        // [关键修复] 静止检测：在 step 之前先检测是否要 settle
+        // 这样可以避免 step 导致的"第一次跳变"
+        let shouldSettle = false;
+        let avgVelSq = 0;
         if (obj._physicsActive && obj._physicsActiveFrames > CONFIG.physicsDisplay.settleFrameThreshold) {
-            // 检测平均速度
+            // 检测平均速度（使用上一帧的速度）
             const particles = obj.representation?.physicsState?.particles || [];
             let totalVelSq = 0;
             for (const p of particles) {
@@ -2762,39 +2765,62 @@ function physicsStep(dt) {
                     totalVelSq += p.velocity.x * p.velocity.x + p.velocity.y * p.velocity.y + p.velocity.z * p.velocity.z;
                 }
             }
-            const avgVelSq = totalVelSq / (particles.length || 1);
+            avgVelSq = totalVelSq / (particles.length || 1);
 
             // [配置化] 使用配置的速度阈值判定静止
             if (avgVelSq < CONFIG.physicsDisplay.settleVelocityThreshold) {
-                obj._physicsActive = false;
-                settled = true;
+                shouldSettle = true;
+            }
+        }
 
-                // [关键] 先做最后一次同步，确保渲染显示的是物理最终位置
-                if (obj._syncPhysicsToConstruction) {
-                    obj._syncPhysicsToConstruction();
-                }
+        // 如果即将 settle 或物理未激活，跳过本帧的物理 step
+        // 这样粒子保持在上一帧的位置 A，而不是移动到 A'
+        if (obj._physicsActive && !shouldSettle) {
+            _globalPhysicsSystem.step(dt / 1000); // dt 是毫秒，PhysicsSystem 期望秒
 
-                // [Phase 17] 然后执行重置到理想形状
-                if (obj.commitPhysicsState) {
-                    obj.commitPhysicsState();
-                }
+            // [COM Splitting] 提取质心漂移，转移到 Object.center
+            extractCOMDrift(obj);
 
-                // [配置化] 根据 revertOnSettle 决定是否恢复固有显示
-                if (CONFIG.physicsDisplay.revertOnSettle) {
-                    obj._tempDisplayPoints = null;
-                    obj._tempDisplayPointsInitialized = false;
-                }
+            // [修复] 物理活动帧计数
+            obj._physicsActiveFrames = (obj._physicsActiveFrames || 0) + 1;
+        }
 
-                if (CONFIG.physicsDebug) {
-                    const action = CONFIG.physicsDisplay.revertOnSettle ? 'restored to displayPoints' : 'kept physics display';
-                    console.log(`[PHYSICS] Object settled, ${action} (avgVelSq=${avgVelSq.toFixed(6)})`);
-                }
+        // [配置化] 执行 settle 逻辑
+        if (shouldSettle) {
+            obj._physicsActive = false;
+
+            // === 详细调试日志 ===
+            const particles = obj.representation?.physicsState?.particles || [];
+            const cp0 = obj.constructionPoints[0];
+            const p0 = particles[0];
+            console.log(`[SETTLE T=${performance.now().toFixed(1)}] BEFORE commit (step SKIPPED):`);
+            console.log(`  particle[0].position = (${p0.position.x.toFixed(4)}, ${p0.position.y.toFixed(4)}, ${p0.position.z.toFixed(4)})`);
+            console.log(`  cp[0].x/y/z = (${cp0.x.toFixed(4)}, ${cp0.y.toFixed(4)}, ${cp0.z.toFixed(4)})`);
+
+            // [Phase 17] 执行重置（内部会做 sync）
+            if (obj.commitPhysicsState) {
+                obj.commitPhysicsState();
+            }
+
+            console.log(`[SETTLE T=${performance.now().toFixed(1)}] AFTER commit:`);
+            console.log(`  particle[0].position = (${p0.position.x.toFixed(4)}, ${p0.position.y.toFixed(4)}, ${p0.position.z.toFixed(4)})`);
+            console.log(`  cp[0].x/y/z = (${cp0.x.toFixed(4)}, ${cp0.y.toFixed(4)}, ${cp0.z.toFixed(4)})`);
+
+            // [配置化] 根据 revertOnSettle 决定是否恢复固有显示
+            if (CONFIG.physicsDisplay.revertOnSettle) {
+                obj._tempDisplayPoints = null;
+                obj._tempDisplayPointsInitialized = false;
+            }
+
+            if (CONFIG.physicsDebug) {
+                const action = CONFIG.physicsDisplay.revertOnSettle ? 'restored to displayPoints' : 'kept physics display';
+                console.log(`[PHYSICS] Object settled, ${action} (avgVelSq=${avgVelSq.toFixed(6)})`);
             }
         }
 
         // [FIX] 持续同步 particles 到 constructionPoints，使物理运动可视化
         // 只在物理激活期间同步，settle 帧不同步（已在上面单独处理）
-        if (obj._physicsActive && !settled && obj._syncPhysicsToConstruction) {
+        if (obj._physicsActive && !shouldSettle && obj._syncPhysicsToConstruction) {
             obj._syncPhysicsToConstruction();
         }
 
@@ -2804,21 +2830,6 @@ function physicsStep(dt) {
             console.log(`[PHYSICS] Step ${SystemState.frameCount}: P4 loc=(${pLast?.lx?.toFixed(3)}, ${pLast?.ly?.toFixed(3)}, ${pLast?.lz?.toFixed(3)})`);
         }
     }
-
-    // 原有物理逻辑（保留兼容）
-    // 移除冗余的 commitPhysics 调用，因为物理同步已在 commitPhysicsState 或 physics loop 中处理
-    /*
-    for (const o of SystemState.objects) {
-        if (o.animationLock) continue;
-        if (!o.physics || !o.physics.enabled) continue;
-    }
-    for (const o of SystemState.objects) {
-        if (o.animationLock) continue;
-        if (o.commitPhysics) {
-            o.commitPhysics();
-        }
-    }
-    */
 }
 
 async function gameLoop(timestamp = 0) {
