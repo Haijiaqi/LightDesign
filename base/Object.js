@@ -2038,58 +2038,22 @@ export class Object {
       console.log('[Object] commitPhysicsState:', result);
     }
 
-    // === 详细调试 ===
+    // === 调试日志 ===
     const r = result.rotation;
-    console.log(`[COMMIT] this.center = (${this.center.x.toFixed(4)}, ${this.center.y.toFixed(4)}, ${this.center.z.toFixed(4)})`);
-    console.log(`[COMMIT] result.rotation = (w=${r.w.toFixed(4)}, x=${r.x.toFixed(4)}, y=${r.y.toFixed(4)}, z=${r.z.toFixed(4)})`);
-    console.log(`[COMMIT] _referenceShape[0] (local) = (${this._referenceShape[0].x.toFixed(4)}, ${this._referenceShape[0].y.toFixed(4)}, ${this._referenceShape[0].z.toFixed(4)})`);
+    console.log(`[COMMIT] Extracted rotation: (w=${r.w.toFixed(4)}, x=${r.x.toFixed(4)}, y=${r.y.toFixed(4)}, z=${r.z.toFixed(4)})`);
+    console.log(`[COMMIT] Fitting error: ${result.error?.toFixed(6) || 'N/A'}`);
 
-    // 2. 更新对象旋转
+    // 更新对象旋转（提取物理形变中的刚体旋转分量）
     this.quaternion = result.rotation;
 
-    // 3. 重置粒子到理想位置
-    // [方案B] ideal = this.center + rotation * referenceLocal
-    for (let i = 0; i < particles.length; i++) {
-      const p = particles[i];
-      const refLocal = this._referenceShape[i];  // 已经是局部坐标
-      // 直接使用局部坐标，应用旋转，再加上当前中心
-      const ideal = this._bodyToWorld(
-        refLocal,           // 局部坐标（已经相对于原点）
-        this.center,        // 旋转中心 = 当前物心
-        result.rotation
-      );
+    // [设计决策] 不重置粒子位置，尊重物理自然运动
+    // 粒子保持在物理模拟结束时的位置
 
-      // 首个粒子的详细日志
-      if (i === 0) {
-        console.log(`[COMMIT] p[0] refLocal = (${refLocal.x.toFixed(4)}, ${refLocal.y.toFixed(4)}, ${refLocal.z.toFixed(4)})`);
-        console.log(`[COMMIT] p[0] BEFORE = (${p.position.x.toFixed(4)}, ${p.position.y.toFixed(4)}, ${p.position.z.toFixed(4)})`);
-        console.log(`[COMMIT] p[0] ideal = (${ideal.x.toFixed(4)}, ${ideal.y.toFixed(4)}, ${ideal.z.toFixed(4)})`);
-      }
-
-      // 重置粒子到理想位置
-      p.position.x = ideal.x;
-      p.position.y = ideal.y;
-      p.position.z = ideal.z;
-      p.oldPosition.x = ideal.x;
-      p.oldPosition.y = ideal.y;
-      p.oldPosition.z = ideal.z;
-
-      // 清零速度和力
-      p.velocity.x = 0;
-      p.velocity.y = 0;
-      p.velocity.z = 0;
-      p.force.x = 0;
-      p.force.y = 0;
-      p.force.z = 0;
-    }
-
-    // 4. 同步当前位置到 constructionPoints
+    // 同步当前位置到 constructionPoints（保持渲染一致性）
     this._syncPhysicsToConstruction();
 
-    console.log(`[COMMIT] AFTER sync: cp[0] = (${this.constructionPoints[0].x.toFixed(4)}, ${this.constructionPoints[0].y.toFixed(4)}, ${this.constructionPoints[0].z.toFixed(4)})`);
-
     if (this.verbose) {
-      console.log('[Object] commitPhysicsState complete (particles reset to ideal shape)');
+      console.log('[Object] commitPhysicsState complete (rotation extracted, particles unchanged)');
     }
   }
 

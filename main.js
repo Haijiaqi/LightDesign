@@ -2789,22 +2789,10 @@ function physicsStep(dt) {
         if (shouldSettle) {
             obj._physicsActive = false;
 
-            // === 详细调试日志 ===
-            const particles = obj.representation?.physicsState?.particles || [];
-            const cp0 = obj.constructionPoints[0];
-            const p0 = particles[0];
-            console.log(`[SETTLE T=${performance.now().toFixed(1)}] BEFORE commit (step SKIPPED):`);
-            console.log(`  particle[0].position = (${p0.position.x.toFixed(4)}, ${p0.position.y.toFixed(4)}, ${p0.position.z.toFixed(4)})`);
-            console.log(`  cp[0].x/y/z = (${cp0.x.toFixed(4)}, ${cp0.y.toFixed(4)}, ${cp0.z.toFixed(4)})`);
-
-            // [Phase 17] 执行重置（内部会做 sync）
+            // 提取旋转姿态（不重置粒子位置，尊重物理自然运动）
             if (obj.commitPhysicsState) {
                 obj.commitPhysicsState();
             }
-
-            console.log(`[SETTLE T=${performance.now().toFixed(1)}] AFTER commit:`);
-            console.log(`  particle[0].position = (${p0.position.x.toFixed(4)}, ${p0.position.y.toFixed(4)}, ${p0.position.z.toFixed(4)})`);
-            console.log(`  cp[0].x/y/z = (${cp0.x.toFixed(4)}, ${cp0.y.toFixed(4)}, ${cp0.z.toFixed(4)})`);
 
             // [配置化] 根据 revertOnSettle 决定是否恢复固有显示
             if (CONFIG.physicsDisplay.revertOnSettle) {
